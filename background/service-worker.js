@@ -132,7 +132,7 @@ function mapArticleRecord(r) {
     );
 
     const tier2Records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
     );
 
     const tier1 = tier1Records.map(mapArticleRecord);

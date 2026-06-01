@@ -130,7 +130,8 @@ function renderOverview(ptNames, articles) {
       h('th', { style: { width: '70px' } }, 'Res %'),
       h('th', { style: { width: '70px' } }, 'Clusters'),
       h('th', { style: { width: '70px' } }, 'Articles'),
-      h('th', { style: { width: '70px' } }, 'Gaps')
+      h('th', { style: { width: '70px' } }, 'Gaps'),
+      h('th', { style: { width: '90px' } }, 'Actions')
     )),
     h('tbody', null)
   );
@@ -145,7 +146,8 @@ function renderOverview(ptNames, articles) {
       h('td', null, r.gapCount > 0
         ? h('span', { class: 'pill pill--error' }, String(r.gapCount))
         : h('span', { class: 'pill pill--success' }, '0')
-      )
+      ),
+      h('td', null, h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleFindGaps(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Find Gaps'))
     );
     tbody.appendChild(row);
   });

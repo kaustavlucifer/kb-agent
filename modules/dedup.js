@@ -34,13 +34,38 @@ Rules:
 function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
   wrap.style.position = 'relative';
-  const btn = h('button', { class: 'btn btn--secondary btn--sm' },
-    `${label}${selected.length ? ` (${selected.length})` : ''}`
-  );
-  btn.addEventListener('click', toggleDropdown);
-  wrap.appendChild(btn);
+  wrap.style.display = 'inline-block';
 
-  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: '500', minWidth: '180px', boxShadow: 'var(--shadow-md)' } });
+  const trigger = h('div', {
+    style: {
+      padding: '6px 12px',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius-sm)',
+      fontSize: '12px',
+      cursor: 'pointer',
+      background: 'var(--surface)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: '140px',
+      justifyContent: 'space-between'
+    }
+  },
+    h('span', { style: { color: selected.length ? 'var(--text-primary)' : 'var(--text-muted)' } },
+      selected.length ? `${label} (${selected.length})` : label
+    ),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '▼')
+  );
+  trigger.addEventListener('click', toggleDropdown);
+  wrap.appendChild(trigger);
+
+  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '240px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
+
+  if (selected.length) {
+    const clearBtn = h('div', { style: { padding: '4px 8px', fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', borderBottom: '1px solid var(--border)', marginBottom: '4px' } }, 'Clear all');
+    clearBtn.addEventListener('click', (e) => { e.stopPropagation(); onChange([]); });
+    dropdown.appendChild(clearBtn);
+  }
 
   options.forEach(opt => {
     const checked = selected.includes(opt.value);
@@ -51,10 +76,12 @@ function multiSelect(id, label, options, selected, onChange) {
       const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
       onChange(newSel);
     });
-    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer' } },
+    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-xs)' } },
       checkbox,
       h('span', null, opt.label)
     );
+    item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
+    item.addEventListener('mouseleave', () => { item.style.background = ''; });
     dropdown.appendChild(item);
   });
   wrap.appendChild(dropdown);
@@ -119,8 +146,15 @@ function render() {
   );
   detectBtn.addEventListener('click', detectDuplicates);
 
+  const scopedArticles = _filterPt.length ? articles.filter(a => _filterPt.includes(a.topicName)) : articles;
+  const batchCount = Math.ceil(scopedArticles.length / DEDUP_BATCH_SIZE);
+  const scopeInfo = _filterPt.length
+    ? `Filtered: ${scopedArticles.length} articles in ${_filterPt.length} P&Ts, ${batchCount} batches`
+    : `All P&Ts: ${scopedArticles.length} articles, ${batchCount} batches`;
+
   const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
     ptMulti,
+    h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, scopeInfo),
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
       running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),

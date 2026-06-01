@@ -39,13 +39,38 @@ const CRITERIA = [
 function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
   wrap.style.position = 'relative';
-  const btn = h('button', { class: 'btn btn--secondary btn--sm' },
-    `${label}${selected.length ? ` (${selected.length})` : ''}`
-  );
-  btn.addEventListener('click', toggleDropdown);
-  wrap.appendChild(btn);
+  wrap.style.display = 'inline-block';
 
-  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: '500', minWidth: '180px', boxShadow: 'var(--shadow-md)' } });
+  const trigger = h('div', {
+    style: {
+      padding: '6px 12px',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius-sm)',
+      fontSize: '12px',
+      cursor: 'pointer',
+      background: 'var(--surface)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      minWidth: '140px',
+      justifyContent: 'space-between'
+    }
+  },
+    h('span', { style: { color: selected.length ? 'var(--text-primary)' : 'var(--text-muted)' } },
+      selected.length ? `${label} (${selected.length})` : label
+    ),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '▼')
+  );
+  trigger.addEventListener('click', toggleDropdown);
+  wrap.appendChild(trigger);
+
+  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '240px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
+
+  if (selected.length) {
+    const clearBtn = h('div', { style: { padding: '4px 8px', fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', borderBottom: '1px solid var(--border)', marginBottom: '4px' } }, 'Clear all');
+    clearBtn.addEventListener('click', (e) => { e.stopPropagation(); onChange([]); });
+    dropdown.appendChild(clearBtn);
+  }
 
   options.forEach(opt => {
     const checked = selected.includes(opt.value);
@@ -56,10 +81,12 @@ function multiSelect(id, label, options, selected, onChange) {
       const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
       onChange(newSel);
     });
-    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer' } },
+    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-xs)' } },
       checkbox,
       h('span', null, opt.label)
     );
+    item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
+    item.addEventListener('mouseleave', () => { item.style.background = ''; });
     dropdown.appendChild(item);
   });
   wrap.appendChild(dropdown);
@@ -418,19 +445,40 @@ async function scoreAll() {
 async function scoreOne(article) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
-  toast('Scoring…', 'info');
+
+  const streamEl = h('div', { id: 'score-stream', style: { whiteSpace: 'pre-wrap', fontSize: '12px', lineHeight: '1.5', maxHeight: '400px', overflowY: 'auto', fontFamily: 'var(--font-mono)' } }, spinner('md'));
+  const content = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `Scoring: #${article.articleNumber} — ${article.title}`),
+    streamEl
+  );
+  modal(`Score: ${article.articleNumber}`, content, { wide: true });
+
   const bodyMap = await fetchBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
   const enriched = { ...article, ...body };
+  const { system, user, maxes } = buildScoringPrompt(enriched);
+
   try {
-    const result = await scoreArticle(enriched);
+    const fullText = await streamClaude({
+      system,
+      messages: [{ role: 'user', content: user }],
+      maxTokens: 2200,
+      temperature: 0.1,
+      model: SCORING_MODEL,
+      onDelta: (chunk, full) => {
+        const el = document.getElementById('score-stream');
+        if (el) el.textContent = full;
+      }
+    });
+
+    const result = parseScoreResponse(fullText, maxes);
     const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
     setState('kb.scores', scores);
     await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
     toast(`Score: ${result.overall}/100`, result.overall >= SCORE_HIGH_THRESHOLD ? 'success' : 'warning');
-    showScoreDetail(article, result);
   } catch (e) {
-    toast('Scoring failed: ' + e.message, 'error');
+    const el = document.getElementById('score-stream');
+    if (el) el.textContent = 'Error: ' + e.message;
   }
 }
 

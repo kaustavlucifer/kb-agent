@@ -34,7 +34,7 @@ export async function handleAnalyze(port, msg) {
   const ranked = rankArticles(searchResults, allQueries);
   const topArticles = ranked.slice(0, TOP_K);
 
-  const scoredArticles = await mapWithConcurrency(topArticles, async (a) => {
+  const scoredArticles = await mapWithConcurrency(topArticles, 5, async (a) => {
     try {
       const resp = await callClaudeFast({
         system: 'Score this article 0-100 for relevance to the case. Return ONLY a number.',
@@ -47,7 +47,7 @@ export async function handleAnalyze(port, msg) {
     } catch {
       return { id: a.Id, title: a.Title, articleNumber: a.ArticleNumber, score: 0, url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view` };
     }
-  }, 5);
+  });
 
   send({ type: 'meta', topArticles: scoredArticles });
 
