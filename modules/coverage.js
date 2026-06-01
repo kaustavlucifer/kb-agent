@@ -1,15 +1,13 @@
-import { h, spinner, emptyState, toast, progressBar } from '../shared/ui.js';
-import { setState, getState, subscribe } from '../shared/state.js';
-import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS, PT_LOW_COVERAGE_ARTICLES } from '../shared/config.js';
+import { h, spinner, toast, modal } from '../shared/ui.js';
+import { getState, subscribe } from '../shared/state.js';
+import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS } from '../shared/config.js';
 
 let _container = null;
 let _unsubs = [];
 let _data = null;
 let _selectedPt = null;
-let _ptAnalysis = {};
-let _ptAnalysisLoading = {};
-let _ptGaps = {};
-let _ptGapsLoading = {};
+let _sortCol = 'totalConvs';
+let _sortDir = 'desc';
 
 function renderMarkdown(text, container) {
   if (!text) return;
@@ -86,6 +84,16 @@ function renderView() {
   }
 }
 
+function toggleSort(col) {
+  if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
+  else { _sortCol = col; _sortDir = 'asc'; }
+  renderView();
+}
+
+function sortIndicator(col) {
+  return _sortCol === col ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+}
+
 function renderOverview(ptNames, articles) {
   const rows = ptNames.map(pt => {
     const ptData = _data[pt];
@@ -99,7 +107,16 @@ function renderOverview(ptNames, articles) {
       return matched.length < 1;
     }).length;
     return { pt, totalConvs, resPct, clusterCount: clusters.length, gapCount, articleCount: ptArticles.length };
-  }).sort((a, b) => b.totalConvs - a.totalConvs);
+  });
+
+  rows.sort((a, b) => {
+    let va, vb;
+    if (_sortCol === 'pt') { va = a.pt.toLowerCase(); vb = b.pt.toLowerCase(); }
+    else { va = a[_sortCol] ?? 0; vb = b[_sortCol] ?? 0; }
+    if (va < vb) return _sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return _sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
 
   const summaryCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
     h('div', { style: { display: 'flex', gap: '24px', fontSize: '12px' } },
@@ -125,12 +142,12 @@ function renderOverview(ptNames, articles) {
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
-      h('th', null, 'Product & Topic'),
-      h('th', { style: { width: '90px' } }, 'Convs'),
-      h('th', { style: { width: '70px' } }, 'Res %'),
-      h('th', { style: { width: '70px' } }, 'Clusters'),
-      h('th', { style: { width: '70px' } }, 'Articles'),
-      h('th', { style: { width: '70px' } }, 'Gaps'),
+      h('th', { style: { cursor: 'pointer' }, onClick: () => toggleSort('pt') }, 'Product & Topic' + sortIndicator('pt')),
+      h('th', { style: { width: '90px', cursor: 'pointer' }, onClick: () => toggleSort('totalConvs') }, 'Convs' + sortIndicator('totalConvs')),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => toggleSort('resPct') }, 'Res %' + sortIndicator('resPct')),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => toggleSort('clusterCount') }, 'Clusters' + sortIndicator('clusterCount')),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => toggleSort('articleCount') }, 'Articles' + sortIndicator('articleCount')),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => toggleSort('gapCount') }, 'Gaps' + sortIndicator('gapCount')),
       h('th', { style: { width: '90px' } }, 'Actions')
     )),
     h('tbody', null)
@@ -148,8 +165,7 @@ function renderOverview(ptNames, articles) {
         : h('span', { class: 'pill pill--success' }, '0')
       ),
       h('td', { style: { whiteSpace: 'nowrap' } },
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleFindGaps(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Gaps'),
-        h('button', { class: 'btn btn--ghost btn--sm', style: { marginLeft: '4px' }, onClick: (e) => { e.stopPropagation(); handleAiSummary(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'AI')
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleAiSummary(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Analyze')
       )
     );
     tbody.appendChild(row);
@@ -174,45 +190,13 @@ function renderPtDetail(ptName, articles) {
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
         h('button', {
           class: 'btn btn--primary btn--sm',
-          disabled: _ptGapsLoading[ptName],
-          onClick: () => handleFindGaps(ptName, clusters, ptArticles)
-        }, _ptGapsLoading[ptName] ? 'Analyzing…' : 'Find Gaps'),
-        h('button', {
-          class: 'btn btn--secondary btn--sm',
-          disabled: _ptAnalysisLoading[ptName],
           onClick: () => handleAiSummary(ptName, clusters, ptArticles)
-        }, _ptAnalysisLoading[ptName] ? 'Generating…' : 'AI Summary'),
+        }, 'Analyze'),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => { _selectedPt = null; renderView(); document.getElementById('pt-select').value = ''; } }, '← All P&Ts')
       )
     )
   );
   _container.appendChild(headerCard);
-
-  if (_ptAnalysis[ptName]) {
-    const narrativeContainer = h('div', null);
-    renderMarkdown(_ptAnalysis[ptName], narrativeContainer);
-    const analysisCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
-      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AI Coverage Summary'),
-      narrativeContainer
-    );
-    _container.appendChild(analysisCard);
-  }
-
-  if (_ptAnalysisLoading[ptName] && !_ptAnalysis[ptName]) {
-    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '16px', textAlign: 'center' } }, spinner('sm')));
-  }
-
-  if (_ptGaps[ptName]) {
-    const gapCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
-      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Gap Analysis'),
-      h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, _ptGaps[ptName])
-    );
-    _container.appendChild(gapCard);
-  }
-
-  if (_ptGapsLoading[ptName] && !_ptGaps[ptName]) {
-    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '16px', textAlign: 'center' } }, spinner('sm')));
-  }
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
@@ -254,42 +238,38 @@ function renderPtDetail(ptName, articles) {
   _container.appendChild(table);
 }
 
-function handleFindGaps(ptName, clusters, articles) {
-  _ptGapsLoading[ptName] = true;
-  renderView();
-  const port = chrome.runtime.connect({ name: 'kbs-coverage' });
-  port.postMessage({ clusters: Object.fromEntries(clusters.map(c => [c.label || c.name, { keywords: [c.name, c.label, ...(c.top_utterances || []).slice(0, 3)], conversations: c.conversations || 0 }])), articles });
-  port.onMessage.addListener((resp) => {
-    if (resp.type === 'done') {
-      const gapText = (resp.gaps || []).map(g => `${g.cluster} (${g.conversations} convs) — ${g.coverage} [${g.priority}]`).join('\n') || 'No gaps found.';
-      _ptGaps[ptName] = gapText;
-      _ptGapsLoading[ptName] = false;
-      port.disconnect();
-      renderView();
-    } else if (resp.type === 'error') {
-      _ptGapsLoading[ptName] = false;
-      toast(resp.error, 'error');
-      port.disconnect();
-      renderView();
-    }
-  });
-}
+async function handleAiSummary(ptName, clusters, ptArticles) {
+  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
 
-function handleAiSummary(ptName, clusters, articles) {
-  _ptAnalysisLoading[ptName] = true;
-  renderView();
-  chrome.runtime.sendMessage({
-    action: 'COVERAGE_ANALYZE_PT',
-    ptName,
-    clusters,
-    articles
-  }, (resp) => {
-    _ptAnalysisLoading[ptName] = false;
-    if (resp && resp.success) {
-      _ptAnalysis[ptName] = resp.narrative;
-    } else {
-      toast((resp && resp.error) || 'AI analysis failed', 'error');
-    }
-    renderView();
+  const statsHeader = h('div', { style: { marginBottom: '12px', padding: '8px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '11px', color: 'var(--text-secondary)' } },
+    `${clusters.length} clusters · ${clusters.reduce((s, c) => s + (c.conversations || 0), 0).toLocaleString()} conversations · ${ptArticles.length} KB articles`
+  );
+
+  const content = h('div', null, statsHeader, streamEl);
+
+  modal(`Coverage: ${ptName}`, content, {
+    wide: true,
+    primaryAction: { label: 'Copy', handler: () => {
+      navigator.clipboard.writeText(document.getElementById('coverage-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
+    }}
   });
+
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      action: 'COVERAGE_ANALYZE_PT',
+      ptName,
+      clusters,
+      articles: ptArticles
+    });
+    const el = document.getElementById('coverage-stream');
+    if (el && resp.success) {
+      el.textContent = '';
+      renderMarkdown(resp.narrative, el);
+    } else if (el) {
+      el.textContent = 'Error: ' + (resp.error || 'Unknown error');
+    }
+  } catch (e) {
+    const el = document.getElementById('coverage-stream');
+    if (el) el.textContent = 'Error: ' + e.message;
+  }
 }

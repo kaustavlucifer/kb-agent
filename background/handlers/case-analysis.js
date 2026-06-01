@@ -121,18 +121,30 @@ async function extractAbstract(caseRecord, comments) {
 }
 
 async function searchKB(apiBase, sid, queries) {
+  const data = await chrome.storage.local.get(['kba_all_articles']);
+  const allArticles = data.kba_all_articles || [];
+  if (!allArticles.length) return fallbackSoslSearch(apiBase, sid, queries);
+
+  const terms = queries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  const scored = allArticles.map(a => {
+    const text = `${a.title || ''} ${a.summary || ''} ${a.articleNumber || ''}`.toLowerCase();
+    const score = terms.reduce((s, t) => s + (text.includes(t) ? 1 : 0), 0);
+    return { ...a, Id: a.id, Title: a.title, Summary: a.summary, ArticleNumber: a.articleNumber, UrlName: a.urlName, ValidationStatus: a.validationStatus, _score: score };
+  }).filter(a => a._score > 0).sort((a, b) => b._score - a._score);
+
+  return scored.slice(0, 20);
+}
+
+async function fallbackSoslSearch(apiBase, sid, queries) {
   const seen = new Set();
   const results = [];
   const uniqueQueries = [...new Set(queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(Boolean))].slice(0, MAX_SOSL_QUERIES);
-
   for (const q of uniqueQueries) {
     try {
       const records = await sfSearch(apiBase, sid,
         `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus WHERE PublishStatus = 'Online' AND Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
       );
-      for (const r of records) {
-        if (!seen.has(r.Id)) { seen.add(r.Id); results.push(r); }
-      }
+      for (const r of records) { if (!seen.has(r.Id)) { seen.add(r.Id); results.push(r); } }
     } catch {}
   }
   return results;
@@ -179,11 +191,13 @@ async function generateSuggestionsStreaming(articles, bodyMap, caseRecord, comme
         messages: [{ role: 'user', content: `ARTICLE: #${article.ArticleNumber} "${article.Title}"\nDESCRIPTION: ${descText.slice(0, 2000)}\nRESOLUTION: ${resText.slice(0, 2000)}\n\nCASE: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 1500,
         temperature: 0.2,
-        onDelta: (chunk) => { send({ type: 'delta', chunk }); }
+        onDelta: () => {}
       });
       const parsed = extractJson(fullText);
       if (parsed?.suggestions) {
-        parsed.suggestions.forEach(s => allSuggestions.push({ ...s, articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title }));
+        const articleSugs = parsed.suggestions.map(s => ({ ...s, articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title }));
+        allSuggestions.push(...articleSugs);
+        send({ type: 'suggestion-ready', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, suggestions: articleSugs });
       }
     } catch {}
   }

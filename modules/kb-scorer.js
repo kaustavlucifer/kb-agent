@@ -12,6 +12,8 @@ let _filterText = '';
 let _filterPt = [];
 let _filterScore = [];
 let _filterValidation = [];
+let _sortCol = 'articleNumber';
+let _sortDir = 'asc';
 
 const SCORE_META_FIELDS = [
   'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
@@ -102,6 +104,12 @@ function multiSelect(id, label, options, selected, onChange) {
   }
 
   return wrap;
+}
+
+function toggleKbSort(col) {
+  if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
+  else { _sortCol = col; _sortDir = 'asc'; }
+  render();
 }
 
 export function mount(container) {
@@ -244,12 +252,30 @@ function render() {
     });
   });
 
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (_sortCol === 'score') {
+      va = scores[a.id]?.overall ?? -1;
+      vb = scores[b.id]?.overall ?? -1;
+    } else {
+      va = (a[_sortCol] || '').toLowerCase();
+      vb = (b[_sortCol] || '').toLowerCase();
+    }
+    if (va < vb) return _sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return _sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  function kbSortIndicator(col) {
+    return _sortCol === col ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  }
+
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
-      h('th', { style: { width: '70px' } }, '#'),
-      h('th', null, 'Title'),
-      h('th', { style: { width: '140px' } }, 'P&T'),
-      h('th', { style: { width: '60px' } }, 'Score'),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => { toggleKbSort('articleNumber'); } }, '#' + kbSortIndicator('articleNumber')),
+      h('th', { style: { cursor: 'pointer' }, onClick: () => { toggleKbSort('title'); } }, 'Title' + kbSortIndicator('title')),
+      h('th', { style: { width: '140px', cursor: 'pointer' }, onClick: () => { toggleKbSort('topicName'); } }, 'P&T' + kbSortIndicator('topicName')),
+      h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + kbSortIndicator('score')),
       h('th', { style: { width: '120px' } }, 'Actions')
     )),
     h('tbody', null)

@@ -227,66 +227,82 @@ async function clearResults() {
 }
 
 async function detectDuplicates() {
-  let articles = getState('kb.articles') || [];
-  if (_filterPt.length) articles = articles.filter(a => _filterPt.includes(a.topicName));
-  if (articles.length < 2) { toast('Need at least 2 articles in selected P&T.', 'error'); return; }
+  try {
+    let articles = getState('kb.articles') || [];
+    if (_filterPt.length) articles = articles.filter(a => _filterPt.includes(a.topicName));
+    if (articles.length < 2) { toast('Need at least 2 articles in selected P&T.', 'error'); return; }
 
-  const session = await detectSession();
-  if (!session.sid) { toast('No SF session.', 'error'); return; }
+    const session = await detectSession();
+    if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-  const ptGroups = new Map();
-  for (const a of articles) {
-    const pt = a.topicName || '__other__';
-    if (!ptGroups.has(pt)) ptGroups.set(pt, []);
-    ptGroups.get(pt).push(a);
-  }
-
-  const workQueue = [];
-  for (const [ptName, ptArticles] of ptGroups) {
-    if (ptArticles.length < 2) continue;
-    for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
-      workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
+    const ptGroups = new Map();
+    for (const a of articles) {
+      const pt = a.topicName || '__other__';
+      if (!ptGroups.has(pt)) ptGroups.set(pt, []);
+      ptGroups.get(pt).push(a);
     }
+
+    const workQueue = [];
+    for (const [ptName, ptArticles] of ptGroups) {
+      if (ptArticles.length < 2) continue;
+      for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
+        workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
+      }
+    }
+
+    if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
+
+    setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
+
+    const bodyIds = articles.map(a => a.id);
+    const bodyMap = await fetchBodiesForDedup(session, bodyIds);
+
+    const allPairs = [];
+    let done = 0;
+
+    await mapWithConcurrency(workQueue, DEDUP_CONCURRENCY, async (item) => {
+      setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+      const enriched = item.batch.map(a => ({
+        ...a,
+        description: bodyMap.get(a.id)?.description || '',
+        resolution: bodyMap.get(a.id)?.resolution || ''
+      }));
+      const pairs = await runDedupBatch(enriched);
+      allPairs.push(...pairs);
+      done++;
+      setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+    });
+
+    console.log('[KB-Agent] Dedup: found', allPairs.length, 'raw pairs from', workQueue.length, 'batches');
+
+    const articleMap = new Map();
+    articles.forEach(a => {
+      articleMap.set(a.articleNumber, a);
+      articleMap.set(String(a.articleNumber), a);
+    });
+
+    const enrichedPairs = allPairs
+      .filter(p => p.confidence >= 0.85)
+      .map(p => ({
+        ...p,
+        ptName: articleMap.get(String(p.articleA))?.topicName || '',
+        titleA: articleMap.get(String(p.articleA))?.title || '',
+        titleB: articleMap.get(String(p.articleB))?.title || ''
+      }))
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+      .slice(0, 30);
+
+    console.log('[KB-Agent] Dedup: enriched', enrichedPairs.length, 'pairs after filtering');
+
+    setState('dedup.pairs', enrichedPairs);
+    setState('dedup.running', null);
+    await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
+    toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
+  } catch (e) {
+    console.error('[KB-Agent] Dedup detection failed:', e);
+    toast('Detection failed: ' + e.message, 'error');
+    setState('dedup.running', null);
   }
-
-  if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
-
-  setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
-
-  const bodyIds = articles.map(a => a.id);
-  const bodyMap = await fetchBodiesForDedup(session, bodyIds);
-
-  const allPairs = [];
-  let done = 0;
-
-  await mapWithConcurrency(workQueue, DEDUP_CONCURRENCY, async (item) => {
-    setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
-    const enriched = item.batch.map(a => ({
-      ...a,
-      description: bodyMap.get(a.id)?.description || '',
-      resolution: bodyMap.get(a.id)?.resolution || ''
-    }));
-    const pairs = await runDedupBatch(enriched);
-    allPairs.push(...pairs);
-    done++;
-    setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
-  });
-
-  const articleMap = new Map(articles.map(a => [a.articleNumber, a]));
-  const enrichedPairs = allPairs
-    .filter(p => p.confidence >= 0.85)
-    .map(p => ({
-      ...p,
-      titleA: articleMap.get(p.articleA)?.title || '',
-      titleB: articleMap.get(p.articleB)?.title || ''
-    }))
-    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
-    .slice(0, 30);
-
-  setState('dedup.pairs', enrichedPairs);
-  setState('dedup.running', null);
-  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
-  toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
 }
 
 async function fetchBodiesForDedup(session, ids) {
@@ -323,8 +339,11 @@ async function runDedupBatch(articles) {
       model: SCORING_MODEL
     });
     const parsed = extractJson(extractText(resp));
-    return (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.confidence >= 0.85);
-  } catch {
+    const pairs = (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.confidence >= 0.85);
+    if (pairs.length) console.log('[KB-Agent] Dedup batch returned', pairs.length, 'pairs');
+    return pairs;
+  } catch (e) {
+    console.error('[KB-Agent] Dedup batch error:', e);
     return [];
   }
 }

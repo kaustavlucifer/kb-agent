@@ -119,19 +119,41 @@ function renderStreaming() {
   _container.textContent = '';
 
   const topArticles = getState('case.topArticles') || [];
+  const suggestions = getState('case.suggestions') || [];
+
   const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
 
   const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
   sidebar.appendChild(renderSidebarArticles(topArticles));
   grid.appendChild(sidebar);
 
-  const main = h('div', { style: { flex: '1', overflow: 'auto' } },
-    h('div', { class: 'card', style: { textAlign: 'center', padding: '32px' } },
-      spinner('md'),
-      h('div', { style: { marginTop: '12px', fontSize: '13px', fontWeight: '500', color: 'var(--primary)' } }, 'Generating recommendations…'),
-      h('div', { style: { marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)' } }, 'Analyzing case context and matching against knowledge base')
-    )
-  );
+  const main = h('div', { style: { flex: '1', overflow: 'auto' } });
+
+  if (suggestions.length) {
+    const grouped = groupByArticle(suggestions);
+    for (const [key, sugs] of Object.entries(grouped)) {
+      const card = h('div', { class: 'card', style: { marginBottom: '12px' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px' } }, `#${sugs[0].articleNumber} — ${sugs[0].articleTitle}`)
+      );
+      sugs.forEach((sug, i) => {
+        card.appendChild(h('div', { style: { padding: '8px 0', borderBottom: i < sugs.length - 1 ? '1px solid var(--border)' : 'none' } },
+          h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '4px' } },
+            h('span', { class: `pill pill--${impactColor(sug.impact)}` }, sug.impact || 'MEDIUM'),
+            h('span', { style: { fontWeight: '500', fontSize: '12px' } }, sug.title || '')
+          ),
+          sug.location ? h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' } }, `Location: ${sug.location}`) : null,
+          sug.content ? renderMarkdown(sug.content) : null
+        ));
+      });
+      main.appendChild(card);
+    }
+  }
+
+  main.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '16px', justifyContent: 'center' } },
+    spinner('sm'),
+    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, suggestions.length ? 'Generating more suggestions…' : 'Generating recommendations…')
+  ));
+
   grid.appendChild(main);
   _container.appendChild(grid);
 }
@@ -456,6 +478,7 @@ function startAnalysis(caseId) {
   setState('case.result', null);
   setState('case.streamText', '');
   setState('case.topArticles', null);
+  setState('case.suggestions', []);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
@@ -468,10 +491,25 @@ function onPortMessage(msg) {
     case 'progress':
       setState('case.progress', { ...getState('case.progress'), step: msg.step ?? 0, label: msg.label || '', caseNumber: msg.caseNumber || getState('case.progress')?.caseNumber });
       break;
-    case 'meta':
+    case 'meta': {
       setState('case.topArticles', msg.topArticles || []);
+      const kbScores = getState('kb.scores') || {};
+      const updated = { ...kbScores };
+      (msg.topArticles || []).forEach(a => {
+        if (a.score != null && !updated[a.id]) {
+          updated[a.id] = { overall: a.score, criteria: [], error: null, source: 'case-analysis' };
+        }
+      });
+      setState('kb.scores', updated);
       setState('case.view', 'streaming');
       break;
+    }
+    case 'suggestion-ready': {
+      const existing = getState('case.suggestions') || [];
+      setState('case.suggestions', [...existing, ...msg.suggestions]);
+      if (getState('case.view') === 'streaming') renderStreaming();
+      break;
+    }
     case 'delta':
       setState('case.streamText', (getState('case.streamText') || '') + (msg.chunk || ''));
       break;
