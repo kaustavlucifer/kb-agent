@@ -17,7 +17,8 @@ DO NOT FLAG:
 Return JSON only:
 {"pairs":[{"articleA":"<number>","articleB":"<number>","relationship":"DUPLICATE"|"SUPERSEDED","keepArticle":"<number to keep>","confidence":0.85-1.0,"reason":"<what content is identical>"}]}
 
-Only flag pairs with confidence >= 0.85. If uncertain, do NOT flag.`;
+Only flag pairs with confidence >= 0.85. If uncertain, do NOT flag.
+- NEVER flag an article as a duplicate of ITSELF. articleA and articleB must be DIFFERENT article numbers.`;
 
 export async function handleDedup(port, msg) {
   const articles = msg.articles || [];
@@ -88,7 +89,7 @@ async function runBatch(articles) {
       model: SCORING_MODEL
     });
     const parsed = extractJson(extractText(resp));
-    return (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.confidence >= 0.85);
+    return (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.articleA !== p.articleB && p.confidence >= 0.85);
   } catch {
     return [];
   }

@@ -12,17 +12,56 @@ let _sortDir = 'desc';
 function renderMarkdown(text, container) {
   if (!text) return;
   const lines = text.split('\n');
-  lines.forEach(line => {
-    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '8px', color: 'var(--text-primary)' } }, line.slice(4)));
-    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '10px' } }, line.slice(3)));
-    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '12px' } }, line.slice(2)));
-    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5' } }, '• ' + line.slice(2)));
-    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5' } }, line));
-    else if (line.startsWith('|')) {
-      container.appendChild(h('div', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px', padding: '2px 0', borderBottom: '1px solid var(--border)' } }, line));
+  let inTable = false;
+  let tableRows = [];
+
+  function flushTable() {
+    if (!tableRows.length) return;
+    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '8px' } });
+    const headerRow = tableRows[0];
+    const separatorIdx = tableRows.findIndex(r => /^[\s|:-]+$/.test(r.replace(/\|/g, '').replace(/[-:]/g, '')));
+    const dataStart = separatorIdx >= 0 ? separatorIdx + 1 : 1;
+
+    if (headerRow) {
+      const cells = headerRow.split('|').map(c => c.trim()).filter(Boolean);
+      const thead = h('thead', null, h('tr', null, ...cells.map(c => h('th', null, c))));
+      table.appendChild(thead);
     }
+
+    const tbody = h('tbody', null);
+    for (let i = dataStart; i < tableRows.length; i++) {
+      const cells = tableRows[i].split('|').map(c => c.trim()).filter(Boolean);
+      if (cells.length) {
+        tbody.appendChild(h('tr', null, ...cells.map(c => h('td', { style: { fontSize: '11px' } }, c))));
+      }
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+    tableRows = [];
+    inTable = false;
+  }
+
+  lines.forEach(line => {
+    if (line.trim().startsWith('|')) {
+      inTable = true;
+      tableRows.push(line.trim());
+      return;
+    }
+
+    if (inTable) {
+      flushTable();
+    }
+
+    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '10px', marginBottom: '4px', color: 'var(--text-primary)' } }, line.slice(4)));
+    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '12px', marginBottom: '4px' } }, line.slice(3)));
+    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '14px', marginBottom: '6px' } }, line.slice(2)));
+    else if (line.startsWith('- ') || line.startsWith('* ')) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5', marginBottom: '2px' } }, '• ' + line.slice(2)));
+    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5', marginBottom: '2px' } }, line));
+    else if (line.startsWith('**') && line.endsWith('**')) container.appendChild(h('div', { style: { fontWeight: '600', fontSize: '12px', marginTop: '6px' } }, line.replace(/\*\*/g, '')));
     else if (line.trim()) container.appendChild(h('p', { style: { margin: '3px 0', fontSize: '12px', lineHeight: '1.5' } }, line));
   });
+
+  if (inTable) flushTable();
 }
 
 export function mount(container) {

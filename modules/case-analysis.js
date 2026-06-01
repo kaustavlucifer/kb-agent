@@ -174,7 +174,6 @@ function renderResult() {
   const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
   sidebar.appendChild(renderSidebarArticles(topArticles));
   sidebar.appendChild(renderSidebarQuality(structured));
-  sidebar.appendChild(renderSidebarCoverage());
   grid.appendChild(sidebar);
 
   const main = h('div', { style: { flex: '1', overflow: 'auto' } });
@@ -286,54 +285,45 @@ function renderSidebarQuality(structured) {
   const isCollapsed = _collapsedSections['quality'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
   const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['quality'] = !_collapsedSections['quality']; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Quality Checks'),
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Quality & Readiness'),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
   section.appendChild(header);
 
   if (!isCollapsed) {
-    const body = h('div', null);
-    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' } },
-      h('span', { style: { color: 'var(--text-muted)' } }, 'Confidence'),
-      h('span', { style: { fontWeight: '600', color: structured.confidence === 'HIGH' ? 'var(--success)' : structured.confidence === 'MEDIUM' ? 'var(--warning)' : 'var(--error)' } }, structured.confidence || 'N/A')
+    const body = h('div', { style: { fontSize: '11px' } });
+
+    const items = [
+      ['Action', formatAction(structured.action)],
+      ['Confidence', structured.confidence || 'N/A'],
+      ['Articles Found', String((getState('case.topArticles') || []).length)],
+      ['Suggestions', String((structured.suggestions || []).length)]
+    ];
+
+    if (structured.newArticleDraft) {
+      items.push(['Draft Sections', String((structured.newArticleDraft.sections || []).length)]);
+    }
+
+    items.push(['AGF Readiness', structured.confidence === 'HIGH' ? 'Ready for Agentforce' : 'Needs review']);
+
+    items.forEach(([label, value]) => {
+      body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid var(--border)' } },
+        h('span', { style: { color: 'var(--text-muted)' } }, label),
+        h('span', { style: { fontWeight: '500', color: label === 'Confidence' ? (value === 'HIGH' ? 'var(--success)' : value === 'MEDIUM' ? 'var(--warning)' : 'var(--error)') : 'var(--text-primary)' } }, value)
+      ));
+    });
+
+    body.appendChild(h('div', { style: { marginTop: '8px', padding: '6px 8px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '10px', color: 'var(--text-secondary)', lineHeight: '1.4' } },
+      structured.confidence === 'HIGH'
+        ? 'This recommendation is high-confidence and suitable for Agentforce consumption after review.'
+        : 'Review the suggestions carefully before publishing. Some recommendations may need manual verification.'
     ));
-    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' } },
-      h('span', { style: { color: 'var(--text-muted)' } }, 'Action'),
-      h('span', { style: { fontWeight: '600' } }, formatAction(structured.action))
-    ));
+
     section.appendChild(body);
   }
   return section;
 }
 
-function renderSidebarCoverage() {
-  const isCollapsed = _collapsedSections['coverage'] || false;
-  const section = h('div', { style: { marginBottom: '16px' } });
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['coverage'] = !_collapsedSections['coverage']; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Coverage'),
-    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
-  );
-  section.appendChild(header);
-
-  if (!isCollapsed) {
-    const articles = getState('kb.articles') || [];
-    const result = getState('case.result');
-    const abstract = result?.caseAbstract;
-    const product = abstract?.product || '';
-    const symptom = abstract?.symptomClass || '';
-    const matching = articles.filter(a => {
-      const text = `${a.Title || ''} ${a.Summary || ''} ${a.Product || ''}`.toLowerCase();
-      return (product && text.includes(product.toLowerCase())) || (symptom && text.includes(symptom.toLowerCase()));
-    });
-    const count = matching.length;
-    let label, color;
-    if (count === 0) { label = 'Gap detected — no KB coverage for this topic'; color = 'var(--error)'; }
-    else if (count <= 2) { label = `Partial — ${count} article${count > 1 ? 's' : ''} found`; color = 'var(--warning)'; }
-    else { label = `Good — ${count} articles cover this topic`; color = 'var(--success)'; }
-    section.appendChild(h('div', { style: { fontSize: '11px', color, padding: '4px 0', fontWeight: '500' } }, label));
-  }
-  return section;
-}
 
 function renderMarkdown(text) {
   if (!text) return h('span', null, '');

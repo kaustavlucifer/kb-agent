@@ -32,7 +32,8 @@ export async function handleAnalyze(port, msg) {
 
   send({ type: 'progress', step: 4, label: `Ranking ${searchResults.length} articles` });
   const ranked = rankArticles(searchResults, allQueries);
-  const topArticles = ranked.slice(0, TOP_K);
+  const candidates = ranked.slice(0, 10);
+  const topArticles = await filterByRelevance(candidates, caseRecord);
 
   const scoredArticles = await mapWithConcurrency(topArticles, 5, async (a) => {
     try {
@@ -157,6 +158,24 @@ function rankArticles(articles, queries) {
     const score = terms.reduce((s, t) => s + (text.includes(t) ? 1 : 0), 0);
     return { ...a, _score: score };
   }).sort((a, b) => b._score - a._score);
+}
+
+async function filterByRelevance(candidates, caseRecord) {
+  if (!candidates.length) return [];
+  const articleList = candidates.map((a, i) => `${i}. [${a.ArticleNumber}] ${a.Title} — ${(a.Summary || '').slice(0, 80)}`).join('\n');
+  try {
+    const resp = await callClaudeFast({
+      system: 'Given a support case and a list of KB articles, return the indices of articles that are DIRECTLY relevant to this specific case (same product, same symptom or error, same feature area). Be strict — only include articles that would actually help resolve this case. Return JSON: {"relevant": [0, 2, 4]}',
+      messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 300)}\n\nArticles:\n${articleList}` }],
+      maxTokens: 100,
+      temperature: 0
+    });
+    const parsed = extractJson(extractText(resp));
+    if (parsed?.relevant?.length) {
+      return parsed.relevant.filter(i => i >= 0 && i < candidates.length).map(i => candidates[i]);
+    }
+  } catch {}
+  return candidates.slice(0, TOP_K);
 }
 
 async function fetchArticleBodies(apiBase, sid, ids) {

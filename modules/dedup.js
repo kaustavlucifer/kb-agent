@@ -29,6 +29,7 @@ Rules:
 - Only flag pairs with confidence >= 0.85
 - Reason must state specific identical content
 - If uncertain, do NOT flag — false negatives acceptable, false positives waste time
+- NEVER flag an article as a duplicate of ITSELF. articleA and articleB must be DIFFERENT article numbers.
 - If no duplicates: return {"pairs":[]}`;
 
 function multiSelect(id, label, options, selected, onChange) {
@@ -339,7 +340,7 @@ async function runDedupBatch(articles) {
       model: SCORING_MODEL
     });
     const parsed = extractJson(extractText(resp));
-    const pairs = (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.confidence >= 0.85);
+    const pairs = (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.articleA !== p.articleB && p.confidence >= 0.85);
     if (pairs.length) console.log('[KB-Agent] Dedup batch returned', pairs.length, 'pairs');
     return pairs;
   } catch (e) {

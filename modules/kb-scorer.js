@@ -126,6 +126,23 @@ export function mount(container) {
   _unsubs.push(subscribe('kb.scores', render));
   _unsubs.push(subscribe('kb.loading', render));
   _unsubs.push(subscribe('kb.scoring', render));
+  _unsubs.push(subscribe('kb.focusArticle', (articleId) => {
+    if (!articleId) return;
+    setState('kb.focusArticle', null);
+    const articles = getState('kb.articles') || [];
+    const article = articles.find(a => a.id === articleId);
+    if (article) {
+      scoreOne(article);
+    }
+  }));
+
+  const pendingFocus = getState('kb.focusArticle');
+  if (pendingFocus) {
+    setState('kb.focusArticle', null);
+    const arts = getState('kb.articles') || [];
+    const found = arts.find(a => a.id === pendingFocus);
+    if (found) setTimeout(() => scoreOne(found), 300);
+  }
 }
 
 export function unmount() {
@@ -334,6 +351,7 @@ function showScoreDetail(article, scoreData) {
     h('thead', null, h('tr', null,
       h('th', null, 'Criterion'),
       h('th', { style: { width: '70px' } }, 'Score'),
+      h('th', null, 'Passed'),
       h('th', null, 'Issues'),
       h('th', null, 'Suggestions')
     )),
@@ -345,8 +363,15 @@ function showScoreDetail(article, scoreData) {
     ctbody.appendChild(h('tr', null,
       h('td', { style: { fontWeight: '500', fontSize: '12px' } }, c.label || c.id),
       h('td', null, h('span', { class: `pill pill--${c.score >= c.max * 0.8 ? 'success' : c.score >= c.max * 0.5 ? 'warning' : 'error'}` }, `${c.score}/${c.max}`)),
-      h('td', { style: { fontSize: '11px' } }, (c.issues || []).join('; ') || '—'),
-      h('td', { style: { fontSize: '11px' } }, (c.suggestions || []).join('; ') || '—')
+      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
+        (c.passed || []).length ? h('div', null, ...c.passed.map(p => h('div', { style: { marginBottom: '2px', color: 'var(--success)' } }, '• ' + p))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+      ),
+      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
+        (c.issues || []).length ? h('div', null, ...c.issues.map(issue => h('div', { style: { marginBottom: '2px', color: 'var(--error)' } }, '• ' + issue))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+      ),
+      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
+        (c.suggestions || []).length ? h('div', null, ...c.suggestions.map(sug => h('div', { style: { marginBottom: '2px', color: 'var(--primary)' } }, '• ' + sug))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+      )
     ));
   });
   body.appendChild(criteriaTable);
