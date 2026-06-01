@@ -1,20 +1,44 @@
-import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
+import { streamClaude } from '../../shared/gateway.js';
 import { PT_HIGH_VOLUME_CONVS, PT_LOW_COVERAGE_ARTICLES } from '../../shared/config.js';
 
-export async function analyzePtCoverage(msg) {
+export async function analyzePtCoverage(msg, port) {
   const { ptName, clusters, articles } = msg;
   const clusterText = clusters.slice(0, 25).map(c =>
-    `${c.label || c.name} | ${c.conversations || 0} convs | ${Math.round((c.resolution_pct || 0) * 100)}% res`
+    `${c.label || c.name} | ${c.conversations || 0} convs | ${Math.round((c.resolution_pct || 0) * 100)}% res | ${c.escalations || 0} escals`
   ).join('\n');
   const articleText = articles.slice(0, 50).map(a => `- [${a.articleNumber}] ${a.title}`).join('\n');
 
-  const resp = await callClaude({
-    system: 'You are a KB coverage analyst. Identify gaps and recommend articles to create. Be concise.',
+  if (port) {
+    const fullText = await streamClaude({
+      system: `You are a KB coverage analyst for Salesforce Agentforce. Analyze this Product & Topic's conversation clusters against existing KB articles.
+
+OUTPUT FORMAT (use proper markdown):
+## Coverage Gaps
+Use a markdown table: | Cluster | Convs | Res% | Gap Reason |
+
+## Recommended Articles to Create
+For each article, use:
+### Priority: [Immediate/High/Medium]
+1. **Article Title** — Covers: [description]. Addresses: *[cluster names]* ([X] convs)
+
+Be specific about article titles. Use product names. Be concise but complete.`,
+      messages: [{ role: 'user', content: `P&T: ${ptName}\n\nClusters:\n${clusterText}\n\nExisting Articles:\n${articleText}\n\nAnalyze coverage gaps and recommend new articles to create.` }],
+      maxTokens: 2000,
+      temperature: 0.2,
+      onDelta: (chunk) => { try { port.postMessage({ type: 'delta', chunk }); } catch {} }
+    });
+    port.postMessage({ type: 'done', narrative: fullText });
+    return;
+  }
+
+  const fullText = await streamClaude({
+    system: 'You are a KB coverage analyst. Identify gaps and recommend articles to create. Use markdown tables and headers.',
     messages: [{ role: 'user', content: `P&T: ${ptName}\n\nClusters:\n${clusterText}\n\nArticles:\n${articleText}\n\nIdentify which clusters have no coverage and what articles should be created.` }],
-    maxTokens: 1500,
-    temperature: 0.2
+    maxTokens: 2000,
+    temperature: 0.2,
+    onDelta: () => {}
   });
-  return { success: true, narrative: extractText(resp) };
+  return { success: true, narrative: fullText };
 }
 
 export async function handleCoverage(port, msg) {

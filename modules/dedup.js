@@ -8,6 +8,7 @@ import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, SCORING_MODEL, SF_
 
 let _container = null;
 let _unsubs = [];
+let _filterCloud = [];
 let _filterPt = [];
 
 const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
@@ -134,8 +135,18 @@ function render() {
 
   const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
 
+  const cloudMulti = multiSelect('dedup-cloud-filter', 'Cloud',
+    [{ value: 'Industry', label: 'Industry' }, { value: 'Revenue', label: 'Revenue' }],
+    _filterCloud,
+    (sel) => { _filterCloud = sel; render(); }
+  );
+
+  const filteredPtOptions = _filterCloud.length
+    ? ptOptions.filter(pt => _filterCloud.some(c => pt.toLowerCase().startsWith(c.toLowerCase())))
+    : ptOptions;
+
   const ptMulti = multiSelect('dedup-pt-filter', 'P&T',
-    ptOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
+    filteredPtOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
     _filterPt,
     (sel) => { _filterPt = sel; render(); }
   );
@@ -147,13 +158,16 @@ function render() {
   );
   detectBtn.addEventListener('click', detectDuplicates);
 
-  const scopedArticles = _filterPt.length ? articles.filter(a => _filterPt.includes(a.topicName)) : articles;
+  let scopedArticles = articles;
+  if (_filterCloud.length) scopedArticles = scopedArticles.filter(a => _filterCloud.some(c => (a.topicName || '').toLowerCase().startsWith(c.toLowerCase())));
+  if (_filterPt.length) scopedArticles = scopedArticles.filter(a => _filterPt.includes(a.topicName));
   const batchCount = Math.ceil(scopedArticles.length / DEDUP_BATCH_SIZE);
   const scopeInfo = _filterPt.length
     ? `Filtered: ${scopedArticles.length} articles in ${_filterPt.length} P&Ts, ${batchCount} batches`
     : `All P&Ts: ${scopedArticles.length} articles, ${batchCount} batches`;
 
   const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+    cloudMulti,
     ptMulti,
     h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, scopeInfo),
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },

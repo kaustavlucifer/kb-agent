@@ -16,7 +16,7 @@ async function init() {
   const hashTab = location.hash.replace('#', '');
   const validTab = TABS.find(t => t.id === hashTab);
   setState('app.activeTab', validTab ? hashTab : 'case-analysis');
-  setState('app.connections', { sf: null, ai: null, gus: null, slack: null });
+  setState('app.connections', { sf: null, ai: null });
   render();
   checkConnections();
 
@@ -111,18 +111,11 @@ function activateTab(tabId) {
 }
 
 async function checkConnections() {
-  const [sfResp, aiResp, gusResp, slackResp] = await Promise.all([
+  const [sfResp, aiResp] = await Promise.all([
     chrome.runtime.sendMessage({ action: 'CHECK_CONNECTION' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'CHECK_GUS' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'CHECK_SLACK' }).catch(() => ({ connected: false }))
+    chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false }))
   ]);
-  setState('app.connections', {
-    sf: sfResp,
-    ai: aiResp,
-    gus: gusResp,
-    slack: slackResp
-  });
+  setState('app.connections', { sf: sfResp, ai: aiResp });
 }
 
 function updateConnectionChips() {
@@ -158,25 +151,6 @@ function updateConnectionChips() {
   aiChip.style.cursor = 'pointer';
   container.appendChild(aiChip);
 
-  const gusChip = chip(
-    conn.gus?.connected ? 'connected' : 'disconnected',
-    conn.gus?.connected ? 'GUS' : 'GUS Offline',
-    {
-      title: conn.gus?.connected ? 'GUS session active — click to open' : 'No GUS session — click to log in',
-      onClick: () => chrome.tabs.create({ url: 'https://gus.lightning.force.com' })
-    }
-  );
-  container.appendChild(gusChip);
-
-  const slackChip = chip(
-    conn.slack?.connected ? 'connected' : 'disconnected',
-    conn.slack?.connected ? 'Slack' : 'Slack Offline',
-    {
-      title: conn.slack?.connected ? 'Slack token detected — click to open' : 'No Slack session — click to log in',
-      onClick: () => chrome.tabs.create({ url: 'https://salesforce-internal.slack.com' })
-    }
-  );
-  container.appendChild(slackChip);
 }
 
 function openTokenPopover(e) {
@@ -196,9 +170,10 @@ function openTokenPopover(e) {
   document.body.appendChild(popover);
   document.getElementById('token-input')?.focus();
 
+  const triggerEl = e.currentTarget;
   setTimeout(() => {
     const dismiss = (ev) => {
-      if (!popover.contains(ev.target) && !e.currentTarget.contains(ev.target)) {
+      if (!popover.contains(ev.target) && (!triggerEl || !triggerEl.contains(ev.target))) {
         popover.remove();
         document.removeEventListener('mousedown', dismiss, true);
       }

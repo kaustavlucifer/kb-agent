@@ -114,25 +114,6 @@ export async function findSid(lightningHost) {
   return { sid: null, apiBase };
 }
 
-export async function checkGus() {
-  try {
-    const cookies = await chrome.cookies.getAll({ domain: 'gus.lightning.force.com', name: 'sid' });
-    const valid = cookies.find(c => !c.expirationDate || c.expirationDate * 1000 > Date.now());
-    return { connected: !!valid, sid: valid?.value || null };
-  } catch {
-    return { connected: false, sid: null };
-  }
-}
-
-export async function checkSlack() {
-  try {
-    const cookies = await chrome.cookies.getAll({ domain: '.slack.com', name: 'd' });
-    const valid = cookies.find(c => !c.expirationDate || c.expirationDate * 1000 > Date.now());
-    return { connected: !!valid };
-  } catch {
-    return { connected: false };
-  }
-}
 
 export function isCaseAnalysisAllowed(caseRecord) {
   const supportLevel = (caseRecord?.__supportLevel || '').trim();

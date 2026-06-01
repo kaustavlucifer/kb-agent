@@ -1,13 +1,32 @@
 import { h, spinner, toast, modal } from '../shared/ui.js';
 import { getState, subscribe } from '../shared/state.js';
+import { localGet, localSet } from '../shared/storage.js';
 import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS } from '../shared/config.js';
 
 let _container = null;
 let _unsubs = [];
 let _data = null;
 let _selectedPt = null;
+let _cloudFilter = '';
 let _sortCol = 'totalConvs';
 let _sortDir = 'desc';
+let _popstateHandler = null;
+let _coverageCache = {};
+
+function inlineFormat(text) {
+  const frag = document.createDocumentFragment();
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  for (const part of parts) {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      frag.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
+    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+      frag.appendChild(h('em', { style: { fontStyle: 'italic' } }, part.slice(1, -1)));
+    } else {
+      frag.appendChild(document.createTextNode(part));
+    }
+  }
+  return frag;
+}
 
 function renderMarkdown(text, container) {
   if (!text) return;
@@ -17,14 +36,14 @@ function renderMarkdown(text, container) {
 
   function flushTable() {
     if (!tableRows.length) return;
-    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '8px' } });
+    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
     const headerRow = tableRows[0];
     const separatorIdx = tableRows.findIndex(r => /^[\s|:-]+$/.test(r.replace(/\|/g, '').replace(/[-:]/g, '')));
     const dataStart = separatorIdx >= 0 ? separatorIdx + 1 : 1;
 
     if (headerRow) {
       const cells = headerRow.split('|').map(c => c.trim()).filter(Boolean);
-      const thead = h('thead', null, h('tr', null, ...cells.map(c => h('th', null, c))));
+      const thead = h('thead', null, h('tr', null, ...cells.map(c => { const th = h('th', { style: { fontSize: '11px', padding: '6px 8px' } }); th.appendChild(inlineFormat(c)); return th; })));
       table.appendChild(thead);
     }
 
@@ -32,7 +51,7 @@ function renderMarkdown(text, container) {
     for (let i = dataStart; i < tableRows.length; i++) {
       const cells = tableRows[i].split('|').map(c => c.trim()).filter(Boolean);
       if (cells.length) {
-        tbody.appendChild(h('tr', null, ...cells.map(c => h('td', { style: { fontSize: '11px' } }, c))));
+        tbody.appendChild(h('tr', null, ...cells.map(c => { const td = h('td', { style: { fontSize: '11px', padding: '5px 8px' } }); td.appendChild(inlineFormat(c)); return td; })));
       }
     }
     table.appendChild(tbody);
@@ -47,21 +66,62 @@ function renderMarkdown(text, container) {
       tableRows.push(line.trim());
       return;
     }
+    if (inTable) flushTable();
 
-    if (inTable) {
-      flushTable();
+    if (/^#{4,}\s/.test(line)) {
+      const text = line.replace(/^#+\s*/, '');
+      const el = h('h5', { style: { fontSize: '12px', fontWeight: '600', marginTop: '10px', marginBottom: '4px', color: 'var(--primary)' } });
+      el.appendChild(inlineFormat(text));
+      container.appendChild(el);
+    } else if (line.startsWith('### ')) {
+      const el = h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '12px', marginBottom: '4px', color: 'var(--text-primary)' } });
+      el.appendChild(inlineFormat(line.slice(4)));
+      container.appendChild(el);
+    } else if (line.startsWith('## ')) {
+      const el = h('h3', { style: { fontSize: '13px', fontWeight: '700', marginTop: '14px', marginBottom: '6px', color: 'var(--text-primary)', borderBottom: '1px solid var(--border)', paddingBottom: '4px' } });
+      el.appendChild(inlineFormat(line.slice(3)));
+      container.appendChild(el);
+    } else if (line.startsWith('# ')) {
+      const el = h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '16px', marginBottom: '8px' } });
+      el.appendChild(inlineFormat(line.slice(2)));
+      container.appendChild(el);
+    } else if (/^---+$/.test(line.trim())) {
+      container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
+    } else if (line.startsWith('- ') || line.startsWith('* ')) {
+      const el = h('div', { style: { paddingLeft: '14px', fontSize: '12px', lineHeight: '1.6', marginBottom: '3px', position: 'relative' } });
+      el.appendChild(h('span', { style: { position: 'absolute', left: '2px' } }, '•'));
+      const span = h('span', null);
+      span.appendChild(inlineFormat(line.slice(2)));
+      el.appendChild(span);
+      container.appendChild(el);
+    } else if (/^\d+\.\s/.test(line)) {
+      const el = h('div', { style: { paddingLeft: '14px', fontSize: '12px', lineHeight: '1.6', marginBottom: '3px' } });
+      el.appendChild(inlineFormat(line));
+      container.appendChild(el);
+    } else if (line.trim()) {
+      const el = h('p', { style: { margin: '4px 0', fontSize: '12px', lineHeight: '1.6' } });
+      el.appendChild(inlineFormat(line));
+      container.appendChild(el);
     }
-
-    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '10px', marginBottom: '4px', color: 'var(--text-primary)' } }, line.slice(4)));
-    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '12px', marginBottom: '4px' } }, line.slice(3)));
-    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '14px', marginBottom: '6px' } }, line.slice(2)));
-    else if (line.startsWith('- ') || line.startsWith('* ')) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5', marginBottom: '2px' } }, '• ' + line.slice(2)));
-    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5', marginBottom: '2px' } }, line));
-    else if (line.startsWith('**') && line.endsWith('**')) container.appendChild(h('div', { style: { fontWeight: '600', fontSize: '12px', marginTop: '6px' } }, line.replace(/\*\*/g, '')));
-    else if (line.trim()) container.appendChild(h('p', { style: { margin: '3px 0', fontSize: '12px', lineHeight: '1.5' } }, line));
   });
 
   if (inTable) flushTable();
+}
+
+function pushHistoryState() {
+  const state = { selectedPt: _selectedPt, sortCol: _sortCol, sortDir: _sortDir };
+  history.pushState(state, '', '');
+}
+
+function onPopState(e) {
+  if (e.state && ('selectedPt' in e.state)) {
+    _selectedPt = e.state.selectedPt;
+    _sortCol = e.state.sortCol || 'totalConvs';
+    _sortDir = e.state.sortDir || 'desc';
+    renderView();
+    const select = document.getElementById('pt-select');
+    if (select) select.value = _selectedPt || '';
+  }
 }
 
 export function mount(container) {
@@ -69,12 +129,27 @@ export function mount(container) {
   if (!_data) loadData();
   else renderView();
   _unsubs.push(subscribe('kb.articles', renderView));
+  _popstateHandler = onPopState;
+  window.addEventListener('popstate', _popstateHandler);
+  localGet(['coverageCache']).then(d => {
+    if (d.coverageCache) {
+      for (const [key, val] of Object.entries(d.coverageCache)) {
+        if (val.text && val.ts && Date.now() - val.ts < 7 * 24 * 60 * 60 * 1000) {
+          _coverageCache[key] = val.text;
+        }
+      }
+    }
+  });
 }
 
 export function unmount() {
   _unsubs.forEach(u => u());
   _unsubs = [];
   _container = null;
+  if (_popstateHandler) {
+    window.removeEventListener('popstate', _popstateHandler);
+    _popstateHandler = null;
+  }
 }
 
 async function loadData() {
@@ -99,9 +174,19 @@ function renderView() {
     return;
   }
 
-  const ptNames = Object.keys(_data).sort();
+  let ptNames = Object.keys(_data).sort();
+  if (_cloudFilter) {
+    ptNames = ptNames.filter(pt => pt.toLowerCase().startsWith(_cloudFilter.toLowerCase()));
+  }
+
+  const cloudSelect = h('select', { class: 'input', id: 'cloud-select', style: { maxWidth: '140px' } },
+    h('option', { value: '', selected: !_cloudFilter }, 'All Clouds'),
+    h('option', { value: 'Industry', selected: _cloudFilter === 'Industry' }, 'Industry'),
+    h('option', { value: 'Revenue', selected: _cloudFilter === 'Revenue' }, 'Revenue')
+  );
 
   const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+    cloudSelect,
     h('select', { class: 'input', id: 'pt-select', style: { maxWidth: '300px' } },
       h('option', { value: '' }, `All P&Ts (${ptNames.length})`),
       ...ptNames.map(pt => h('option', { value: pt, selected: _selectedPt === pt }, pt))
@@ -111,8 +196,14 @@ function renderView() {
     )
   );
   _container.appendChild(toolbar);
+  document.getElementById('cloud-select')?.addEventListener('change', e => {
+    _cloudFilter = e.target.value;
+    _selectedPt = null;
+    renderView();
+  });
   document.getElementById('pt-select')?.addEventListener('change', e => {
     _selectedPt = e.target.value || null;
+    pushHistoryState();
     renderView();
   });
 
@@ -126,6 +217,7 @@ function renderView() {
 function toggleSort(col) {
   if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
   else { _sortCol = col; _sortDir = 'asc'; }
+  pushHistoryState();
   renderView();
 }
 
@@ -193,7 +285,7 @@ function renderOverview(ptNames, articles) {
   );
   const tbody = table.querySelector('tbody');
   rows.forEach(r => {
-    const row = h('tr', { style: { cursor: 'pointer' }, onClick: () => { _selectedPt = r.pt; renderView(); document.getElementById('pt-select').value = r.pt; } },
+    const row = h('tr', { style: { cursor: 'pointer' }, onClick: () => { _selectedPt = r.pt; pushHistoryState(); renderView(); document.getElementById('pt-select').value = r.pt; } },
       h('td', { style: { fontSize: '12px', fontWeight: '500' } }, r.pt),
       h('td', null, h('span', { class: `pill pill--${r.totalConvs >= PT_HIGH_VOLUME_CONVS ? 'error' : r.totalConvs >= PT_MID_VOLUME_CONVS ? 'warning' : 'neutral'}` }, r.totalConvs.toLocaleString())),
       h('td', null, h('span', { style: { fontSize: '12px' } }, `${Math.round(r.resPct * 100)}%`)),
@@ -204,7 +296,12 @@ function renderOverview(ptNames, articles) {
         : h('span', { class: 'pill pill--success' }, '0')
       ),
       h('td', { style: { whiteSpace: 'nowrap' } },
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleAiSummary(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Analyze')
+        h('div', { style: { display: 'flex', gap: '4px' }, onClick: (e) => e.stopPropagation() },
+          _coverageCache[r.pt]
+            ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '14px', padding: '2px 6px' }, title: 'View cached', onClick: () => showCoverageResult(r.pt, _coverageCache[r.pt]) }, '👁')
+            : null,
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => handleAiSummary(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase()), !!_coverageCache[r.pt]) }, _coverageCache[r.pt] ? 'Redo' : 'Analyze')
+        )
       )
     );
     tbody.appendChild(row);
@@ -220,18 +317,23 @@ function renderPtDetail(ptName, articles) {
 
   const headerCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-      h('div', null,
-        h('div', { style: { fontSize: '14px', fontWeight: '600' } }, ptName),
-        h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' } },
-          `${(ptData.total_conversations || 0).toLocaleString()} conversations · ${Math.round((ptData.resolution_pct || 0) * 100)}% resolution · ${ptData.escalations || 0} escalations`
+      h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center' } },
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => { _selectedPt = null; pushHistoryState(); renderView(); document.getElementById('pt-select').value = ''; } }, '← Back'),
+        h('div', null,
+          h('div', { style: { fontSize: '14px', fontWeight: '600' } }, ptName),
+          h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' } },
+            `${(ptData.total_conversations || 0).toLocaleString()} conversations · ${Math.round((ptData.resolution_pct || 0) * 100)}% resolution · ${ptData.escalations || 0} escalations`
+          )
         )
       ),
-      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+      h('div', { style: { display: 'flex', gap: '6px' } },
+        _coverageCache[ptName]
+          ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '14px', padding: '2px 8px' }, title: 'View cached analysis', onClick: () => showCoverageResult(ptName, _coverageCache[ptName]) }, '👁')
+          : null,
         h('button', {
           class: 'btn btn--primary btn--sm',
-          onClick: () => handleAiSummary(ptName, clusters, ptArticles)
-        }, 'Analyze'),
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => { _selectedPt = null; renderView(); document.getElementById('pt-select').value = ''; } }, '← All P&Ts')
+          onClick: () => handleAiSummary(ptName, clusters, ptArticles, true)
+        }, _coverageCache[ptName] ? 'Reanalyze' : 'Analyze')
       )
     )
   );
@@ -277,8 +379,27 @@ function renderPtDetail(ptName, articles) {
   _container.appendChild(table);
 }
 
-async function handleAiSummary(ptName, clusters, ptArticles) {
-  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
+function showCoverageResult(ptName, narrative) {
+  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.7', maxHeight: '500px', overflowY: 'auto', padding: '4px' } });
+  renderMarkdown(narrative, streamEl);
+
+  const content = h('div', null, streamEl);
+  modal(`Coverage: ${ptName}`, content, {
+    wide: true,
+    primaryAction: { label: 'Copy', handler: () => {
+      navigator.clipboard.writeText(narrative).then(() => toast('Copied.', 'success'));
+    }}
+  });
+}
+
+async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = false) {
+  if (!forceRefresh && _coverageCache[ptName]) {
+    showCoverageResult(ptName, _coverageCache[ptName]);
+    return;
+  }
+
+  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.7', maxHeight: '500px', overflowY: 'auto', padding: '4px' } });
+  streamEl.appendChild(spinner('md'));
 
   const statsHeader = h('div', { style: { marginBottom: '12px', padding: '8px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '11px', color: 'var(--text-secondary)' } },
     `${clusters.length} clusters · ${clusters.reduce((s, c) => s + (c.conversations || 0), 0).toLocaleString()} conversations · ${ptArticles.length} KB articles`
@@ -289,24 +410,41 @@ async function handleAiSummary(ptName, clusters, ptArticles) {
   modal(`Coverage: ${ptName}`, content, {
     wide: true,
     primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(document.getElementById('coverage-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
+      navigator.clipboard.writeText(document.getElementById('coverage-stream')?.getAttribute('data-raw') || '').then(() => toast('Copied.', 'success'));
     }}
   });
 
   try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'COVERAGE_ANALYZE_PT',
-      ptName,
-      clusters,
-      articles: ptArticles
+    const port = chrome.runtime.connect({ name: 'kba-coverage-stream' });
+    port.postMessage({ ptName, clusters, articles: ptArticles });
+    let fullText = '';
+
+    port.onMessage.addListener((msg) => {
+      const el = document.getElementById('coverage-stream');
+      if (!el) return;
+      if (msg.type === 'delta') {
+        fullText += msg.chunk;
+        el.textContent = '';
+        renderMarkdown(fullText, el);
+        el.scrollTop = el.scrollHeight;
+      } else if (msg.type === 'done') {
+        fullText = msg.narrative || fullText;
+        el.textContent = '';
+        el.setAttribute('data-raw', fullText);
+        renderMarkdown(fullText, el);
+        _coverageCache[ptName] = fullText;
+        localGet(['coverageCache']).then(d => {
+          const cache = d.coverageCache || {};
+          cache[ptName] = { text: fullText, ts: Date.now() };
+          localSet({ coverageCache: cache });
+        });
+        port.disconnect();
+      } else if (msg.type === 'error') {
+        el.textContent = 'Error: ' + (msg.error || 'Unknown');
+        port.disconnect();
+      }
     });
-    const el = document.getElementById('coverage-stream');
-    if (el && resp.success) {
-      el.textContent = '';
-      renderMarkdown(resp.narrative, el);
-    } else if (el) {
-      el.textContent = 'Error: ' + (resp.error || 'Unknown error');
-    }
+    port.onDisconnect.addListener(() => {});
   } catch (e) {
     const el = document.getElementById('coverage-stream');
     if (el) el.textContent = 'Error: ' + e.message;

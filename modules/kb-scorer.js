@@ -9,11 +9,15 @@ import { SF_API_VERSION, SCORE_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHAR
 let _container = null;
 let _unsubs = [];
 let _filterText = '';
+let _filterCloud = [];
 let _filterPt = [];
 let _filterScore = [];
 let _filterValidation = [];
+let _filterPublish = [];
 let _sortCol = 'articleNumber';
 let _sortDir = 'asc';
+let _page = 0;
+const _pageSize = 50;
 
 const SCORE_META_FIELDS = [
   'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
@@ -42,6 +46,7 @@ function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
   wrap.style.position = 'relative';
   wrap.style.display = 'inline-block';
+  let pending = [...selected];
 
   const trigger = h('div', {
     style: {
@@ -66,39 +71,58 @@ function multiSelect(id, label, options, selected, onChange) {
   trigger.addEventListener('click', toggleDropdown);
   wrap.appendChild(trigger);
 
-  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '240px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
+  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '280px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
 
-  if (selected.length) {
-    const clearBtn = h('div', { style: { padding: '4px 8px', fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', borderBottom: '1px solid var(--border)', marginBottom: '4px' } }, 'Clear all');
-    clearBtn.addEventListener('click', (e) => { e.stopPropagation(); onChange([]); });
-    dropdown.appendChild(clearBtn);
-  }
+  const actionsBar = h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid var(--border)', marginBottom: '4px' } },
+    h('div', { style: { fontSize: '11px', color: 'var(--error)', cursor: 'pointer' }, onClick: (e) => { e.stopPropagation(); pending = []; updateCheckboxes(); } }, 'Clear'),
+    h('div', { style: { fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', fontWeight: '600' }, onClick: (e) => { e.stopPropagation(); dropdown.style.display = 'none'; onChange(pending); } }, 'Apply')
+  );
+  dropdown.appendChild(actionsBar);
 
+  const checkboxes = [];
   options.forEach(opt => {
-    const checked = selected.includes(opt.value);
+    const checked = pending.includes(opt.value);
     const checkbox = h('input', { type: 'checkbox' });
     checkbox.checked = checked;
     checkbox.addEventListener('change', (e) => {
+      e.stopPropagation();
       const val = opt.value;
-      const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
-      onChange(newSel);
+      if (e.target.checked) { if (!pending.includes(val)) pending.push(val); }
+      else { pending = pending.filter(v => v !== val); }
     });
+    checkboxes.push({ checkbox, value: opt.value });
     const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-xs)' } },
       checkbox,
       h('span', null, opt.label)
     );
     item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
     item.addEventListener('mouseleave', () => { item.style.background = ''; });
+    item.addEventListener('click', (e) => { e.stopPropagation(); });
     dropdown.appendChild(item);
   });
   wrap.appendChild(dropdown);
 
+  function updateCheckboxes() {
+    checkboxes.forEach(({ checkbox, value }) => { checkbox.checked = pending.includes(value); });
+  }
+
   function toggleDropdown(e) {
     e.stopPropagation();
     const visible = dropdown.style.display !== 'none';
-    dropdown.style.display = visible ? 'none' : 'block';
-    if (!visible) {
-      const dismiss = (ev) => { if (!wrap.contains(ev.target)) { dropdown.style.display = 'none'; document.removeEventListener('click', dismiss); } };
+    if (visible) {
+      dropdown.style.display = 'none';
+      onChange(pending);
+    } else {
+      pending = [...selected];
+      updateCheckboxes();
+      dropdown.style.display = 'block';
+      const dismiss = (ev) => {
+        if (!wrap.contains(ev.target)) {
+          dropdown.style.display = 'none';
+          document.removeEventListener('click', dismiss);
+          onChange(pending);
+        }
+      };
       setTimeout(() => document.addEventListener('click', dismiss), 0);
     }
   }
@@ -129,19 +153,13 @@ export function mount(container) {
   _unsubs.push(subscribe('kb.focusArticle', (articleId) => {
     if (!articleId) return;
     setState('kb.focusArticle', null);
-    const articles = getState('kb.articles') || [];
-    const article = articles.find(a => a.id === articleId);
-    if (article) {
-      scoreOne(article);
-    }
+    handleFocusArticle(articleId);
   }));
 
   const pendingFocus = getState('kb.focusArticle');
   if (pendingFocus) {
     setState('kb.focusArticle', null);
-    const arts = getState('kb.articles') || [];
-    const found = arts.find(a => a.id === pendingFocus);
-    if (found) setTimeout(() => scoreOne(found), 300);
+    setTimeout(() => handleFocusArticle(pendingFocus), 300);
   }
 }
 
@@ -149,6 +167,38 @@ export function unmount() {
   _unsubs.forEach(u => u());
   _unsubs = [];
   _container = null;
+}
+
+function handleFocusArticle(articleId) {
+  const articles = getState('kb.articles') || [];
+  const scores = getState('kb.scores') || {};
+  const article = articles.find(a => a.id === articleId);
+
+  if (!article) {
+    // Article might not be loaded yet — try from scores alone
+    if (scores[articleId]?.overall != null) {
+      const stub = { id: articleId, articleNumber: '?', title: 'Article' };
+      showScoreDetail(stub, scores[articleId]);
+    }
+    return;
+  }
+
+  // Clear all filters so article is visible in the table
+  _filterText = '';
+  _filterCloud = [];
+  _filterPt = [];
+  _filterScore = [];
+  _filterValidation = [];
+  _filterPublish = [];
+  _page = 0;
+  render();
+
+  // Show the score detail modal
+  if (scores[article.id]?.overall != null) {
+    showScoreDetail(article, scores[article.id]);
+  } else {
+    scoreOne(article);
+  }
 }
 
 function render() {
@@ -188,12 +238,18 @@ function render() {
   const validationOptions = [...new Set(articles.map(a => a.validationStatus).filter(Boolean))].sort();
 
   const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
-  searchInput.addEventListener('input', e => { _filterText = e.target.value; render(); });
+  searchInput.addEventListener('input', e => { _filterText = e.target.value; _page = 0; render(); });
+
+  const cloudMulti = multiSelect('kb-cloud-filter', 'Cloud',
+    [{ value: 'Industry', label: 'Industry' }, { value: 'Revenue', label: 'Revenue' }],
+    _filterCloud,
+    (sel) => { _filterCloud = sel; _page = 0; render(); }
+  );
 
   const ptMulti = multiSelect('kb-pt-filter', 'P&T',
     ptOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
     _filterPt,
-    (sel) => { _filterPt = sel; render(); }
+    (sel) => { _filterPt = sel; _page = 0; render(); }
   );
 
   const scoreMulti = multiSelect('kb-score-filter', 'Score',
@@ -204,25 +260,36 @@ function render() {
       { value: 'unscored', label: 'Unscored' }
     ],
     _filterScore,
-    (sel) => { _filterScore = sel; render(); }
+    (sel) => { _filterScore = sel; _page = 0; render(); }
   );
 
   const valMulti = multiSelect('kb-val-filter', 'Validation',
     validationOptions.map(v => ({ value: v, label: v })),
     _filterValidation,
-    (sel) => { _filterValidation = sel; render(); }
+    (sel) => { _filterValidation = sel; _page = 0; render(); }
+  );
+
+  const publishOptions = [...new Set(articles.map(a => a.publishStatus).filter(Boolean))].sort();
+  const publishMulti = multiSelect('kb-publish-filter', 'Status',
+    publishOptions.map(v => ({ value: v, label: v })),
+    _filterPublish,
+    (sel) => { _filterPublish = sel; _page = 0; render(); }
   );
 
   const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: loading }, 'Refresh');
   refreshBtn.addEventListener('click', loadArticles);
-  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !articles.length || !!scoring }, scoring ? 'Scoring…' : 'Score All');
+  const hasFilters = _filterText || _filterCloud.length || _filterPt.length || _filterScore.length || _filterValidation.length || _filterPublish.length;
+  const scoreBtnLabel = scoring ? 'Scoring…' : hasFilters ? 'Score Filtered' : 'Score All';
+  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !articles.length || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
 
   const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
     searchInput,
+    cloudMulti,
     ptMulti,
     scoreMulti,
     valMulti,
+    publishMulti,
     h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
       refreshBtn,
       scoreBtn
@@ -251,23 +318,7 @@ function render() {
     return;
   }
 
-  let filtered = articles;
-  if (_filterText) {
-    const term = _filterText.toLowerCase();
-    filtered = filtered.filter(a => `${a.title || ''} ${a.articleNumber || ''} ${a.topicName || ''} ${a.summary || ''} ${a.knowledgeArticleId || ''}`.toLowerCase().includes(term));
-  }
-  if (_filterPt.length) filtered = filtered.filter(a => _filterPt.includes(a.topicName));
-  if (_filterValidation.length) filtered = filtered.filter(a => _filterValidation.includes(a.validationStatus));
-  if (_filterScore.length) filtered = filtered.filter(a => {
-    const s = scores[a.id]?.overall;
-    return _filterScore.some(range => {
-      if (range === 'high') return (s ?? -1) >= SCORE_HIGH_THRESHOLD;
-      if (range === 'mid') return s != null && s >= SCORE_MID_THRESHOLD && s < SCORE_HIGH_THRESHOLD;
-      if (range === 'low') return s != null && s < SCORE_MID_THRESHOLD;
-      if (range === 'unscored') return s == null;
-      return false;
-    });
-  });
+  let filtered = getFilteredArticles();
 
   filtered.sort((a, b) => {
     let va, vb;
@@ -299,8 +350,11 @@ function render() {
   );
 
   const tbody = table.querySelector('tbody');
-  const pageSize = 100;
-  filtered.slice(0, pageSize).forEach(a => {
+  const totalPages = Math.ceil(filtered.length / _pageSize);
+  if (_page >= totalPages && totalPages > 0) _page = totalPages - 1;
+  const pageStart = _page * _pageSize;
+  const pageEnd = pageStart + _pageSize;
+  filtered.slice(pageStart, pageEnd).forEach(a => {
     const scoreData = scores[a.id];
     const overall = scoreData?.overall;
     const scoreEl = overall != null
@@ -317,22 +371,27 @@ function render() {
       h('td', null, scoreEl),
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px' } },
-          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, 'Score'),
+          scoreData?.overall != null
+            ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '14px', padding: '2px 6px' }, title: 'View score details', onClick: () => showScoreDetail(a, scoreData) }, '👁')
+            : null,
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, scoreData?.overall != null ? 'Rescore' : 'Score'),
           h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
         )
       )
     ));
   });
 
-  if (filtered.length > pageSize) {
-    tbody.appendChild(h('tr', null,
-      h('td', { colspan: '5', style: { textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', padding: '12px' } },
-        `Showing ${pageSize} of ${filtered.length}. Use filters to narrow.`
-      )
-    ));
-  }
-
   _container.appendChild(table);
+
+  const totalPagesBottom = Math.ceil(filtered.length / _pageSize);
+  if (totalPagesBottom > 1) {
+    const paginationRow = h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
+      h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev'),
+      h('span', { style: { color: 'var(--text-secondary)' } }, `Page ${_page + 1} of ${totalPagesBottom} (${filtered.length} articles)`),
+      h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPagesBottom - 1, onClick: () => { _page++; render(); } }, 'Next →')
+    );
+    _container.appendChild(paginationRow);
+  }
 }
 
 function showScoreDetail(article, scoreData) {
@@ -411,6 +470,7 @@ async function loadArticles() {
       title: r.Title,
       summary: r.Summary,
       urlName: r.UrlName,
+      publishStatus: r.PublishStatus || 'Online',
       validationStatus: r.ValidationStatus,
       topicName: r.Product_And_Topic__r?.Name || '',
       containsImage: !!r.Contains_Image__c,
@@ -460,11 +520,43 @@ async function fetchBodies(articleIds, session) {
   return bodyMap;
 }
 
-async function scoreAll() {
+function getCloudFromPt(topicName) {
+  if (!topicName) return 'Other';
+  if (topicName.toLowerCase().startsWith('industry')) return 'Industry';
+  if (topicName.toLowerCase().startsWith('revenue')) return 'Revenue';
+  return 'Other';
+}
+
+function getFilteredArticles() {
   const articles = getState('kb.articles') || [];
+  const scores = getState('kb.scores') || {};
+  let filtered = articles;
+  if (_filterCloud.length) filtered = filtered.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
+  if (_filterText) {
+    const term = _filterText.toLowerCase();
+    filtered = filtered.filter(a => `${a.title || ''} ${a.articleNumber || ''} ${a.topicName || ''} ${a.summary || ''} ${a.knowledgeArticleId || ''}`.toLowerCase().includes(term));
+  }
+  if (_filterPt.length) filtered = filtered.filter(a => _filterPt.includes(a.topicName));
+  if (_filterValidation.length) filtered = filtered.filter(a => _filterValidation.includes(a.validationStatus));
+  if (_filterPublish.length) filtered = filtered.filter(a => _filterPublish.includes(a.publishStatus));
+  if (_filterScore.length) filtered = filtered.filter(a => {
+    const s = scores[a.id]?.overall;
+    return _filterScore.some(range => {
+      if (range === 'high') return (s ?? -1) >= SCORE_HIGH_THRESHOLD;
+      if (range === 'mid') return s != null && s >= SCORE_MID_THRESHOLD && s < SCORE_HIGH_THRESHOLD;
+      if (range === 'low') return s != null && s < SCORE_MID_THRESHOLD;
+      if (range === 'unscored') return s == null;
+      return false;
+    });
+  });
+  return filtered;
+}
+
+async function scoreAll() {
+  const filtered = getFilteredArticles();
   const existingScores = getState('kb.scores') || {};
-  const toScore = articles.filter(a => !existingScores[a.id]?.overall);
-  if (!toScore.length) { toast('All articles already scored.', 'info'); return; }
+  const toScore = filtered.filter(a => !existingScores[a.id]?.overall);
+  if (!toScore.length) { toast('All visible articles already scored.', 'info'); return; }
 
   setState('kb.scoring', { done: 0, total: toScore.length });
   const session = await detectSession();
@@ -493,13 +585,51 @@ async function scoreAll() {
   toast(`Scored ${done} articles.`, 'success');
 }
 
+function renderCriterionRow(c) {
+  if (c.na) return null;
+  const scoreColor = c.score >= c.max * 0.8 ? 'var(--success)' : c.score >= c.max * 0.5 ? 'var(--warning)' : 'var(--error)';
+  return h('tr', null,
+    h('td', { style: { fontWeight: '500', fontSize: '12px' } }, c.label || c.id),
+    h('td', null, h('span', { style: { fontWeight: '600', color: scoreColor } }, `${c.score}/${c.max}`)),
+    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
+      (c.passed || []).length ? h('div', null, ...c.passed.slice(0, 2).map(p => h('div', { style: { marginBottom: '2px', color: 'var(--success)' } }, '• ' + p))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+    ),
+    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
+      (c.issues || []).length ? h('div', null, ...c.issues.slice(0, 2).map(issue => h('div', { style: { marginBottom: '2px', color: 'var(--error)' } }, '• ' + issue))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+    ),
+    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
+      (c.suggestions || []).length ? h('div', null, ...c.suggestions.slice(0, 2).map(sug => h('div', { style: { marginBottom: '2px', color: 'var(--primary)' } }, '• ' + sug))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+    )
+  );
+}
+
+function tryExtractCriteria(text) {
+  const criteriaMatch = text.match(/"criteria"\s*:\s*\[/);
+  if (!criteriaMatch) return [];
+  const startIdx = text.indexOf('[', criteriaMatch.index);
+  const results = [];
+  let depth = 0;
+  let objStart = -1;
+  for (let i = startIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') { if (depth === 1) objStart = i; depth++; }
+    else if (ch === '}') {
+      depth--;
+      if (depth === 1 && objStart >= 0) {
+        try {
+          const obj = JSON.parse(text.slice(objStart, i + 1));
+          results.push(obj);
+        } catch {}
+        objStart = -1;
+      }
+    } else if (ch === '[' && depth === 0) { depth = 1; }
+  }
+  return results;
+}
+
 async function scoreOne(article) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
-
-  const criteriaRows = CRITERIA.map(c => ({
-    id: c.id, label: c.label, score: null, max: c.baseMax, status: 'pending'
-  }));
 
   const bodyEl = h('div', null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `Scoring: #${article.articleNumber} — ${article.title}`),
@@ -511,17 +641,21 @@ async function scoreOne(article) {
       h('thead', null, h('tr', null,
         h('th', null, 'Criterion'),
         h('th', { style: { width: '80px' } }, 'Score'),
-        h('th', null, 'Status')
+        h('th', null, 'Passed'),
+        h('th', null, 'Issues'),
+        h('th', null, 'Suggestions')
       )),
       h('tbody', { id: 'score-criteria-body' },
-        ...criteriaRows.map(c => h('tr', { id: `score-row-${c.id}` },
-          h('td', { style: { fontSize: '12px' } }, c.label),
-          h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '—')),
-          h('td', null, h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Pending'))
+        ...CRITERIA.map(c => h('tr', { id: `score-row-${c.id}` },
+          h('td', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, c.label),
+          h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '…')),
+          h('td', null, ''),
+          h('td', null, ''),
+          h('td', null, '')
         ))
       )
     ),
-    h('div', { id: 'score-overall', style: { marginTop: '12px', display: 'none', textAlign: 'center' } },
+    h('div', { id: 'score-overall', style: { marginTop: '12px', textAlign: 'center', display: 'none' } },
       h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Overall Score'),
       h('div', { id: 'score-overall-value', style: { fontSize: '28px', fontWeight: '700' } }, '—')
     )
@@ -534,6 +668,8 @@ async function scoreOne(article) {
   const enriched = { ...article, ...body };
   const { system, user, maxes } = buildScoringPrompt(enriched);
 
+  let renderedCount = 0;
+
   try {
     const fullText = await streamClaude({
       system,
@@ -541,7 +677,36 @@ async function scoreOne(article) {
       maxTokens: 2200,
       temperature: 0.1,
       model: SCORING_MODEL,
-      onDelta: () => {}
+      onDelta: (chunk, full) => {
+        const parsed = tryExtractCriteria(full);
+        if (parsed.length > renderedCount) {
+          for (let i = renderedCount; i < parsed.length; i++) {
+            const raw = parsed[i];
+            const def = CRITERIA.find(c => c.id === raw.id);
+            if (!def) continue;
+            const effectiveMax = maxes?.[raw.id] ?? def.baseMax;
+            const isNa = raw.na === true || effectiveMax === 0;
+            const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(raw.score) || 0)));
+            const c = {
+              id: raw.id, label: def.label, score, max: effectiveMax, na: isNa,
+              passed: Array.isArray(raw.passed) ? raw.passed.filter(Boolean) : [],
+              issues: Array.isArray(raw.issues) ? raw.issues.filter(Boolean) : [],
+              suggestions: Array.isArray(raw.suggestions) ? raw.suggestions.filter(Boolean) : []
+            };
+            const row = document.getElementById(`score-row-${c.id}`);
+            if (row) {
+              const newRow = renderCriterionRow(c);
+              if (newRow) {
+                newRow.id = `score-row-${c.id}`;
+                row.replaceWith(newRow);
+              } else {
+                row.style.display = 'none';
+              }
+            }
+          }
+          renderedCount = parsed.length;
+        }
+      }
     });
 
     const result = parseScoreResponse(fullText, maxes);
@@ -549,30 +714,12 @@ async function scoreOne(article) {
     const progressEl = document.getElementById('score-progress');
     if (progressEl) progressEl.style.display = 'none';
 
-    if (result.criteria) {
+    const ctbody = document.getElementById('score-criteria-body');
+    if (ctbody && result.criteria) {
+      ctbody.textContent = '';
       result.criteria.forEach(c => {
-        const row = document.getElementById(`score-row-${c.id}`);
-        if (!row) return;
-        const cells = row.querySelectorAll('td');
-        if (cells[1]) {
-          cells[1].textContent = '';
-          if (c.na) {
-            cells[1].appendChild(h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, 'N/A'));
-          } else {
-            const color = c.score >= c.max * 0.8 ? 'var(--success)' : c.score >= c.max * 0.5 ? 'var(--warning)' : 'var(--error)';
-            cells[1].appendChild(h('span', { style: { fontWeight: '600', color } }, `${c.score}/${c.max}`));
-          }
-        }
-        if (cells[2]) {
-          cells[2].textContent = '';
-          if (c.issues?.length) {
-            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, c.issues[0].slice(0, 60)));
-          } else if (c.passed?.length) {
-            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--success)' } }, c.passed[0].slice(0, 60)));
-          } else {
-            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'OK'));
-          }
-        }
+        const row = renderCriterionRow(c);
+        if (row) ctbody.appendChild(row);
       });
     }
 

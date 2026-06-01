@@ -1,8 +1,9 @@
-import { detectSession, checkGus, checkSlack } from '../shared/auth.js';
-import { pingGateway } from '../shared/gateway.js';
+import { detectSession } from '../shared/auth.js';
+import { pingGateway, callClaude, extractText } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
 import { STORAGE_KEYS } from '../shared/config.js';
+import { WRITING_GUIDE } from '../data/writing_guide.js';
 
 import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
@@ -40,11 +41,60 @@ async function handleMessage(msg) {
       const result = await pingGateway(token);
       return { success: true, ...result };
     }
-    case 'CHECK_GUS': return checkGus();
-    case 'CHECK_SLACK': return checkSlack();
     case 'RESOLVE_CASE_NUMBER': return resolveCase(msg.caseNumber);
+    case 'SEARCH_CASES': return searchCases(msg.query);
     case 'COVERAGE_ANALYZE_PT': return analyzePtCoverage(msg);
+    case 'REFINE_SECTION': return refineSection(msg);
     default: return { error: `Unknown action: ${msg.action}` };
+  }
+}
+
+async function refineSection(msg) {
+  const { content, title, focus } = msg;
+  if (!content) return { success: false, error: 'No content provided' };
+  try {
+    const guideRules = WRITING_GUIDE.slice(0, 2500);
+    const focusInstruction = focus ? `\n\nUSER FOCUS: "${focus}" — prioritize this aspect in your refinement.` : '';
+    const resp = await callClaude({
+      system: `You are an expert KB editor for Salesforce Agentforce. Refine this section following the Agentforce writing guide rules:
+- Titles must be specific to product + exact issue (not generic)
+- Use H2/H3 headers for structure (not bold text) — headers are used for chunking
+- Be specific about product names + features to avoid ambiguity
+- Explain acronyms and abbreviations. Use simple present tense
+- For resolutions: brief summary of what steps accomplish, then numbered steps
+- After code blocks, add plain-text explanation of what the code does
+- Tables should use text, not visual indicators like checkmarks
+- Give real-life examples when information is complex
+- Keep content concise but complete${focusInstruction}
+
+Return ONLY the improved text, no JSON wrapping or explanation.`,
+      messages: [{ role: 'user', content: `WRITING GUIDE REFERENCE:\n${guideRules}\n\n---\nSection Title: ${title}\n\nContent to refine:\n${content}` }],
+      maxTokens: 2000,
+      temperature: 0.2
+    });
+    const refined = extractText(resp);
+    return { success: true, refined };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function searchCases(query) {
+  if (!query || query.length < 3) return { cases: [] };
+  const session = await detectSession();
+  if (!session.sid) return { cases: [] };
+  try {
+    const escaped = escapeSoql(query);
+    let soql;
+    if (/^\d+$/.test(query)) {
+      soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escaped}%' ORDER BY CreatedDate DESC LIMIT 8`;
+    } else {
+      soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE (Subject LIKE '%${escaped}%' OR CaseNumber LIKE '%${escaped}%') ORDER BY CreatedDate DESC LIMIT 8`;
+    }
+    const records = await sfQuery(session.apiBase, session.sid, soql);
+    return { cases: records };
+  } catch {
+    return { cases: [] };
   }
 }
 
@@ -92,6 +142,13 @@ function handlePort(port) {
     case 'kbs-coverage':
       port.onMessage.addListener(wrap(handleCoverage));
       break;
+    case 'kba-coverage-stream':
+      port.onMessage.addListener((msg) => {
+        analyzePtCoverage(msg, port).catch(e => {
+          try { port.postMessage({ type: 'error', error: e.message }); } catch {}
+        });
+      });
+      break;
     case 'kbs-dedup':
       port.onMessage.addListener(wrap(handleDedup));
       break;
@@ -109,6 +166,7 @@ function mapArticleRecord(r) {
     title: r.Title,
     summary: r.Summary,
     urlName: r.UrlName,
+    publishStatus: r.PublishStatus || 'Online',
     validationStatus: r.ValidationStatus,
     topicName: r.Product_And_Topic__r?.Name || '',
     containsImage: !!r.Contains_Image__c,

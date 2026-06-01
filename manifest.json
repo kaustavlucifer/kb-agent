@@ -14,7 +14,6 @@
     "https://*.my.salesforce.com/*",
     "https://*.force.com/*",
     "https://*.lightning.force.com/*",
-    "https://*.slack.com/*",
     "https://eng-ai-model-gateway.sfproxy.devx-preprod.aws-esvc1-useast2.aws.sfdc.cl/*"
   ],
   "background": {
