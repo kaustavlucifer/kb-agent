@@ -223,7 +223,7 @@ async function onAnalyzeClick() {
     else if (/^\d{3,15}$/.test(value)) {
       const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: value });
       if (resp.success) caseId = resp.caseId;
-      else { toast('Case not found: ' + value, 'error'); return; }
+      else { toast(resp.error || ('Case not found: ' + value), 'error'); return; }
     } else { toast('Invalid Case number or ID.', 'error'); return; }
   }
   startAnalysis(caseId);

@@ -39,13 +39,21 @@ function render() {
 }
 
 function buildHeader() {
+  const settingsBtn = h('button', {
+    class: 'btn btn--ghost btn--sm',
+    title: 'Settings',
+    style: { fontSize: '16px', padding: '4px 8px' },
+    onClick: () => chrome.runtime.openOptionsPage()
+  }, '⚙');
+
   const header = h('header', { class: 'header' },
     h('div', { class: 'header__brand' },
       h('div', { class: 'header__logo' }, 'K'),
       h('div', { class: 'header__title' }, 'KB Agent')
     ),
     buildTabs(),
-    h('div', { class: 'header__status', id: 'connection-chips' })
+    h('div', { class: 'header__status', id: 'connection-chips' }),
+    settingsBtn
   );
   return header;
 }
@@ -115,7 +123,14 @@ function updateConnectionChips() {
   container.appendChild(chip(
     conn.sf?.connected ? 'connected' : 'disconnected',
     conn.sf?.connected ? (conn.sf.orgKey || 'OrgCS') : 'SF Offline',
-    { title: conn.sf?.connected ? 'Connected to Salesforce' : 'Not connected — log into OrgCS' }
+    {
+      title: conn.sf?.connected ? 'Connected to Salesforce — click to open' : 'Not connected — click to log into OrgCS',
+      onClick: () => {
+        const host = conn.sf?.lightningHost || conn.sf?.orgKey;
+        const url = host ? `https://${host}` : 'https://orgcs.lightning.force.com';
+        chrome.tabs.create({ url });
+      }
+    }
   ));
 
   const aiState = !conn.ai ? 'pending'
@@ -131,12 +146,25 @@ function updateConnectionChips() {
   aiChip.style.cursor = 'pointer';
   container.appendChild(aiChip);
 
-  if (conn.gus?.connected) {
-    container.appendChild(chip('connected', 'GUS', { title: 'GUS session active' }));
-  }
-  if (conn.slack?.connected) {
-    container.appendChild(chip('connected', 'Slack', { title: 'Slack token detected' }));
-  }
+  const gusChip = chip(
+    conn.gus?.connected ? 'connected' : 'disconnected',
+    conn.gus?.connected ? 'GUS' : 'GUS Offline',
+    {
+      title: conn.gus?.connected ? 'GUS session active — click to open' : 'No GUS session — click to log in',
+      onClick: () => chrome.tabs.create({ url: 'https://gus.lightning.force.com' })
+    }
+  );
+  container.appendChild(gusChip);
+
+  const slackChip = chip(
+    conn.slack?.connected ? 'connected' : 'disconnected',
+    conn.slack?.connected ? 'Slack' : 'Slack Offline',
+    {
+      title: conn.slack?.connected ? 'Slack token detected — click to open' : 'No Slack session — click to log in',
+      onClick: () => chrome.tabs.create({ url: 'https://app.slack.com' })
+    }
+  );
+  container.appendChild(slackChip);
 }
 
 function openTokenPopover(e) {
