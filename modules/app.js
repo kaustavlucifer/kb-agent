@@ -161,7 +161,7 @@ function updateConnectionChips() {
     conn.slack?.connected ? 'Slack' : 'Slack Offline',
     {
       title: conn.slack?.connected ? 'Slack token detected — click to open' : 'No Slack session — click to log in',
-      onClick: () => chrome.tabs.create({ url: 'https://app.slack.com' })
+      onClick: () => chrome.tabs.create({ url: 'https://salesforce-internal.slack.com' })
     }
   );
   container.appendChild(slackChip);

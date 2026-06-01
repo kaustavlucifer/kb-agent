@@ -13,15 +13,13 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
 
   send({ type: 'progress', step: 1, label: 'Fetching case + comments' });
-  const caseRecords = await sfQuery(session.apiBase, session.sid,
-    `SELECT Id, CaseNumber, Subject, Description, Topic__c, Product_Tag__c, Status, Priority FROM Case WHERE Id = '${caseId}' LIMIT 1`
-  );
-  if (!caseRecords.length) { send({ type: 'error', error: 'Case not found.' }); return; }
-  const caseRecord = caseRecords[0];
+  const caseFields = 'Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate';
+  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
+  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
   const comments = await sfQuery(session.apiBase, session.sid,
-    `SELECT CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate DESC LIMIT 30`
+    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
   );
 
   send({ type: 'progress', step: 2, label: 'Extracting intents' });
@@ -69,8 +67,8 @@ async function extractIntents(caseRecord, comments) {
     temperature: 0.1
   });
   const parsed = extractJson(extractText(resp));
-  if (!parsed?.intents) return { theme: caseRecord.Subject, product: caseRecord.Product_Tag__c, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
-  return { theme: parsed.theme || '', product: parsed.product || caseRecord.Product_Tag__c, intents: parsed.intents };
+  if (!parsed?.intents) return { theme: caseRecord.Subject, product: null, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
+  return { theme: parsed.theme || '', product: parsed.product || null, intents: parsed.intents };
 }
 
 async function extractAbstract(caseRecord, comments) {
@@ -117,7 +115,7 @@ async function makeDecision(caseRecord, abstract, topArticles) {
   const articleList = topArticles.map((a, i) => `${i + 1}. #${a.ArticleNumber} — "${a.Title}" (${a.ValidationStatus || '?'})`).join('\n');
   const resp = await callClaudeFast({
     system: 'Decide if a KB article should be UPDATED or CREATED. Return JSON: {"action":"UPDATE_EXISTING"|"CREATE_NEW","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"...","primaryArticleId":"...or null"}',
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || caseRecord.Product_Tag__c || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || 'none'}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nExisting articles:\n${articleList}` }],
+    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || null || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || 'none'}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nExisting articles:\n${articleList}` }],
     maxTokens: 400,
     temperature: 0.1
   });
