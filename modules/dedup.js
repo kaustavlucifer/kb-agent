@@ -8,6 +8,7 @@ import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, SCORING_MODEL, SF_
 
 let _container = null;
 let _unsubs = [];
+let _filterPt = '';
 
 const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
 
@@ -62,18 +63,23 @@ function render() {
   const running = getState('dedup.running');
   const articles = getState('kb.articles') || [];
 
-  const toolbar = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } },
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } },
+  const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
+
+  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+    h('select', { class: 'input', style: { maxWidth: '220px' }, id: 'dedup-pt-filter' },
+      h('option', { value: '' }, 'All P&Ts'),
+      ...ptOptions.map(pt => h('option', { value: pt, selected: _filterPt === pt }, pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')))
+    ),
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
       running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),
-    h('div', { style: { display: 'flex', gap: '8px' } },
-      h('button', { class: 'btn btn--secondary btn--sm', onClick: clearResults, disabled: !pairs.length || !!running }, 'Clear'),
-      h('button', { class: 'btn btn--primary btn--sm', onClick: detectDuplicates, disabled: !!running || !articles.length },
-        running ? 'Scanning…' : 'Detect Duplicates'
-      )
+    h('button', { class: 'btn btn--secondary btn--sm', onClick: clearResults, disabled: !pairs.length || !!running }, 'Clear'),
+    h('button', { class: 'btn btn--primary btn--sm', onClick: detectDuplicates, disabled: !!running || !articles.length },
+      running ? 'Scanning…' : 'Detect Duplicates'
     )
   );
   _container.appendChild(toolbar);
+  document.getElementById('dedup-pt-filter')?.addEventListener('change', e => { _filterPt = e.target.value; render(); });
 
   if (running) {
     const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
@@ -96,7 +102,8 @@ function render() {
     return;
   }
 
-  if (pairs.length) {
+  const displayPairs = _filterPt ? pairs.filter(p => p.ptName === _filterPt || p.titleA?.includes(_filterPt) || p.titleB?.includes(_filterPt)) : pairs;
+  if (displayPairs.length) {
     const table = h('table', { class: 'data-table' },
       h('thead', null, h('tr', null,
         h('th', null, 'Article A'),
@@ -109,7 +116,7 @@ function render() {
       h('tbody', null)
     );
     const tbody = table.querySelector('tbody');
-    pairs.forEach(pair => {
+    displayPairs.forEach(pair => {
       const confPct = Math.round((pair.confidence || 0) * 100);
       tbody.appendChild(h('tr', null,
         h('td', { style: { fontSize: '12px' } },
@@ -138,8 +145,9 @@ async function clearResults() {
 }
 
 async function detectDuplicates() {
-  const articles = getState('kb.articles') || [];
-  if (articles.length < 2) { toast('Need at least 2 articles.', 'error'); return; }
+  let articles = getState('kb.articles') || [];
+  if (_filterPt) articles = articles.filter(a => a.topicName === _filterPt);
+  if (articles.length < 2) { toast('Need at least 2 articles in selected P&T.', 'error'); return; }
 
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }

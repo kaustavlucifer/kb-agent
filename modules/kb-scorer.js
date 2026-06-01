@@ -9,6 +9,9 @@ import { SF_API_VERSION, SCORE_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHAR
 let _container = null;
 let _unsubs = [];
 let _filterText = '';
+let _filterPt = '';
+let _filterScore = '';
+let _filterValidation = '';
 
 const SCORE_META_FIELDS = [
   'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
@@ -63,20 +66,61 @@ function render() {
   const scores = getState('kb.scores') || {};
   const scoring = getState('kb.scoring');
 
-  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
-    h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '180px', maxWidth: '300px' }, placeholder: 'Filter articles…', id: 'kb-filter', value: _filterText }),
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
-      loading ? 'Loading…' : `${articles.length} articles`
-    ),
-    h('button', { class: 'btn btn--secondary btn--sm', onClick: loadArticles, disabled: loading }, 'Refresh'),
-    h('button', { class: 'btn btn--primary btn--sm', onClick: scoreAll, disabled: loading || !articles.length || !!scoring }, 'Score All')
-  );
-  _container.appendChild(toolbar);
+  const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
+  const scored = articles.filter(a => scores[a.id]?.overall != null);
+  const avgScore = scored.length ? Math.round(scored.reduce((s, a) => s + scores[a.id].overall, 0) / scored.length) : null;
 
-  document.getElementById('kb-filter')?.addEventListener('input', e => {
-    _filterText = e.target.value;
-    render();
-  });
+  const statsBar = h('div', { class: 'card', style: { padding: '12px', marginBottom: '12px' } },
+    h('div', { style: { display: 'flex', gap: '24px', fontSize: '12px' } },
+      h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700' } }, String(articles.length)),
+        h('div', { style: { color: 'var(--text-secondary)' } }, 'Articles')
+      ),
+      h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--primary)' } }, `${scored.length}/${articles.length}`),
+        h('div', { style: { color: 'var(--text-secondary)' } }, 'Scored')
+      ),
+      avgScore != null ? h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: avgScore >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : avgScore >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(avgScore)),
+        h('div', { style: { color: 'var(--text-secondary)' } }, 'Avg Score')
+      ) : null,
+      scored.length ? h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--error)' } }, String(scored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length)),
+        h('div', { style: { color: 'var(--text-secondary)' } }, 'Below 60')
+      ) : null
+    )
+  );
+  _container.appendChild(statsBar);
+
+  const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+    h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText }),
+    h('select', { class: 'input', style: { maxWidth: '200px' }, id: 'kb-pt-filter' },
+      h('option', { value: '' }, 'All P&Ts'),
+      ...ptOptions.map(pt => h('option', { value: pt, selected: _filterPt === pt }, pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')))
+    ),
+    h('select', { class: 'input', style: { maxWidth: '120px' }, id: 'kb-score-filter' },
+      h('option', { value: '', selected: !_filterScore }, 'All Scores'),
+      h('option', { value: 'high', selected: _filterScore === 'high' }, '≥ 80 (Good)'),
+      h('option', { value: 'mid', selected: _filterScore === 'mid' }, '60-79 (OK)'),
+      h('option', { value: 'low', selected: _filterScore === 'low' }, '< 60 (Poor)'),
+      h('option', { value: 'unscored', selected: _filterScore === 'unscored' }, 'Unscored')
+    ),
+    h('select', { class: 'input', style: { maxWidth: '140px' }, id: 'kb-val-filter' },
+      h('option', { value: '', selected: !_filterValidation }, 'All Validation'),
+      h('option', { value: 'Validated External', selected: _filterValidation === 'Validated External' }, 'Validated External'),
+      h('option', { value: 'Not Validated', selected: _filterValidation === 'Not Validated' }, 'Not Validated')
+    ),
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
+      h('button', { class: 'btn btn--secondary btn--sm', onClick: loadArticles, disabled: loading }, 'Refresh'),
+      h('button', { class: 'btn btn--primary btn--sm', onClick: scoreAll, disabled: loading || !articles.length || !!scoring }, scoring ? `Scoring…` : 'Score All')
+    )
+  );
+  _container.appendChild(filtersRow);
+
+  document.getElementById('kb-filter')?.addEventListener('input', e => { _filterText = e.target.value; render(); });
+  document.getElementById('kb-pt-filter')?.addEventListener('change', e => { _filterPt = e.target.value; render(); });
+  document.getElementById('kb-score-filter')?.addEventListener('change', e => { _filterScore = e.target.value; render(); });
+  document.getElementById('kb-val-filter')?.addEventListener('change', e => { _filterValidation = e.target.value; render(); });
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
@@ -99,15 +143,20 @@ function render() {
     return;
   }
 
-  const filtered = _filterText
-    ? articles.filter(a => `${a.title} ${a.articleNumber} ${a.topicName || ''}`.toLowerCase().includes(_filterText.toLowerCase()))
-    : articles;
+  let filtered = articles;
+  if (_filterText) filtered = filtered.filter(a => `${a.title} ${a.articleNumber} ${a.topicName || ''}`.toLowerCase().includes(_filterText.toLowerCase()));
+  if (_filterPt) filtered = filtered.filter(a => a.topicName === _filterPt);
+  if (_filterValidation) filtered = filtered.filter(a => a.validationStatus === _filterValidation);
+  if (_filterScore === 'high') filtered = filtered.filter(a => (scores[a.id]?.overall ?? -1) >= SCORE_HIGH_THRESHOLD);
+  else if (_filterScore === 'mid') filtered = filtered.filter(a => { const s = scores[a.id]?.overall; return s != null && s >= SCORE_MID_THRESHOLD && s < SCORE_HIGH_THRESHOLD; });
+  else if (_filterScore === 'low') filtered = filtered.filter(a => { const s = scores[a.id]?.overall; return s != null && s < SCORE_MID_THRESHOLD; });
+  else if (_filterScore === 'unscored') filtered = filtered.filter(a => scores[a.id]?.overall == null);
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
       h('th', { style: { width: '70px' } }, '#'),
       h('th', null, 'Title'),
-      h('th', { style: { width: '90px' } }, 'P&T'),
+      h('th', { style: { width: '140px' } }, 'P&T'),
       h('th', { style: { width: '60px' } }, 'Score'),
       h('th', { style: { width: '120px' } }, 'Actions')
     )),
@@ -143,7 +192,7 @@ function render() {
   if (filtered.length > pageSize) {
     tbody.appendChild(h('tr', null,
       h('td', { colspan: '5', style: { textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', padding: '12px' } },
-        `Showing ${pageSize} of ${filtered.length}. Use the filter to narrow results.`
+        `Showing ${pageSize} of ${filtered.length}. Use filters to narrow.`
       )
     ));
   }

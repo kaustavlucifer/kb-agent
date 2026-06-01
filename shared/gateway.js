@@ -1,5 +1,6 @@
 import { GATEWAY_BASE, ANTHROPIC_VERSION, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS } from './config.js';
 import { localGet } from './storage.js';
+import { acquireSlot } from './rate-limiter.js';
 
 async function getToken() {
   const data = await localGet(['gatewayToken']);
@@ -42,6 +43,7 @@ export async function pingGateway(token) {
 }
 
 export async function callClaude({ system, messages, maxTokens, model, token, temperature }) {
+  await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
   const m = model || await getModel();
@@ -78,6 +80,7 @@ export async function callClaudeFast(opts) {
 }
 
 export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError }) {
+  await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
   const m = model || await getModel();
