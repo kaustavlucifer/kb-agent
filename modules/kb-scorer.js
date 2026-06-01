@@ -1,13 +1,37 @@
 import { h, spinner, emptyState, toast, modal, progressBar } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { sfQuery, mapWithConcurrency } from '../shared/api.js';
-import { callClaudeFast, streamClaude, extractText } from '../shared/gateway.js';
-import { localGet, localSet, cacheGet, cacheSet } from '../shared/storage.js';
+import { sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText } from '../shared/api.js';
+import { callClaudeFast, streamClaude, extractText, extractJson } from '../shared/gateway.js';
+import { localGet, localSet } from '../shared/storage.js';
 import { SF_API_VERSION, SCORE_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHARS, SCORING_MODEL, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS } from '../shared/config.js';
 
 let _container = null;
 let _unsubs = [];
+let _filterText = '';
+
+const SCORE_META_FIELDS = [
+  'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
+  'PublishStatus', 'ValidationStatus', 'LastPublishedDate', 'LastModifiedDate',
+  'Contains_Image__c', 'Contains_Video__c', 'Article_Length__c',
+  'ArticleTotalViewCount', 'ArticleCaseAttachCount',
+  'Product_And_Topic__r.Name'
+].join(', ');
+
+const SCORE_BODY_FIELDS = 'Id, Description__c, Resolution__c, Steps__c, additional_resources__c';
+
+const CRITERIA = [
+  { id: 'title', label: 'Title Quality', baseMax: 12 },
+  { id: 'summary', label: 'Summary Quality', baseMax: 10 },
+  { id: 'headers', label: 'Header Structure', baseMax: 10 },
+  { id: 'content', label: 'Content Completeness', baseMax: 18 },
+  { id: 'scannability', label: 'Scannability & Structure', baseMax: 10 },
+  { id: 'media', label: 'Alt Text / Media', baseMax: 8 },
+  { id: 'code', label: 'Code Block Quality', baseMax: 8 },
+  { id: 'tables', label: 'Table Quality', baseMax: 8 },
+  { id: 'links', label: 'Links & URLs', baseMax: 8 },
+  { id: 'taxonomy', label: 'Taxonomy & Product Context', baseMax: 8 }
+];
 
 export function mount(container) {
   _container = container;
@@ -18,11 +42,11 @@ export function mount(container) {
     setState('kb.scoring', null);
     loadArticles();
   }
-  renderArticlesView();
-  _unsubs.push(subscribe('kb.articles', renderArticlesView));
-  _unsubs.push(subscribe('kb.scores', renderArticlesView));
-  _unsubs.push(subscribe('kb.loading', renderArticlesView));
-  _unsubs.push(subscribe('kb.scoring', renderScoringStatus));
+  render();
+  _unsubs.push(subscribe('kb.articles', render));
+  _unsubs.push(subscribe('kb.scores', render));
+  _unsubs.push(subscribe('kb.loading', render));
+  _unsubs.push(subscribe('kb.scoring', render));
 }
 
 export function unmount() {
@@ -31,30 +55,42 @@ export function unmount() {
   _container = null;
 }
 
-function renderArticlesView() {
+function render() {
   if (!_container) return;
   _container.textContent = '';
   const loading = getState('kb.loading');
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
+  const scoring = getState('kb.scoring');
 
-  const toolbar = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } },
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } },
-      loading ? 'Loading articles…' : `${articles.length} articles loaded`
+  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+    h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '180px', maxWidth: '300px' }, placeholder: 'Filter articles…', id: 'kb-filter', value: _filterText }),
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
+      loading ? 'Loading…' : `${articles.length} articles`
     ),
-    h('div', { style: { display: 'flex', gap: '8px' } },
-      h('button', { class: 'btn btn--secondary btn--sm', onClick: loadArticles, disabled: loading }, 'Refresh'),
-      h('button', { class: 'btn btn--primary btn--sm', onClick: scoreAll, disabled: loading || !articles.length }, 'Score All')
-    )
+    h('button', { class: 'btn btn--secondary btn--sm', onClick: loadArticles, disabled: loading }, 'Refresh'),
+    h('button', { class: 'btn btn--primary btn--sm', onClick: scoreAll, disabled: loading || !articles.length || !!scoring }, 'Score All')
   );
   _container.appendChild(toolbar);
 
-  const statusEl = h('div', { id: 'scoring-status' });
-  _container.appendChild(statusEl);
-  renderScoringStatus();
+  document.getElementById('kb-filter')?.addEventListener('input', e => {
+    _filterText = e.target.value;
+    render();
+  });
+
+  if (scoring) {
+    const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
+    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
+        h('span', null, `Scoring: ${scoring.done} / ${scoring.total}`),
+        h('span', null, `${pct}%`)
+      ),
+      progressBar(pct, 'default')
+    ));
+  }
 
   if (loading) {
-    _container.appendChild(h('div', { style: { textAlign: 'center', padding: '32px' } }, spinner('lg')));
+    _container.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
     return;
   }
 
@@ -63,90 +99,187 @@ function renderArticlesView() {
     return;
   }
 
+  const filtered = _filterText
+    ? articles.filter(a => `${a.title} ${a.articleNumber} ${a.topicName || ''}`.toLowerCase().includes(_filterText.toLowerCase()))
+    : articles;
+
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
-      h('th', null, '#'),
-      h('th', { style: { width: '50%' } }, 'Title'),
-      h('th', null, 'Score'),
-      h('th', null, 'Actions')
+      h('th', { style: { width: '70px' } }, '#'),
+      h('th', null, 'Title'),
+      h('th', { style: { width: '90px' } }, 'P&T'),
+      h('th', { style: { width: '60px' } }, 'Score'),
+      h('th', { style: { width: '120px' } }, 'Actions')
     )),
-    h('tbody', { id: 'articles-tbody' })
+    h('tbody', null)
   );
 
   const tbody = table.querySelector('tbody');
-  articles.forEach(a => {
-    const score = scores[a.id];
-    const scoreDisplay = score != null
-      ? h('span', { class: `pill pill--${score >= SCORE_HIGH_THRESHOLD ? 'success' : score >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}` }, String(score))
+  const pageSize = 100;
+  filtered.slice(0, pageSize).forEach(a => {
+    const scoreData = scores[a.id];
+    const overall = scoreData?.overall;
+    const scoreEl = overall != null
+      ? h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
       : h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—');
 
     tbody.appendChild(h('tr', null,
-      h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px' } }, a.articleNumber || ''),
-      h('td', null, h('span', { style: { fontSize: '12px' } }, a.title || a.Title || '')),
-      h('td', null, scoreDisplay),
+      h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)' } }, a.articleNumber || ''),
       h('td', null,
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
+        h('div', { style: { fontSize: '12px', fontWeight: '500' } }, a.title || ''),
+        a.validationStatus ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, a.validationStatus) : null
+      ),
+      h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, (a.topicName || '').replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')),
+      h('td', null, scoreEl),
+      h('td', null,
+        h('div', { style: { display: 'flex', gap: '4px' } },
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, 'Score'),
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
+        )
       )
     ));
   });
+
+  if (filtered.length > pageSize) {
+    tbody.appendChild(h('tr', null,
+      h('td', { colspan: '5', style: { textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', padding: '12px' } },
+        `Showing ${pageSize} of ${filtered.length}. Use the filter to narrow results.`
+      )
+    ));
+  }
+
   _container.appendChild(table);
 }
 
-function renderScoringStatus() {
-  const el = document.getElementById('scoring-status');
-  if (!el) return;
-  el.textContent = '';
-  const scoring = getState('kb.scoring');
-  if (!scoring) return;
-  el.appendChild(h('div', { style: { marginBottom: '8px' } },
-    h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px' } }, `Scoring: ${scoring.done}/${scoring.total}`),
-    progressBar(Math.round((scoring.done / scoring.total) * 100), 'default')
-  ));
+function showScoreDetail(article, scoreData) {
+  if (!scoreData?.criteria) return;
+  const body = h('div', null,
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '16px' } },
+      h('div', null,
+        h('div', { style: { fontSize: '14px', fontWeight: '600' } }, article.title),
+        h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, `#${article.articleNumber}`)
+      ),
+      h('div', { style: { fontSize: '24px', fontWeight: '700', color: scoreData.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : scoreData.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(scoreData.overall))
+    )
+  );
+
+  const criteriaTable = h('table', { class: 'data-table' },
+    h('thead', null, h('tr', null,
+      h('th', null, 'Criterion'),
+      h('th', { style: { width: '70px' } }, 'Score'),
+      h('th', null, 'Issues'),
+      h('th', null, 'Suggestions')
+    )),
+    h('tbody', null)
+  );
+  const ctbody = criteriaTable.querySelector('tbody');
+  scoreData.criteria.forEach(c => {
+    if (c.na) return;
+    ctbody.appendChild(h('tr', null,
+      h('td', { style: { fontWeight: '500', fontSize: '12px' } }, c.label || c.id),
+      h('td', null, h('span', { class: `pill pill--${c.score >= c.max * 0.8 ? 'success' : c.score >= c.max * 0.5 ? 'warning' : 'error'}` }, `${c.score}/${c.max}`)),
+      h('td', { style: { fontSize: '11px' } }, (c.issues || []).join('; ') || '—'),
+      h('td', { style: { fontSize: '11px' } }, (c.suggestions || []).join('; ') || '—')
+    ));
+  });
+  body.appendChild(criteriaTable);
+
+  modal(`Score: ${article.articleNumber}`, body, { wide: true });
 }
 
 async function loadArticles() {
   setState('kb.loading', true);
   try {
     const session = await detectSession();
-    if (!session.sid) { toast('Not connected to Salesforce.', 'error'); return; }
-    const records = await sfQuery(session.apiBase, session.sid,
-      `SELECT Id, Title, ArticleNumber, Summary, UrlName, ValidationStatus FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language = 'en_US' ORDER BY LastModifiedDate DESC LIMIT 2000`
-    );
-    const articles = records.map(r => ({ id: r.Id, title: r.Title, articleNumber: r.ArticleNumber, summary: r.Summary, urlName: r.UrlName, validationStatus: r.ValidationStatus }));
-    setState('kb.articles', articles);
+    if (!session.sid) { toast('Not connected to Salesforce.', 'error'); setState('kb.loading', false); return; }
 
-    const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
-    if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
-      setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
+    const records = await sfQueryAll(session.apiBase, session.sid,
+      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
+      (loaded, total) => setState('kb.loading', { loaded, total })
+    );
+
+    const articles = records.map(r => ({
+      id: r.Id,
+      knowledgeArticleId: r.KnowledgeArticleId,
+      articleNumber: r.ArticleNumber,
+      title: r.Title,
+      summary: r.Summary,
+      urlName: r.UrlName,
+      validationStatus: r.ValidationStatus,
+      topicName: r.Product_And_Topic__r?.Name || '',
+      containsImage: !!r.Contains_Image__c,
+      containsVideo: !!r.Contains_Video__c,
+      articleLength: r.Article_Length__c || 0,
+      viewCount: r.ArticleTotalViewCount || 0,
+      caseAttachCount: r.ArticleCaseAttachCount || 0,
+      lastPublished: r.LastPublishedDate
+    }));
+
+    setState('kb.articles', articles);
+    await localSet({ [STORAGE_KEYS.ALL_ARTICLES]: articles, [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now() });
+
+    const cached = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
+    if (cached[STORAGE_KEYS.ARTICLE_SCORES]) {
+      setState('kb.scores', cached[STORAGE_KEYS.ARTICLE_SCORES]);
     }
+    toast(`Loaded ${articles.length} articles.`, 'success');
   } catch (e) {
-    toast('Failed to load articles: ' + e.message, 'error');
+    toast('Failed to load: ' + e.message, 'error');
   } finally {
     setState('kb.loading', false);
   }
 }
 
+async function fetchBodies(articleIds, session) {
+  const bodyMap = new Map();
+  const batches = [];
+  for (let i = 0; i < articleIds.length; i += BODY_FETCH_BATCH_SIZE) {
+    batches.push(articleIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
+  }
+  for (const batch of batches) {
+    const soql = `SELECT ${SCORE_BODY_FIELDS} FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
+    const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+    try {
+      const result = await sfGet(url, session.sid);
+      for (const r of (result.records || [])) {
+        bodyMap.set(r.Id, {
+          description: r.Description__c || '',
+          resolution: r.Resolution__c || '',
+          steps: r.Steps__c || '',
+          additionalResources: r.additional_resources__c || ''
+        });
+      }
+    } catch {}
+  }
+  return bodyMap;
+}
+
 async function scoreAll() {
   const articles = getState('kb.articles') || [];
-  if (!articles.length) return;
-  const scores = { ...(getState('kb.scores') || {}) };
-  const toScore = articles.filter(a => scores[a.id] == null);
+  const existingScores = getState('kb.scores') || {};
+  const toScore = articles.filter(a => !existingScores[a.id]?.overall);
   if (!toScore.length) { toast('All articles already scored.', 'info'); return; }
 
   setState('kb.scoring', { done: 0, total: toScore.length });
+  const session = await detectSession();
+  if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
+
+  const bodyMap = await fetchBodies(toScore.map(a => a.id), session);
+  const scores = { ...existingScores };
   let done = 0;
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
+    const body = bodyMap.get(article.id) || {};
+    const enriched = { ...article, ...body };
     try {
-      const score = await scoreArticle(article);
-      scores[article.id] = score;
-      done++;
-      setState('kb.scoring', { done, total: toScore.length });
-      setState('kb.scores', { ...scores });
-    } catch {
-      done++;
-      setState('kb.scoring', { done, total: toScore.length });
+      const result = await scoreArticle(enriched);
+      scores[article.id] = result;
+    } catch (e) {
+      scores[article.id] = { overall: null, criteria: [], error: e.message };
     }
+    done++;
+    setState('kb.scores', { ...scores });
+    setState('kb.scoring', { done, total: toScore.length });
   });
 
   await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
@@ -154,45 +287,206 @@ async function scoreAll() {
   toast(`Scored ${done} articles.`, 'success');
 }
 
-async function scoreArticle(article) {
-  const prompt = buildScoringPrompt(article);
-  const resp = await callClaudeFast({
-    system: 'You are a KB quality scorer. Score this article 0-100 based on the Agentforce Writing Guide. Return ONLY a JSON object: {"score": <number>, "criteria": [{"name": "...", "score": <number>, "note": "..."}]}',
-    messages: [{ role: 'user', content: prompt }],
-    maxTokens: 800,
-    temperature: 0.1
-  });
-  const text = extractText(resp);
+async function scoreOne(article) {
+  const session = await detectSession();
+  if (!session.sid) { toast('No SF session.', 'error'); return; }
+  toast('Scoring…', 'info');
+  const bodyMap = await fetchBodies([article.id], session);
+  const body = bodyMap.get(article.id) || {};
+  const enriched = { ...article, ...body };
   try {
-    const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
-    return parsed.score || 0;
-  } catch {
-    return 0;
+    const result = await scoreArticle(enriched);
+    const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
+    setState('kb.scores', scores);
+    await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+    toast(`Score: ${result.overall}/100`, result.overall >= SCORE_HIGH_THRESHOLD ? 'success' : 'warning');
+    showScoreDetail(article, result);
+  } catch (e) {
+    toast('Scoring failed: ' + e.message, 'error');
   }
 }
 
+function computeDynamicMaxes(flags) {
+  const naSet = new Set();
+  if (!flags.includes('HAS_IMAGES') && !flags.includes('HAS_VIDEO')) naSet.add('media');
+  if (!flags.includes('HAS_CODE_BLOCKS')) naSet.add('code');
+  if (!flags.includes('HAS_TABLES')) naSet.add('tables');
+
+  const freedPoints = CRITERIA.filter(c => naSet.has(c.id)).reduce((sum, c) => sum + c.baseMax, 0);
+  if (freedPoints === 0) return { maxes: Object.fromEntries(CRITERIA.map(c => [c.id, c.baseMax])), naSet };
+
+  const activeIds = CRITERIA.filter(c => !naSet.has(c.id)).map(c => c.id);
+  const redistribution = {};
+  let distributed = 0;
+  const contentBonus = Math.round(freedPoints * 0.45);
+  redistribution['content'] = contentBonus;
+  distributed += contentBonus;
+
+  const secondaryIds = activeIds.filter(id => id !== 'content' && id !== 'title' && id !== 'summary');
+  const secondaryBase = secondaryIds.reduce((s, id) => s + CRITERIA.find(c => c.id === id).baseMax, 0);
+  const remaining = freedPoints - distributed;
+  for (const id of secondaryIds) {
+    const base = CRITERIA.find(c => c.id === id).baseMax;
+    redistribution[id] = Math.round(remaining * (base / secondaryBase));
+  }
+
+  const diff = freedPoints - Object.values(redistribution).reduce((a, b) => a + b, 0);
+  if (diff !== 0 && redistribution['headers'] != null) redistribution['headers'] += diff;
+
+  const maxes = {};
+  for (const c of CRITERIA) {
+    if (naSet.has(c.id)) maxes[c.id] = 0;
+    else maxes[c.id] = c.baseMax + (redistribution[c.id] || 0);
+  }
+  const total = Object.values(maxes).reduce((a, b) => a + b, 0);
+  if (total !== 100) maxes['content'] += (100 - total);
+
+  return { maxes, naSet };
+}
+
 function buildScoringPrompt(article) {
-  return `Article #${article.articleNumber}: ${article.title}\n\nSummary: ${article.summary || 'None'}\n\nScore against: title specificity, product naming, header structure, description+resolution pairing, acronym expansion, additional resources, generalization, editorial style.`;
+  const descRaw = article.description || '';
+  const resRaw = article.resolution || '';
+  const descText = stripHtml(descRaw).slice(0, MAX_BODY_CHARS);
+  const resText = stripHtml(resRaw).slice(0, MAX_BODY_CHARS);
+  const stepsText = stripHtml(article.steps || '').slice(0, 1500);
+
+  const flags = [];
+  if (article.containsImage) flags.push('HAS_IMAGES');
+  if (article.containsVideo) flags.push('HAS_VIDEO');
+  if (hasCodeBlocks(descRaw) || hasCodeBlocks(resRaw)) flags.push('HAS_CODE_BLOCKS');
+  if (hasTables(descRaw) || hasTables(resRaw)) flags.push('HAS_TABLES');
+  if (!hasHeaders(descRaw) && !hasHeaders(resRaw)) flags.push('NO_HTML_HEADERS');
+  if (article.containsImage && !hasAltText(descRaw) && !hasAltText(resRaw)) flags.push('IMAGES_MISSING_ALT');
+  if (/orgcs\.lightning\.force\.com|orgcs\.my\.salesforce\.com/i.test(descRaw + resRaw)) flags.push('HAS_INTERNAL_URLS');
+  if ((article.additionalResources || '').trim().length > 20) flags.push('HAS_ADDITIONAL_RESOURCES');
+
+  const { maxes, naSet } = computeDynamicMaxes(flags);
+  const m = maxes;
+
+  const linkAnchors = (descRaw + resRaw).match(/<a\s[^>]*href\s*=\s*["'][^"']+["'][^>]*>[^<]+<\/a>/gi) || [];
+  const rawUrls = ((descRaw + resRaw).match(/(?<!['"=])https?:\/\/[^\s"'<>]{10,}/gi) || [])
+    .filter(u => !(descRaw + resRaw).includes('href="' + u));
+  const internalUrls = (descRaw + resRaw).match(/https?:\/\/(orgcs|org62)[^\s"'<>]*/gi) || [];
+
+  const system = `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
+Score this article. Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
+${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
+
+SCORING: Be STRICT. Most articles score 55-75. Score 90+ should be genuinely rare.
+Every criterion MUST include "passed" (what you verified passes) and "issues" (specific problems).
+
+CRITERIA: title(max ${m.title}), summary(max ${m.summary}), headers(max ${m.headers}), content(max ${m.content}), scannability(max ${m.scannability}), media(max ${m.media}), code(max ${m.code}), tables(max ${m.tables}), links(max ${m.links}), taxonomy(max ${m.taxonomy}).
+
+Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`;
+
+  const user = `ARTICLE:
+Title: ${article.title}
+Article#: ${article.articleNumber}
+P&T: ${article.topicName || '(none)'}
+Validation: ${article.validationStatus || 'Not Validated'}
+Flags: ${flags.join(', ') || 'none'}
+Links: RAW_URLs=${rawUrls.length}, ANCHORED=${linkAnchors.length}, INTERNAL=${internalUrls.length}
+Dynamic Maxes: ${Object.entries(m).map(([k, v]) => `${k}=${v}`).join(', ')}
+
+SUMMARY (${(article.summary || '').length} chars):
+${article.summary || '(empty)'}
+
+DESCRIPTION (${descText.length} chars):
+${descText || '(empty)'}
+
+RESOLUTION (${resText.length} chars):
+${resText || '(empty)'}
+${stepsText ? `\nSTEPS:\n${stepsText}` : ''}
+
+Score now. Return only JSON. overall must equal sum of all scores.`;
+
+  return { system, user, maxes };
+}
+
+async function scoreArticle(article) {
+  const { system, user, maxes } = buildScoringPrompt(article);
+  const resp = await callClaudeFast({
+    system,
+    messages: [{ role: 'user', content: user }],
+    maxTokens: 2200,
+    temperature: 0.1,
+    model: SCORING_MODEL
+  });
+  const text = extractText(resp);
+  return parseScoreResponse(text, maxes);
+}
+
+function parseScoreResponse(text, dynamicMaxes) {
+  const obj = extractJson(text);
+  if (!obj) return { overall: null, criteria: [], error: 'No JSON in response' };
+
+  const criteria = CRITERIA.map(c => {
+    const found = (obj.criteria || []).find(x => x.id === c.id) || {};
+    const effectiveMax = dynamicMaxes?.[c.id] ?? c.baseMax;
+    const isNa = found.na === true || effectiveMax === 0;
+    const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(found.score) || 0)));
+    return {
+      id: c.id,
+      label: c.label,
+      score,
+      max: effectiveMax,
+      na: isNa,
+      passed: Array.isArray(found.passed) ? found.passed.filter(Boolean) : [],
+      issues: Array.isArray(found.issues) ? found.issues.filter(Boolean) : [],
+      suggestions: Array.isArray(found.suggestions) ? found.suggestions.filter(Boolean) : []
+    };
+  });
+  const overall = Math.min(100, criteria.reduce((s, c) => s + c.score, 0));
+  return { overall, criteria, error: null };
 }
 
 async function rewriteArticle(article) {
-  const body = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `Rewriting: ${article.title}`),
-    h('div', { id: 'rewrite-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', maxHeight: '400px', overflowY: 'auto' } }, spinner('md'))
+  const session = await detectSession();
+  if (!session.sid) { toast('No SF session.', 'error'); return; }
+
+  const bodyMap = await fetchBodies([article.id], session);
+  const body = bodyMap.get(article.id) || {};
+  const desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
+  const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
+  const steps = stripHtml(body.steps || '').slice(0, 1500);
+
+  const streamEl = h('div', { id: 'rewrite-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
+  const content = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `#${article.articleNumber} — ${article.title}`),
+    streamEl
   );
 
-  const m = modal('Article Rewrite', body, {
+  modal('Rewrite Article', content, {
     wide: true,
     primaryAction: { label: 'Copy', handler: () => {
-      const text = document.getElementById('rewrite-stream')?.textContent || '';
-      navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
+      navigator.clipboard.writeText(document.getElementById('rewrite-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
     }}
   });
 
+  const system = `You are an expert technical writer improving Salesforce Knowledge Articles for Agentforce readiness.
+Apply these rules:
+- TITLE: Specific to product + exact issue. Include product name, error text, or scenario.
+- SUMMARY: 2-4 sentences covering problem context and resolution.
+- HEADERS: Use ## headers to break content. Never bold text as substitute.
+- DESCRIPTION: State problem, symptoms, context. Explain the "why".
+- RESOLUTION: Brief statement of what steps accomplish, then numbered steps. After code blocks, add plain-text explanation.
+
+Output exactly: ## TITLE, ## SUMMARY, ## DESCRIPTION, ## RESOLUTION. No other commentary.`;
+
+  const user = `Rewrite this article:
+Title: ${article.title}
+P&T: ${article.topicName || ''}
+
+CURRENT SUMMARY: ${article.summary || '(empty)'}
+CURRENT DESCRIPTION: ${desc || '(empty)'}
+CURRENT RESOLUTION: ${res || '(empty)'}
+${steps ? `CURRENT STEPS: ${steps}` : ''}`;
+
   try {
     await streamClaude({
-      system: 'Rewrite this Salesforce KB article following the Agentforce Writing Guide. Improve clarity, structure, and completeness.',
-      messages: [{ role: 'user', content: `Title: ${article.title}\nSummary: ${article.summary || ''}` }],
+      system,
+      messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
       onDelta: (chunk, full) => {
         const el = document.getElementById('rewrite-stream');
@@ -209,18 +503,26 @@ export async function handleScoreBatch(port, msg) {
   const articles = msg.articles || [];
   if (!articles.length) { port.postMessage({ type: 'done', scored: [] }); return; }
 
+  const session = await detectSession();
+  if (!session.sid) { port.postMessage({ type: 'error', error: 'No SF session' }); return; }
+
+  const bodyMap = await fetchBodies(articles.map(a => a.id), session);
   const results = [];
   let done = 0;
+
   await mapWithConcurrency(articles, SCORE_CONCURRENCY, async (article) => {
+    const body = bodyMap.get(article.id) || {};
+    const enriched = { ...article, ...body };
     try {
-      const score = await scoreArticle(article);
-      results.push({ id: article.id, overall: score });
+      const result = await scoreArticle(enriched);
+      results.push({ id: article.id, overall: result.overall, criteria: result.criteria });
     } catch (e) {
       results.push({ id: article.id, overall: null, error: e.message });
     }
     done++;
     if (done % 5 === 0) port.postMessage({ type: 'progress', batchResults: results.slice(-5), done, total: articles.length });
   });
+
   port.postMessage({ type: 'done', scored: results });
 }
 
@@ -228,9 +530,11 @@ export async function handleRewrite(port, msg) {
   const article = msg.article;
   if (!article) { port.postMessage({ type: 'error', error: 'No article provided' }); return; }
   try {
+    const desc = stripHtml(article.description || article.body || '').slice(0, MAX_BODY_CHARS);
+    const res = stripHtml(article.resolution || '').slice(0, MAX_BODY_CHARS);
     await streamClaude({
-      system: 'Rewrite this Salesforce KB article following the Agentforce Writing Guide.',
-      messages: [{ role: 'user', content: `Title: ${article.title}\nBody: ${(article.body || article.summary || '').slice(0, MAX_BODY_CHARS)}` }],
+      system: 'You are an expert technical writer. Rewrite this Salesforce KB article for Agentforce readiness. Output: ## TITLE, ## SUMMARY, ## DESCRIPTION, ## RESOLUTION.',
+      messages: [{ role: 'user', content: `Title: ${article.title}\nSummary: ${article.summary || ''}\nDescription: ${desc}\nResolution: ${res}` }],
       maxTokens: 4000,
       onDelta: (chunk) => port.postMessage({ type: 'delta', chunk }),
       onDone: (full) => port.postMessage({ type: 'done', text: full })
