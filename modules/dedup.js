@@ -8,7 +8,7 @@ import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, SCORING_MODEL, SF_
 
 let _container = null;
 let _unsubs = [];
-let _filterPt = '';
+let _filterPt = [];
 
 const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
 
@@ -30,6 +30,47 @@ Rules:
 - Reason must state specific identical content
 - If uncertain, do NOT flag — false negatives acceptable, false positives waste time
 - If no duplicates: return {"pairs":[]}`;
+
+function multiSelect(id, label, options, selected, onChange) {
+  const wrap = h('div', { class: 'multi-select', id });
+  wrap.style.position = 'relative';
+  const btn = h('button', { class: 'btn btn--secondary btn--sm' },
+    `${label}${selected.length ? ` (${selected.length})` : ''}`
+  );
+  btn.addEventListener('click', toggleDropdown);
+  wrap.appendChild(btn);
+
+  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: '500', minWidth: '180px', boxShadow: 'var(--shadow-md)' } });
+
+  options.forEach(opt => {
+    const checked = selected.includes(opt.value);
+    const checkbox = h('input', { type: 'checkbox' });
+    checkbox.checked = checked;
+    checkbox.addEventListener('change', (e) => {
+      const val = opt.value;
+      const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
+      onChange(newSel);
+    });
+    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer' } },
+      checkbox,
+      h('span', null, opt.label)
+    );
+    dropdown.appendChild(item);
+  });
+  wrap.appendChild(dropdown);
+
+  function toggleDropdown(e) {
+    e.stopPropagation();
+    const visible = dropdown.style.display !== 'none';
+    dropdown.style.display = visible ? 'none' : 'block';
+    if (!visible) {
+      const dismiss = (ev) => { if (!wrap.contains(ev.target)) { dropdown.style.display = 'none'; document.removeEventListener('click', dismiss); } };
+      setTimeout(() => document.addEventListener('click', dismiss), 0);
+    }
+  }
+
+  return wrap;
+}
 
 export function mount(container) {
   _container = container;
@@ -65,21 +106,28 @@ function render() {
 
   const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
 
+  const ptMulti = multiSelect('dedup-pt-filter', 'P&T',
+    ptOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
+    _filterPt,
+    (sel) => { _filterPt = sel; render(); }
+  );
+
+  const clearBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: !pairs.length || !!running }, 'Clear');
+  clearBtn.addEventListener('click', clearResults);
+  const detectBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: !!running || !articles.length },
+    running ? 'Scanning…' : 'Detect Duplicates'
+  );
+  detectBtn.addEventListener('click', detectDuplicates);
+
   const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
-    h('select', { class: 'input', style: { maxWidth: '220px' }, id: 'dedup-pt-filter' },
-      h('option', { value: '' }, 'All P&Ts'),
-      ...ptOptions.map(pt => h('option', { value: pt, selected: _filterPt === pt }, pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')))
-    ),
+    ptMulti,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
       running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),
-    h('button', { class: 'btn btn--secondary btn--sm', onClick: clearResults, disabled: !pairs.length || !!running }, 'Clear'),
-    h('button', { class: 'btn btn--primary btn--sm', onClick: detectDuplicates, disabled: !!running || !articles.length },
-      running ? 'Scanning…' : 'Detect Duplicates'
-    )
+    clearBtn,
+    detectBtn
   );
   _container.appendChild(toolbar);
-  document.getElementById('dedup-pt-filter')?.addEventListener('change', e => { _filterPt = e.target.value; render(); });
 
   if (running) {
     const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
@@ -102,7 +150,7 @@ function render() {
     return;
   }
 
-  const displayPairs = _filterPt ? pairs.filter(p => p.ptName === _filterPt || p.titleA?.includes(_filterPt) || p.titleB?.includes(_filterPt)) : pairs;
+  const displayPairs = _filterPt.length ? pairs.filter(p => _filterPt.includes(p.ptName) || _filterPt.some(pt => p.titleA?.includes(pt) || p.titleB?.includes(pt))) : pairs;
   if (displayPairs.length) {
     const table = h('table', { class: 'data-table' },
       h('thead', null, h('tr', null,
@@ -146,7 +194,7 @@ async function clearResults() {
 
 async function detectDuplicates() {
   let articles = getState('kb.articles') || [];
-  if (_filterPt) articles = articles.filter(a => a.topicName === _filterPt);
+  if (_filterPt.length) articles = articles.filter(a => _filterPt.includes(a.topicName));
   if (articles.length < 2) { toast('Need at least 2 articles in selected P&T.', 'error'); return; }
 
   const session = await detectSession();

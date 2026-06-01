@@ -1,12 +1,12 @@
 import { detectSession, checkGus, checkSlack } from '../shared/auth.js';
 import { pingGateway } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfQuery, escapeSoql } from '../shared/api.js';
+import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
 import { STORAGE_KEYS } from '../shared/config.js';
 
 import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
-import { handleCoverage } from './handlers/coverage.js';
+import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
 import { handleDedup, handleMerge } from './handlers/dedup.js';
 
 chrome.action.onClicked.addListener(() => {
@@ -43,6 +43,7 @@ async function handleMessage(msg) {
     case 'CHECK_GUS': return checkGus();
     case 'CHECK_SLACK': return checkSlack();
     case 'RESOLVE_CASE_NUMBER': return resolveCase(msg.caseNumber);
+    case 'COVERAGE_ANALYZE_PT': return analyzePtCoverage(msg);
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }
@@ -99,3 +100,52 @@ function handlePort(port) {
       break;
   }
 }
+
+function mapArticleRecord(r) {
+  return {
+    id: r.Id,
+    knowledgeArticleId: r.KnowledgeArticleId,
+    articleNumber: r.ArticleNumber,
+    title: r.Title,
+    summary: r.Summary,
+    urlName: r.UrlName,
+    validationStatus: r.ValidationStatus,
+    topicName: r.Product_And_Topic__r?.Name || '',
+    containsImage: !!r.Contains_Image__c,
+    containsVideo: !!r.Contains_Video__c,
+    articleLength: r.Article_Length__c || 0,
+    viewCount: r.ArticleTotalViewCount || 0,
+    caseAttachCount: r.ArticleCaseAttachCount || 0,
+    lastPublished: r.LastPublishedDate
+  };
+}
+
+(async () => {
+  try {
+    const session = await detectSession();
+    if (!session.sid) return;
+
+    const META_FIELDS = 'Id, KnowledgeArticleId, ArticleNumber, Title, Summary, UrlName, PublishStatus, ValidationStatus, LastPublishedDate, LastModifiedDate, Contains_Image__c, Contains_Video__c, Article_Length__c, ArticleTotalViewCount, ArticleCaseAttachCount, Product_And_Topic__r.Name';
+
+    const tier1Records = await sfQueryAll(session.apiBase, session.sid,
+      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+    );
+
+    const tier2Records = await sfQueryAll(session.apiBase, session.sid,
+      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+    );
+
+    const tier1 = tier1Records.map(mapArticleRecord);
+    const tier1Ids = new Set(tier1.map(a => a.id));
+    const tier2Only = tier2Records.map(mapArticleRecord).filter(a => !tier1Ids.has(a.id));
+    const allArticles = [...tier1, ...tier2Only];
+
+    await localSet({
+      [STORAGE_KEYS.ALL_ARTICLES]: allArticles,
+      [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now()
+    });
+    console.log(`[KB-Agent] Preloaded ${allArticles.length} articles (${tier1.length} validated, ${tier2Only.length} other).`);
+  } catch (e) {
+    console.warn('[KB-Agent] Preload failed:', e.message);
+  }
+})();

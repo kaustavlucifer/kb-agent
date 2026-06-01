@@ -1,10 +1,11 @@
-import { h, spinner, emptyState, toast, progressBar } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, progressBar, chip } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 
 let _container = null;
 let _port = null;
 let _unsubs = [];
+let _collapsedSections = {};
 
 export function mount(container) {
   _container = container;
@@ -14,6 +15,8 @@ export function mount(container) {
   _unsubs.push(subscribe('case.view', renderByView));
   _unsubs.push(subscribe('case.progress', () => { if (getState('case.view') === 'analyzing') renderByView(); }));
   _unsubs.push(subscribe('case.result', () => { if (getState('case.view') === 'result') renderByView(); }));
+  _unsubs.push(subscribe('case.streamText', () => { if (getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.topArticles', () => { if (getState('case.view') === 'streaming') renderStreaming(); }));
 
   const pending = getState('case.pendingUrl');
   if (pending) {
@@ -28,6 +31,7 @@ export function unmount() {
   _unsubs = [];
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
   _container = null;
+  _collapsedSections = {};
 }
 
 async function loadRecentCases() {
@@ -46,6 +50,7 @@ function renderByView() {
   const view = getState('case.view');
   if (view === 'idle') renderIdle();
   else if (view === 'analyzing') renderAnalyzing();
+  else if (view === 'streaming') renderStreaming();
   else if (view === 'result') renderResult();
 }
 
@@ -109,6 +114,32 @@ function renderAnalyzing() {
   _container.appendChild(card);
 }
 
+function renderStreaming() {
+  if (!_container) return;
+  _container.textContent = '';
+
+  const topArticles = getState('case.topArticles') || [];
+  const streamText = getState('case.streamText') || '';
+
+  const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
+
+  const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
+  sidebar.appendChild(renderSidebarArticles(topArticles));
+  grid.appendChild(sidebar);
+
+  const main = h('div', { style: { flex: '1', overflow: 'auto' } },
+    h('div', { class: 'card' },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' } },
+        spinner('sm'),
+        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)' } }, 'Generating…')
+      ),
+      h('div', { style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5', fontFamily: 'var(--font-mono)', maxHeight: '500px', overflow: 'auto' } }, streamText)
+    )
+  );
+  grid.appendChild(main);
+  _container.appendChild(grid);
+}
+
 function renderResult() {
   if (!_container) return;
   _container.textContent = '';
@@ -116,7 +147,19 @@ function renderResult() {
   if (!result) return;
 
   const structured = result.structured || result;
+  const topArticles = getState('case.topArticles') || [];
   const isCreate = structured.action === 'CREATE_NEW';
+  const isBoth = structured.action === 'BOTH';
+
+  const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
+
+  const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
+  sidebar.appendChild(renderSidebarArticles(topArticles));
+  sidebar.appendChild(renderSidebarQuality(structured));
+  sidebar.appendChild(renderSidebarCoverage());
+  grid.appendChild(sidebar);
+
+  const main = h('div', { style: { flex: '1', overflow: 'auto' } });
 
   const headerCard = h('div', { class: 'card', style: { marginBottom: '12px' } },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' } },
@@ -125,33 +168,29 @@ function renderResult() {
         h('div', { style: { fontSize: '14px', fontWeight: '600', marginTop: '2px' } }, result.subject || '')
       ),
       h('div', { style: { display: 'flex', gap: '6px' } },
-        h('span', { class: `pill pill--${isCreate ? 'info' : 'neutral'}` }, isCreate ? 'Create New' : 'Update Existing'),
+        h('span', { class: `pill pill--${isCreate ? 'info' : isBoth ? 'warning' : 'neutral'}` }, isCreate ? 'Create New' : isBoth ? 'Both' : 'Update Existing'),
         structured.confidence ? h('span', { class: `pill pill--${structured.confidence === 'HIGH' ? 'success' : structured.confidence === 'MEDIUM' ? 'warning' : 'error'}` }, structured.confidence) : null
       )
     ),
     structured.summary ? h('p', { style: { fontSize: '13px', lineHeight: '1.5', color: 'var(--text-secondary)' } }, structured.summary) : null,
     result.caseAbstract ? renderAbstractChips(result.caseAbstract) : null
   );
-  _container.appendChild(headerCard);
+  main.appendChild(headerCard);
 
   if (structured.suggestions?.length) {
-    const sugCard = h('div', { class: 'card', style: { marginBottom: '12px' } },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } },
-        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase' } }, `Suggestions (${structured.suggestions.length})`),
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyAll(structured.suggestions) }, 'Copy All')
-      )
-    );
-    structured.suggestions.forEach((sug, i) => {
-      sugCard.appendChild(h('div', { style: { padding: '10px 0', borderBottom: i < structured.suggestions.length - 1 ? '1px solid var(--border)' : 'none' } },
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '4px' } },
-          h('span', { class: `pill pill--${impactColor(sug.impact)}` }, sug.impact || 'MEDIUM'),
-          h('span', { style: { fontWeight: '500', fontSize: '13px' } }, sug.title || `Suggestion ${i + 1}`)
-        ),
-        sug.location ? h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' } }, `Location: ${sug.location}`) : null,
-        sug.content ? h('div', { style: { fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: '1.5', background: 'var(--surface-raised)', padding: '8px', borderRadius: 'var(--radius-xs)' } }, sug.content) : null
-      ));
-    });
-    _container.appendChild(sugCard);
+    const grouped = groupByArticle(structured.suggestions);
+    for (const [articleKey, sugs] of Object.entries(grouped)) {
+      const sugCard = h('div', { class: 'card', style: { marginBottom: '12px' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } },
+          h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase' } }, `#${sugs[0].articleNumber} — ${sugs[0].articleTitle}`),
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyAll(sugs) }, 'Copy')
+        )
+      );
+      sugs.forEach((sug, i) => {
+        sugCard.appendChild(renderSuggestionItem(sug, i, sugs.length));
+      });
+      main.appendChild(sugCard);
+    }
   }
 
   if (structured.newArticleDraft) {
@@ -163,18 +202,157 @@ function renderResult() {
       )
     );
     if (draft.title) draftCard.appendChild(h('div', { style: { fontSize: '14px', fontWeight: '600', marginBottom: '12px' } }, draft.title));
-    (draft.sections || []).forEach(sec => {
-      draftCard.appendChild(h('div', { style: { marginBottom: '12px' } },
-        h('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, sec.heading || 'Section'),
-        h('div', { style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5' } }, sec.body || '')
-      ));
+    (draft.sections || []).forEach((sec, idx) => {
+      draftCard.appendChild(renderEditableSection(sec, idx, 'draft'));
     });
-    _container.appendChild(draftCard);
+    main.appendChild(draftCard);
   }
 
-  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '16px' } },
-    h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { setState('case.view', 'idle'); setState('case.result', null); } }, 'New Analysis')
+  main.appendChild(h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '16px' } },
+    h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { setState('case.view', 'idle'); setState('case.result', null); setState('case.topArticles', null); setState('case.streamText', ''); } }, 'New Analysis')
   ));
+
+  grid.appendChild(main);
+  _container.appendChild(grid);
+}
+
+function renderSidebarArticles(articles) {
+  const isCollapsed = _collapsedSections['articles'] || false;
+  const section = h('div', { style: { marginBottom: '16px' } });
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['articles'] = !_collapsedSections['articles']; renderByView(); } },
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Similar Articles'),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
+  );
+  section.appendChild(header);
+
+  if (!isCollapsed) {
+    const body = h('div', null);
+    if (!articles.length) {
+      body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0' } }, 'No articles found'));
+    } else {
+      articles.forEach(a => {
+        body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)', cursor: 'pointer' }, onClick: () => openArticle(a) },
+          h('div', { style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3' } }, a.title || 'Untitled'),
+          h('div', { style: { display: 'flex', gap: '6px', marginTop: '3px' } },
+            h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, `#${a.articleNumber || ''}`),
+            h('span', { style: { fontSize: '10px', color: 'var(--primary)' } }, `Score: ${a.score}`)
+          )
+        ));
+      });
+    }
+    section.appendChild(body);
+  }
+  return section;
+}
+
+function renderSidebarQuality(structured) {
+  const isCollapsed = _collapsedSections['quality'] || false;
+  const section = h('div', { style: { marginBottom: '16px' } });
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['quality'] = !_collapsedSections['quality']; renderByView(); } },
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Quality Checks'),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
+  );
+  section.appendChild(header);
+
+  if (!isCollapsed) {
+    const body = h('div', null);
+    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' } },
+      h('span', { style: { color: 'var(--text-muted)' } }, 'Confidence'),
+      h('span', { style: { fontWeight: '600', color: structured.confidence === 'HIGH' ? 'var(--success)' : structured.confidence === 'MEDIUM' ? 'var(--warning)' : 'var(--error)' } }, structured.confidence || 'N/A')
+    ));
+    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' } },
+      h('span', { style: { color: 'var(--text-muted)' } }, 'Action'),
+      h('span', { style: { fontWeight: '600' } }, structured.action || 'N/A')
+    ));
+    section.appendChild(body);
+  }
+  return section;
+}
+
+function renderSidebarCoverage() {
+  const isCollapsed = _collapsedSections['coverage'] || false;
+  const section = h('div', { style: { marginBottom: '16px' } });
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['coverage'] = !_collapsedSections['coverage']; renderByView(); } },
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Coverage'),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
+  );
+  section.appendChild(header);
+
+  if (!isCollapsed) {
+    section.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0', fontStyle: 'italic' } }, 'Theme-volume integration coming soon'));
+  }
+  return section;
+}
+
+function renderSuggestionItem(sug, i, total) {
+  const id = `sug-${sug.articleId}-${i}`;
+  const container = h('div', { style: { padding: '10px 0', borderBottom: i < total - 1 ? '1px solid var(--border)' : 'none' } });
+
+  container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '4px' } },
+    h('span', { class: `pill pill--${impactColor(sug.impact)}` }, sug.impact || 'MEDIUM'),
+    h('span', { style: { fontWeight: '500', fontSize: '13px', flex: '1' } }, sug.title || `Suggestion ${i + 1}`),
+    h('button', { class: 'btn btn--ghost btn--sm', onClick: () => toggleEdit(id) }, 'Edit'),
+    h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineSection(sug) }, 'Refine')
+  ));
+
+  if (sug.location) {
+    container.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' } }, `Location: ${sug.location}`));
+  }
+
+  const contentArea = h('div', { id, style: { fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: '1.5', background: 'var(--surface-raised)', padding: '8px', borderRadius: 'var(--radius-xs)' } }, sug.content || '');
+  container.appendChild(contentArea);
+
+  return container;
+}
+
+function renderEditableSection(sec, idx, prefix) {
+  const id = `${prefix}-section-${idx}`;
+  const container = h('div', { style: { marginBottom: '12px' } });
+
+  container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' } },
+    h('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)', flex: '1' } }, sec.heading || 'Section'),
+    h('button', { class: 'btn btn--ghost btn--sm', onClick: () => toggleEdit(id) }, 'Edit'),
+    h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineSection(sec) }, 'Refine')
+  ));
+
+  const contentArea = h('div', { id, style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5' } }, sec.body || '');
+  container.appendChild(contentArea);
+
+  return container;
+}
+
+function toggleEdit(elementId) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+
+  if (el.tagName === 'TEXTAREA') {
+    const div = h('div', { id: elementId, style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5', background: 'var(--surface-raised)', padding: '8px', borderRadius: 'var(--radius-xs)' } }, el.value);
+    el.replaceWith(div);
+  } else {
+    const textarea = h('textarea', { id: elementId, class: 'input', style: { width: '100%', minHeight: '120px', fontSize: '12px', lineHeight: '1.5', fontFamily: 'inherit' } });
+    textarea.value = el.textContent;
+    el.replaceWith(textarea);
+  }
+}
+
+function refineSection(section) {
+  if (!_port) { toast('No active connection.', 'error'); return; }
+  _port.postMessage({ action: 'REFINE_SECTION', content: section.content || section.body || '', title: section.title || section.heading || '' });
+  toast('Refining…', 'info');
+}
+
+function openArticle(article) {
+  toast(`Article #${article.articleNumber}: ${article.title}`, 'info');
+}
+
+function groupByArticle(suggestions) {
+  const groups = {};
+  for (const sug of suggestions) {
+    const key = sug.articleId || 'unknown';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(sug);
+  }
+  return groups;
 }
 
 function renderAbstractChips(abs) {
@@ -230,6 +408,8 @@ function startAnalysis(caseId) {
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: 'Connecting…' });
   setState('case.result', null);
+  setState('case.streamText', '');
+  setState('case.topArticles', null);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
@@ -241,6 +421,13 @@ function onPortMessage(msg) {
   switch (msg.type) {
     case 'progress':
       setState('case.progress', { ...getState('case.progress'), step: msg.step ?? 0, label: msg.label || '', caseNumber: msg.caseNumber || getState('case.progress')?.caseNumber });
+      break;
+    case 'meta':
+      setState('case.topArticles', msg.topArticles || []);
+      setState('case.view', 'streaming');
+      break;
+    case 'delta':
+      setState('case.streamText', (getState('case.streamText') || '') + (msg.chunk || ''));
       break;
     case 'result':
       if (msg.success === false) {
@@ -267,4 +454,3 @@ async function saveRecentCase(result) {
   await localSet({ recentCases: trimmed });
   setState('case.recent', trimmed);
 }
-

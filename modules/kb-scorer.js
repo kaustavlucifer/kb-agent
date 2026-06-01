@@ -9,9 +9,9 @@ import { SF_API_VERSION, SCORE_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHAR
 let _container = null;
 let _unsubs = [];
 let _filterText = '';
-let _filterPt = '';
-let _filterScore = '';
-let _filterValidation = '';
+let _filterPt = [];
+let _filterScore = [];
+let _filterValidation = [];
 
 const SCORE_META_FIELDS = [
   'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
@@ -35,6 +35,47 @@ const CRITERIA = [
   { id: 'links', label: 'Links & URLs', baseMax: 8 },
   { id: 'taxonomy', label: 'Taxonomy & Product Context', baseMax: 8 }
 ];
+
+function multiSelect(id, label, options, selected, onChange) {
+  const wrap = h('div', { class: 'multi-select', id });
+  wrap.style.position = 'relative';
+  const btn = h('button', { class: 'btn btn--secondary btn--sm' },
+    `${label}${selected.length ? ` (${selected.length})` : ''}`
+  );
+  btn.addEventListener('click', toggleDropdown);
+  wrap.appendChild(btn);
+
+  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: '500', minWidth: '180px', boxShadow: 'var(--shadow-md)' } });
+
+  options.forEach(opt => {
+    const checked = selected.includes(opt.value);
+    const checkbox = h('input', { type: 'checkbox' });
+    checkbox.checked = checked;
+    checkbox.addEventListener('change', (e) => {
+      const val = opt.value;
+      const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
+      onChange(newSel);
+    });
+    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer' } },
+      checkbox,
+      h('span', null, opt.label)
+    );
+    dropdown.appendChild(item);
+  });
+  wrap.appendChild(dropdown);
+
+  function toggleDropdown(e) {
+    e.stopPropagation();
+    const visible = dropdown.style.display !== 'none';
+    dropdown.style.display = visible ? 'none' : 'block';
+    if (!visible) {
+      const dismiss = (ev) => { if (!wrap.contains(ev.target)) { dropdown.style.display = 'none'; document.removeEventListener('click', dismiss); } };
+      setTimeout(() => document.addEventListener('click', dismiss), 0);
+    }
+  }
+
+  return wrap;
+}
 
 export function mount(container) {
   _container = container;
@@ -92,35 +133,50 @@ function render() {
   );
   _container.appendChild(statsBar);
 
+  const validationOptions = [...new Set(articles.map(a => a.validationStatus).filter(Boolean))].sort();
+
+  const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
+  searchInput.addEventListener('input', e => { _filterText = e.target.value; render(); });
+
+  const ptMulti = multiSelect('kb-pt-filter', 'P&T',
+    ptOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
+    _filterPt,
+    (sel) => { _filterPt = sel; render(); }
+  );
+
+  const scoreMulti = multiSelect('kb-score-filter', 'Score',
+    [
+      { value: 'high', label: '≥ 80 (Good)' },
+      { value: 'mid', label: '60-79 (OK)' },
+      { value: 'low', label: '< 60 (Poor)' },
+      { value: 'unscored', label: 'Unscored' }
+    ],
+    _filterScore,
+    (sel) => { _filterScore = sel; render(); }
+  );
+
+  const valMulti = multiSelect('kb-val-filter', 'Validation',
+    validationOptions.map(v => ({ value: v, label: v })),
+    _filterValidation,
+    (sel) => { _filterValidation = sel; render(); }
+  );
+
+  const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: loading }, 'Refresh');
+  refreshBtn.addEventListener('click', loadArticles);
+  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !articles.length || !!scoring }, scoring ? 'Scoring…' : 'Score All');
+  scoreBtn.addEventListener('click', scoreAll);
+
   const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
-    h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText }),
-    h('select', { class: 'input', style: { maxWidth: '200px' }, id: 'kb-pt-filter' },
-      h('option', { value: '' }, 'All P&Ts'),
-      ...ptOptions.map(pt => h('option', { value: pt, selected: _filterPt === pt }, pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')))
-    ),
-    h('select', { class: 'input', style: { maxWidth: '120px' }, id: 'kb-score-filter' },
-      h('option', { value: '', selected: !_filterScore }, 'All Scores'),
-      h('option', { value: 'high', selected: _filterScore === 'high' }, '≥ 80 (Good)'),
-      h('option', { value: 'mid', selected: _filterScore === 'mid' }, '60-79 (OK)'),
-      h('option', { value: 'low', selected: _filterScore === 'low' }, '< 60 (Poor)'),
-      h('option', { value: 'unscored', selected: _filterScore === 'unscored' }, 'Unscored')
-    ),
-    h('select', { class: 'input', style: { maxWidth: '140px' }, id: 'kb-val-filter' },
-      h('option', { value: '', selected: !_filterValidation }, 'All Validation'),
-      h('option', { value: 'Validated External', selected: _filterValidation === 'Validated External' }, 'Validated External'),
-      h('option', { value: 'Not Validated', selected: _filterValidation === 'Not Validated' }, 'Not Validated')
-    ),
+    searchInput,
+    ptMulti,
+    scoreMulti,
+    valMulti,
     h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
-      h('button', { class: 'btn btn--secondary btn--sm', onClick: loadArticles, disabled: loading }, 'Refresh'),
-      h('button', { class: 'btn btn--primary btn--sm', onClick: scoreAll, disabled: loading || !articles.length || !!scoring }, scoring ? `Scoring…` : 'Score All')
+      refreshBtn,
+      scoreBtn
     )
   );
   _container.appendChild(filtersRow);
-
-  document.getElementById('kb-filter')?.addEventListener('input', e => { _filterText = e.target.value; render(); });
-  document.getElementById('kb-pt-filter')?.addEventListener('change', e => { _filterPt = e.target.value; render(); });
-  document.getElementById('kb-score-filter')?.addEventListener('change', e => { _filterScore = e.target.value; render(); });
-  document.getElementById('kb-val-filter')?.addEventListener('change', e => { _filterValidation = e.target.value; render(); });
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
@@ -145,12 +201,18 @@ function render() {
 
   let filtered = articles;
   if (_filterText) filtered = filtered.filter(a => `${a.title} ${a.articleNumber} ${a.topicName || ''}`.toLowerCase().includes(_filterText.toLowerCase()));
-  if (_filterPt) filtered = filtered.filter(a => a.topicName === _filterPt);
-  if (_filterValidation) filtered = filtered.filter(a => a.validationStatus === _filterValidation);
-  if (_filterScore === 'high') filtered = filtered.filter(a => (scores[a.id]?.overall ?? -1) >= SCORE_HIGH_THRESHOLD);
-  else if (_filterScore === 'mid') filtered = filtered.filter(a => { const s = scores[a.id]?.overall; return s != null && s >= SCORE_MID_THRESHOLD && s < SCORE_HIGH_THRESHOLD; });
-  else if (_filterScore === 'low') filtered = filtered.filter(a => { const s = scores[a.id]?.overall; return s != null && s < SCORE_MID_THRESHOLD; });
-  else if (_filterScore === 'unscored') filtered = filtered.filter(a => scores[a.id]?.overall == null);
+  if (_filterPt.length) filtered = filtered.filter(a => _filterPt.includes(a.topicName));
+  if (_filterValidation.length) filtered = filtered.filter(a => _filterValidation.includes(a.validationStatus));
+  if (_filterScore.length) filtered = filtered.filter(a => {
+    const s = scores[a.id]?.overall;
+    return _filterScore.some(range => {
+      if (range === 'high') return (s ?? -1) >= SCORE_HIGH_THRESHOLD;
+      if (range === 'mid') return s != null && s >= SCORE_MID_THRESHOLD && s < SCORE_HIGH_THRESHOLD;
+      if (range === 'low') return s != null && s < SCORE_MID_THRESHOLD;
+      if (range === 'unscored') return s == null;
+      return false;
+    });
+  });
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
@@ -239,6 +301,20 @@ function showScoreDetail(article, scoreData) {
 async function loadArticles() {
   setState('kb.loading', true);
   try {
+    const cachedData = await localGet([STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT]);
+    const cachedArticles = cachedData[STORAGE_KEYS.ALL_ARTICLES];
+    const cachedAt = cachedData[STORAGE_KEYS.ALL_ARTICLES_AT];
+    if (cachedArticles?.length && cachedAt && (Date.now() - cachedAt < 30 * 60 * 1000)) {
+      setState('kb.articles', cachedArticles);
+      const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
+      if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
+        setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
+      }
+      toast(`Loaded ${cachedArticles.length} articles (cached).`, 'success');
+      setState('kb.loading', false);
+      return;
+    }
+
     const session = await detectSession();
     if (!session.sid) { toast('Not connected to Salesforce.', 'error'); setState('kb.loading', false); return; }
 

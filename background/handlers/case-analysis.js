@@ -1,6 +1,6 @@
 import { detectSession } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, mapWithConcurrency, stripHtml } from '../../shared/api.js';
-import { callClaude, callClaudeFast, extractText, extractJson } from '../../shared/gateway.js';
+import { callClaude, callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE } from '../../shared/config.js';
 
 export async function handleAnalyze(port, msg) {
@@ -34,17 +34,45 @@ export async function handleAnalyze(port, msg) {
   const ranked = rankArticles(searchResults, allQueries);
   const topArticles = ranked.slice(0, TOP_K);
 
+  const maxScore = topArticles.length ? topArticles[0]._score : 0;
+  const totalTerms = allQueries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2).length || 1;
+  const bestMatchPct = Math.round((maxScore / totalTerms) * 100);
+
+  send({ type: 'meta', topArticles: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber, score: a._score })) });
+
   send({ type: 'progress', step: 5, label: 'Generating recommendation' });
-  const decision = await makeDecision(caseRecord, caseAbstract, topArticles);
+
+  let action;
+  if (bestMatchPct >= 70) action = 'UPDATE_EXISTING';
+  else if (bestMatchPct >= 30) action = 'BOTH';
+  else action = 'CREATE_NEW';
 
   let structured;
-  if (decision.action === 'UPDATE_EXISTING' && topArticles.length) {
+
+  if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
     const bodies = await fetchArticleBodies(session.apiBase, session.sid, topArticles.map(a => a.Id));
-    const suggestions = await generateSuggestions(topArticles, bodies, caseRecord, comments, caseAbstract);
-    structured = { action: 'UPDATE_EXISTING', confidence: decision.confidence, summary: decision.reason, suggestions, topologyAssessment: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber })) };
-  } else {
-    const draft = await generateNewArticle(caseRecord, comments, caseAbstract, intentsResult);
-    structured = { action: 'CREATE_NEW', confidence: decision.confidence, summary: decision.reason, newArticleDraft: draft };
+    const suggestions = await generateSuggestionsStreaming(topArticles, bodies, caseRecord, comments, caseAbstract, send);
+    structured = {
+      action,
+      confidence: bestMatchPct >= 70 ? 'HIGH' : 'MEDIUM',
+      summary: `Best article match: ${bestMatchPct}%. ${action === 'BOTH' ? 'Showing existing article suggestions and a new article draft.' : 'Updating existing articles.'}`,
+      suggestions,
+      topologyAssessment: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber }))
+    };
+  }
+
+  if (action === 'CREATE_NEW' || action === 'BOTH') {
+    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, send);
+    if (structured) {
+      structured.newArticleDraft = draft;
+    } else {
+      structured = {
+        action: 'CREATE_NEW',
+        confidence: bestMatchPct < 10 ? 'HIGH' : 'MEDIUM',
+        summary: `No strong article match found (best: ${bestMatchPct}%). Drafting a new article.`,
+        newArticleDraft: draft
+      };
+    }
   }
 
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured });
@@ -111,17 +139,6 @@ function rankArticles(articles, queries) {
   }).sort((a, b) => b._score - a._score);
 }
 
-async function makeDecision(caseRecord, abstract, topArticles) {
-  const articleList = topArticles.map((a, i) => `${i + 1}. #${a.ArticleNumber} — "${a.Title}" (${a.ValidationStatus || '?'})`).join('\n');
-  const resp = await callClaudeFast({
-    system: 'Decide if a KB article should be UPDATED or CREATED. Return JSON: {"action":"UPDATE_EXISTING"|"CREATE_NEW","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"...","primaryArticleId":"...or null"}',
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || null || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || 'none'}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nExisting articles:\n${articleList}` }],
-    maxTokens: 400,
-    temperature: 0.1
-  });
-  return extractJson(extractText(resp)) || { action: 'CREATE_NEW', confidence: 'LOW', reason: 'Could not determine.' };
-}
-
 async function fetchArticleBodies(apiBase, sid, ids) {
   const bodies = new Map();
   const batches = [];
@@ -139,7 +156,7 @@ async function fetchArticleBodies(apiBase, sid, ids) {
   return bodies;
 }
 
-async function generateSuggestions(articles, bodyMap, caseRecord, comments, abstract) {
+async function generateSuggestionsStreaming(articles, bodyMap, caseRecord, comments, abstract, send) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
 
@@ -149,13 +166,14 @@ async function generateSuggestions(articles, bodyMap, caseRecord, comments, abst
     const resText = stripHtml(body.resolution).slice(0, MAX_BODY_CHARS);
 
     try {
-      const resp = await callClaude({
+      const fullText = await streamClaude({
         system: `You are an expert KB editor optimizing articles for Agentforce. Given an article and a case, identify 1-3 improvements. Return JSON: {"suggestions":[{"title":"...","location":"...","content":"...","impact":"HIGH"|"MEDIUM"|"LOW"}]}`,
         messages: [{ role: 'user', content: `ARTICLE: #${article.ArticleNumber} "${article.Title}"\nDESCRIPTION: ${descText.slice(0, 2000)}\nRESOLUTION: ${resText.slice(0, 2000)}\n\nCASE: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 1500,
-        temperature: 0.2
+        temperature: 0.2,
+        onDelta: (chunk) => { send({ type: 'delta', chunk }); }
       });
-      const parsed = extractJson(extractText(resp));
+      const parsed = extractJson(fullText);
       if (parsed?.suggestions) {
         parsed.suggestions.forEach(s => allSuggestions.push({ ...s, articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title }));
       }
@@ -164,13 +182,14 @@ async function generateSuggestions(articles, bodyMap, caseRecord, comments, abst
   return allSuggestions;
 }
 
-async function generateNewArticle(caseRecord, comments, abstract, intents) {
+async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send) {
   const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
-  const resp = await callClaude({
+  const fullText = await streamClaude({
     system: `You are drafting a new Salesforce KB article. Follow Agentforce writing rules: product-specific title, H2 headers, clear description+resolution. Return JSON: {"title":"...","sections":[{"heading":"...","body":"..."}]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}` }],
     maxTokens: FINAL_MAX_TOKENS,
-    temperature: 0.3
+    temperature: 0.3,
+    onDelta: (chunk) => { send({ type: 'delta', chunk }); }
   });
-  return extractJson(extractText(resp)) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
+  return extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
 }

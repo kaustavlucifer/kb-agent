@@ -6,6 +6,10 @@ let _container = null;
 let _unsubs = [];
 let _data = null;
 let _selectedPt = null;
+let _ptAnalysis = {};
+let _ptAnalysisLoading = {};
+let _ptGaps = {};
+let _ptGapsLoading = {};
 
 export function mount(container) {
   _container = container;
@@ -146,10 +150,46 @@ function renderPtDetail(ptName, articles) {
           `${(ptData.total_conversations || 0).toLocaleString()} conversations · ${Math.round((ptData.resolution_pct || 0) * 100)}% resolution · ${ptData.escalations || 0} escalations`
         )
       ),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => { _selectedPt = null; renderView(); document.getElementById('pt-select').value = ''; } }, '← All P&Ts')
+      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+        h('button', {
+          class: 'btn btn--primary btn--sm',
+          disabled: _ptGapsLoading[ptName],
+          onClick: () => handleFindGaps(ptName, clusters, ptArticles)
+        }, _ptGapsLoading[ptName] ? 'Analyzing…' : 'Find Gaps'),
+        h('button', {
+          class: 'btn btn--secondary btn--sm',
+          disabled: _ptAnalysisLoading[ptName],
+          onClick: () => handleAiSummary(ptName, clusters, ptArticles)
+        }, _ptAnalysisLoading[ptName] ? 'Generating…' : 'AI Summary'),
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => { _selectedPt = null; renderView(); document.getElementById('pt-select').value = ''; } }, '← All P&Ts')
+      )
     )
   );
   _container.appendChild(headerCard);
+
+  if (_ptAnalysis[ptName]) {
+    const analysisCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AI Coverage Summary'),
+      h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, _ptAnalysis[ptName])
+    );
+    _container.appendChild(analysisCard);
+  }
+
+  if (_ptAnalysisLoading[ptName] && !_ptAnalysis[ptName]) {
+    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '16px', textAlign: 'center' } }, spinner('sm')));
+  }
+
+  if (_ptGaps[ptName]) {
+    const gapCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Gap Analysis'),
+      h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, _ptGaps[ptName])
+    );
+    _container.appendChild(gapCard);
+  }
+
+  if (_ptGapsLoading[ptName] && !_ptGaps[ptName]) {
+    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '16px', textAlign: 'center' } }, spinner('sm')));
+  }
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
@@ -189,4 +229,44 @@ function renderPtDetail(ptName, articles) {
     ));
   });
   _container.appendChild(table);
+}
+
+function handleFindGaps(ptName, clusters, articles) {
+  _ptGapsLoading[ptName] = true;
+  renderView();
+  const port = chrome.runtime.connect({ name: 'kbs-coverage' });
+  port.postMessage({ clusters: Object.fromEntries(clusters.map(c => [c.label || c.name, { keywords: [c.name, c.label, ...(c.top_utterances || []).slice(0, 3)], conversations: c.conversations || 0 }])), articles });
+  port.onMessage.addListener((resp) => {
+    if (resp.type === 'done') {
+      const gapText = (resp.gaps || []).map(g => `${g.cluster} (${g.conversations} convs) — ${g.coverage} [${g.priority}]`).join('\n') || 'No gaps found.';
+      _ptGaps[ptName] = gapText;
+      _ptGapsLoading[ptName] = false;
+      port.disconnect();
+      renderView();
+    } else if (resp.type === 'error') {
+      _ptGapsLoading[ptName] = false;
+      toast(resp.error, 'error');
+      port.disconnect();
+      renderView();
+    }
+  });
+}
+
+function handleAiSummary(ptName, clusters, articles) {
+  _ptAnalysisLoading[ptName] = true;
+  renderView();
+  chrome.runtime.sendMessage({
+    action: 'COVERAGE_ANALYZE_PT',
+    ptName,
+    clusters,
+    articles
+  }, (resp) => {
+    _ptAnalysisLoading[ptName] = false;
+    if (resp && resp.success) {
+      _ptAnalysis[ptName] = resp.narrative;
+    } else {
+      toast((resp && resp.error) || 'AI analysis failed', 'error');
+    }
+    renderView();
+  });
 }
