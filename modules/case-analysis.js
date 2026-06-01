@@ -119,27 +119,17 @@ function renderStreaming() {
   _container.textContent = '';
 
   const topArticles = getState('case.topArticles') || [];
-  const streamText = getState('case.streamText') || '';
-
   const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
 
   const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
   sidebar.appendChild(renderSidebarArticles(topArticles));
   grid.appendChild(sidebar);
 
-  const result = getState('case.result');
-  const subject = result?.subject || getState('case.progress')?.caseNumber || 'case';
-  const showRaw = streamText && !streamText.trimStart().startsWith('{');
-
   const main = h('div', { style: { flex: '1', overflow: 'auto' } },
-    h('div', { class: 'card' },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' } },
-        spinner('sm'),
-        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)' } }, `Generating recommendations for ${subject}…`)
-      ),
-      showRaw
-        ? h('div', { style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5', maxHeight: '500px', overflow: 'auto' } }, streamText)
-        : h('div', { style: { fontSize: '12px', color: 'var(--text-muted)', padding: '12px 0' } }, 'Processing…')
+    h('div', { class: 'card', style: { textAlign: 'center', padding: '32px' } },
+      spinner('md'),
+      h('div', { style: { marginTop: '12px', fontSize: '13px', fontWeight: '500', color: 'var(--primary)' } }, 'Generating recommendations…'),
+      h('div', { style: { marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)' } }, 'Analyzing case context and matching against knowledge base')
     )
   );
   grid.appendChild(main);
@@ -261,6 +251,15 @@ function renderSidebarArticles(articles) {
   return section;
 }
 
+function formatAction(action) {
+  switch (action) {
+    case 'CREATE_NEW': return 'Create New Article';
+    case 'UPDATE_EXISTING': return 'Update Existing';
+    case 'BOTH': return 'Update + Create New';
+    default: return action || 'N/A';
+  }
+}
+
 function renderSidebarQuality(structured) {
   const isCollapsed = _collapsedSections['quality'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
@@ -278,7 +277,7 @@ function renderSidebarQuality(structured) {
     ));
     body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' } },
       h('span', { style: { color: 'var(--text-muted)' } }, 'Action'),
-      h('span', { style: { fontWeight: '600' } }, structured.action || 'N/A')
+      h('span', { style: { fontWeight: '600' } }, formatAction(structured.action))
     ));
     section.appendChild(body);
   }

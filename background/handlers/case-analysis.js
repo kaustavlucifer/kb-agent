@@ -128,7 +128,7 @@ async function searchKB(apiBase, sid, queries) {
   for (const q of uniqueQueries) {
     try {
       const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus WHERE PublishStatus = 'Online' AND Language = 'en_US') LIMIT ${SOSL_PER_QUERY}`
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus WHERE PublishStatus = 'Online' AND Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
       );
       for (const r of records) {
         if (!seen.has(r.Id)) { seen.add(r.Id); results.push(r); }

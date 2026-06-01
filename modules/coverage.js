@@ -147,7 +147,10 @@ function renderOverview(ptNames, articles) {
         ? h('span', { class: 'pill pill--error' }, String(r.gapCount))
         : h('span', { class: 'pill pill--success' }, '0')
       ),
-      h('td', null, h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleFindGaps(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Find Gaps'))
+      h('td', { style: { whiteSpace: 'nowrap' } },
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: (e) => { e.stopPropagation(); handleFindGaps(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'Gaps'),
+        h('button', { class: 'btn btn--ghost btn--sm', style: { marginLeft: '4px' }, onClick: (e) => { e.stopPropagation(); handleAiSummary(r.pt, _data[r.pt].clusters || [], articles.filter(a => (a.topicName || '').toLowerCase() === r.pt.toLowerCase())); } }, 'AI')
+      )
     );
     tbody.appendChild(row);
   });

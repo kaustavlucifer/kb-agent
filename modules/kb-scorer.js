@@ -446,12 +446,37 @@ async function scoreOne(article) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-  const streamEl = h('div', { id: 'score-stream', style: { whiteSpace: 'pre-wrap', fontSize: '12px', lineHeight: '1.5', maxHeight: '400px', overflowY: 'auto', fontFamily: 'var(--font-mono)' } }, spinner('md'));
-  const content = h('div', null,
+  const criteriaRows = CRITERIA.map(c => ({
+    id: c.id, label: c.label, score: null, max: c.baseMax, status: 'pending'
+  }));
+
+  const bodyEl = h('div', null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `Scoring: #${article.articleNumber} — ${article.title}`),
-    streamEl
+    h('div', { id: 'score-progress', style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' } },
+      spinner('sm'),
+      h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, 'Evaluating article quality…')
+    ),
+    h('table', { class: 'data-table', id: 'score-criteria-table' },
+      h('thead', null, h('tr', null,
+        h('th', null, 'Criterion'),
+        h('th', { style: { width: '80px' } }, 'Score'),
+        h('th', null, 'Status')
+      )),
+      h('tbody', { id: 'score-criteria-body' },
+        ...criteriaRows.map(c => h('tr', { id: `score-row-${c.id}` },
+          h('td', { style: { fontSize: '12px' } }, c.label),
+          h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '—')),
+          h('td', null, h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Pending'))
+        ))
+      )
+    ),
+    h('div', { id: 'score-overall', style: { marginTop: '12px', display: 'none', textAlign: 'center' } },
+      h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Overall Score'),
+      h('div', { id: 'score-overall-value', style: { fontSize: '28px', fontWeight: '700' } }, '—')
+    )
   );
-  modal(`Score: ${article.articleNumber}`, content, { wide: true });
+
+  modal(`Score: ${article.articleNumber}`, bodyEl, { wide: true });
 
   const bodyMap = await fetchBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
@@ -465,20 +490,59 @@ async function scoreOne(article) {
       maxTokens: 2200,
       temperature: 0.1,
       model: SCORING_MODEL,
-      onDelta: (chunk, full) => {
-        const el = document.getElementById('score-stream');
-        if (el) el.textContent = full;
-      }
+      onDelta: () => {}
     });
 
     const result = parseScoreResponse(fullText, maxes);
+
+    const progressEl = document.getElementById('score-progress');
+    if (progressEl) progressEl.style.display = 'none';
+
+    if (result.criteria) {
+      result.criteria.forEach(c => {
+        const row = document.getElementById(`score-row-${c.id}`);
+        if (!row) return;
+        const cells = row.querySelectorAll('td');
+        if (cells[1]) {
+          cells[1].textContent = '';
+          if (c.na) {
+            cells[1].appendChild(h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, 'N/A'));
+          } else {
+            const color = c.score >= c.max * 0.8 ? 'var(--success)' : c.score >= c.max * 0.5 ? 'var(--warning)' : 'var(--error)';
+            cells[1].appendChild(h('span', { style: { fontWeight: '600', color } }, `${c.score}/${c.max}`));
+          }
+        }
+        if (cells[2]) {
+          cells[2].textContent = '';
+          if (c.issues?.length) {
+            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, c.issues[0].slice(0, 60)));
+          } else if (c.passed?.length) {
+            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--success)' } }, c.passed[0].slice(0, 60)));
+          } else {
+            cells[2].appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'OK'));
+          }
+        }
+      });
+    }
+
+    const overallEl = document.getElementById('score-overall');
+    const overallVal = document.getElementById('score-overall-value');
+    if (overallEl && overallVal && result.overall != null) {
+      overallEl.style.display = 'block';
+      const color = result.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : result.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)';
+      overallVal.style.color = color;
+      overallVal.textContent = String(result.overall);
+    }
+
     const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
     setState('kb.scores', scores);
     await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
-    toast(`Score: ${result.overall}/100`, result.overall >= SCORE_HIGH_THRESHOLD ? 'success' : 'warning');
   } catch (e) {
-    const el = document.getElementById('score-stream');
-    if (el) el.textContent = 'Error: ' + e.message;
+    const progressEl = document.getElementById('score-progress');
+    if (progressEl) {
+      progressEl.textContent = '';
+      progressEl.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, 'Error: ' + e.message));
+    }
   }
 }
 
