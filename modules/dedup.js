@@ -1,22 +1,45 @@
-import { h, spinner, emptyState, toast, modal } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
+import { detectSession } from '../shared/auth.js';
+import { sfGet, soqlIdList, mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { mapWithConcurrency } from '../shared/api.js';
-import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, STORAGE_KEYS } from '../shared/config.js';
+import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, SCORING_MODEL, SF_API_VERSION, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../shared/config.js';
 
 let _container = null;
 let _unsubs = [];
+
+const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
+
+STRICT DEFINITIONS:
+- DUPLICATE: Description AND Resolution are essentially the same — same root cause, same fix steps.
+- SUPERSEDED: One article directly replaces another — same problem, newer article fully covers older.
+
+DO NOT FLAG:
+- Same product but different error messages or symptoms
+- Different root causes even if both mention performance
+- Different audiences or setup scenarios
+- Broader vs. more specific articles (these should cross-link, not merge)
+
+Return JSON only:
+{"pairs":[{"articleA":"<number>","articleB":"<number>","relationship":"DUPLICATE"|"SUPERSEDED","keepArticle":"<number to keep>","confidence":0.85-1.0,"reason":"<what content is identical>"}]}
+
+Rules:
+- Only flag pairs with confidence >= 0.85
+- Reason must state specific identical content
+- If uncertain, do NOT flag — false negatives acceptable, false positives waste time
+- If no duplicates: return {"pairs":[]}`;
 
 export function mount(container) {
   _container = container;
   if (!getState('dedup.pairs')) {
     setState('dedup.pairs', []);
-    setState('dedup.running', false);
+    setState('dedup.running', null);
+    loadCachedResults();
   }
-  renderDedup();
-  _unsubs.push(subscribe('dedup.pairs', renderDedup));
-  _unsubs.push(subscribe('dedup.running', renderDedup));
+  render();
+  _unsubs.push(subscribe('dedup.pairs', render));
+  _unsubs.push(subscribe('dedup.running', render));
 }
 
 export function unmount() {
@@ -25,7 +48,14 @@ export function unmount() {
   _container = null;
 }
 
-function renderDedup() {
+async function loadCachedResults() {
+  const data = await localGet([STORAGE_KEYS.DEDUP_RESULTS, STORAGE_KEYS.DEDUP_AT]);
+  if (data[STORAGE_KEYS.DEDUP_RESULTS]?.length) {
+    setState('dedup.pairs', data[STORAGE_KEYS.DEDUP_RESULTS]);
+  }
+}
+
+function render() {
   if (!_container) return;
   _container.textContent = '';
   const pairs = getState('dedup.pairs') || [];
@@ -34,125 +64,244 @@ function renderDedup() {
 
   const toolbar = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } },
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } },
-      running ? 'Detecting duplicates…' : `${pairs.length} potential duplicates`
+      running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),
-    h('button', { class: 'btn btn--primary btn--sm', onClick: detectDuplicates, disabled: running || !articles.length },
-      running ? 'Running…' : 'Detect Duplicates'
+    h('div', { style: { display: 'flex', gap: '8px' } },
+      h('button', { class: 'btn btn--secondary btn--sm', onClick: clearResults, disabled: !pairs.length || !!running }, 'Clear'),
+      h('button', { class: 'btn btn--primary btn--sm', onClick: detectDuplicates, disabled: !!running || !articles.length },
+        running ? 'Scanning…' : 'Detect Duplicates'
+      )
     )
   );
   _container.appendChild(toolbar);
 
   if (running) {
-    _container.appendChild(h('div', { style: { textAlign: 'center', padding: '32px' } }, spinner('lg')));
-    return;
+    const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
+    _container.appendChild(h('div', { class: 'card', style: { padding: '12px', marginBottom: '12px' } },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
+        h('span', null, running.ptName ? `P&T: ${running.ptName}` : 'Preparing…'),
+        h('span', null, `${pct}%`)
+      ),
+      progressBar(pct, 'default')
+    ));
   }
 
-  if (!articles.length) {
+  if (!articles.length && !pairs.length) {
     _container.appendChild(emptyState('🔗', 'Load articles in the KB Articles tab first, then detect duplicates.'));
     return;
   }
 
-  if (!pairs.length) {
-    _container.appendChild(emptyState('✓', 'No duplicates detected. Click "Detect Duplicates" to scan.'));
+  if (!pairs.length && !running) {
+    _container.appendChild(emptyState('✓', 'No duplicates found. Click "Detect Duplicates" to scan articles grouped by Product & Topic.'));
     return;
   }
 
-  const table = h('table', { class: 'data-table' },
-    h('thead', null, h('tr', null,
-      h('th', null, 'Article A'),
-      h('th', null, 'Article B'),
-      h('th', null, 'Similarity'),
-      h('th', null, 'Actions')
-    )),
-    h('tbody', null)
-  );
-  const tbody = table.querySelector('tbody');
-  pairs.forEach(pair => {
-    const simPct = Math.round((pair.similarity || 0) * 100);
-    tbody.appendChild(h('tr', null,
-      h('td', { style: { fontSize: '12px' } }, `#${pair.a.articleNumber || ''} ${pair.a.title || ''}`),
-      h('td', { style: { fontSize: '12px' } }, `#${pair.b.articleNumber || ''} ${pair.b.title || ''}`),
-      h('td', null, h('span', { class: `pill pill--${simPct >= 80 ? 'error' : simPct >= 60 ? 'warning' : 'info'}` }, `${simPct}%`)),
-      h('td', null,
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showMergeSuggestion(pair) }, 'Merge Suggestion')
-      )
-    ));
-  });
-  _container.appendChild(table);
+  if (pairs.length) {
+    const table = h('table', { class: 'data-table' },
+      h('thead', null, h('tr', null,
+        h('th', null, 'Article A'),
+        h('th', null, 'Article B'),
+        h('th', { style: { width: '80px' } }, 'Type'),
+        h('th', { style: { width: '70px' } }, 'Conf.'),
+        h('th', null, 'Reason'),
+        h('th', { style: { width: '100px' } }, 'Actions')
+      )),
+      h('tbody', null)
+    );
+    const tbody = table.querySelector('tbody');
+    pairs.forEach(pair => {
+      const confPct = Math.round((pair.confidence || 0) * 100);
+      tbody.appendChild(h('tr', null,
+        h('td', { style: { fontSize: '12px' } },
+          h('div', { style: { fontWeight: '500' } }, `#${pair.articleA}`),
+          h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, pair.titleA || '')
+        ),
+        h('td', { style: { fontSize: '12px' } },
+          h('div', { style: { fontWeight: '500' } }, `#${pair.articleB}`),
+          h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, pair.titleB || '')
+        ),
+        h('td', null, h('span', { class: `pill pill--${pair.relationship === 'DUPLICATE' ? 'error' : 'warning'}` }, pair.relationship || 'DUP')),
+        h('td', null, h('span', { class: `pill pill--${confPct >= 95 ? 'error' : 'warning'}` }, `${confPct}%`)),
+        h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px' } }, pair.reason || ''),
+        h('td', null,
+          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showMerge(pair) }, 'Merge')
+        )
+      ));
+    });
+    _container.appendChild(table);
+  }
+}
+
+async function clearResults() {
+  setState('dedup.pairs', []);
+  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: [], [STORAGE_KEYS.DEDUP_AT]: null });
 }
 
 async function detectDuplicates() {
   const articles = getState('kb.articles') || [];
   if (articles.length < 2) { toast('Need at least 2 articles.', 'error'); return; }
 
-  setState('dedup.running', true);
-  const pairs = [];
+  const session = await detectSession();
+  if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-  const batches = [];
-  for (let i = 0; i < articles.length; i += DEDUP_BATCH_SIZE) {
-    batches.push(articles.slice(i, i + DEDUP_BATCH_SIZE));
+  const ptGroups = new Map();
+  for (const a of articles) {
+    const pt = a.topicName || '__other__';
+    if (!ptGroups.has(pt)) ptGroups.set(pt, []);
+    ptGroups.get(pt).push(a);
   }
 
+  const workQueue = [];
+  for (const [ptName, ptArticles] of ptGroups) {
+    if (ptArticles.length < 2) continue;
+    for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
+      workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
+    }
+  }
+
+  if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
+
+  setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
+
+  const bodyIds = articles.map(a => a.id);
+  const bodyMap = await fetchBodiesForDedup(session, bodyIds);
+
+  const allPairs = [];
+  let done = 0;
+
+  await mapWithConcurrency(workQueue, DEDUP_CONCURRENCY, async (item) => {
+    setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+    const enriched = item.batch.map(a => ({
+      ...a,
+      description: bodyMap.get(a.id)?.description || '',
+      resolution: bodyMap.get(a.id)?.resolution || ''
+    }));
+    const pairs = await runDedupBatch(enriched);
+    allPairs.push(...pairs);
+    done++;
+    setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+  });
+
+  const articleMap = new Map(articles.map(a => [a.articleNumber, a]));
+  const enrichedPairs = allPairs
+    .filter(p => p.confidence >= 0.85)
+    .map(p => ({
+      ...p,
+      titleA: articleMap.get(p.articleA)?.title || '',
+      titleB: articleMap.get(p.articleB)?.title || ''
+    }))
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+    .slice(0, 30);
+
+  setState('dedup.pairs', enrichedPairs);
+  setState('dedup.running', null);
+  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
+  toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
+}
+
+async function fetchBodiesForDedup(session, ids) {
+  const bodyMap = new Map();
+  const batches = [];
+  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
   for (const batch of batches) {
     try {
-      const batchPairs = await findDuplicatesInBatch(batch);
-      pairs.push(...batchPairs);
+      const soql = `SELECT Id, Description__c, Resolution__c FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
+      const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+      const result = await sfGet(url, session.sid);
+      for (const r of (result.records || [])) {
+        bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '' });
+      }
     } catch {}
   }
-
-  pairs.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
-  const topPairs = pairs.slice(0, 20);
-  setState('dedup.pairs', topPairs);
-  setState('dedup.running', false);
-  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: topPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
-  toast(`Found ${topPairs.length} potential duplicates.`, 'info');
+  return bodyMap;
 }
 
-async function findDuplicatesInBatch(batch) {
-  if (batch.length < 2) return [];
-  const articleList = batch.map(a => `[${a.articleNumber}] ${a.title}`).join('\n');
-  const resp = await callClaudeFast({
-    system: 'Identify pairs of articles that are likely duplicates or near-duplicates. Return JSON: {"pairs": [{"a_idx": 0, "b_idx": 1, "similarity": 0.85, "reason": "..."}]}. Only include pairs with similarity >= 0.6.',
-    messages: [{ role: 'user', content: `Articles:\n${articleList}` }],
-    maxTokens: 1000,
-    temperature: 0.1
-  });
-  const text = extractText(resp);
-  const parsed = extractJson(text);
-  if (!parsed?.pairs) return [];
-  return parsed.pairs
-    .filter(p => p.a_idx != null && p.b_idx != null && p.a_idx < batch.length && p.b_idx < batch.length)
-    .map(p => ({
-      a: batch[p.a_idx],
-      b: batch[p.b_idx],
-      similarity: p.similarity || 0.6,
-      reason: p.reason || ''
-    }));
+async function runDedupBatch(articles) {
+  if (articles.length < 2) return [];
+  const snippets = articles.map(a => {
+    const desc = stripHtml(a.description || '').slice(0, 800);
+    const res = stripHtml(a.resolution || '').slice(0, 800);
+    return `--- ARTICLE ${a.articleNumber} ---\nTitle: ${a.title}\nSummary: ${(a.summary || '').slice(0, 200)}\n${desc ? `Description: ${desc}\n` : ''}${res ? `Resolution: ${res}` : ''}`;
+  }).join('\n\n');
+
+  try {
+    const resp = await callClaudeFast({
+      system: DEDUP_SYSTEM,
+      messages: [{ role: 'user', content: `Analyze these ${articles.length} articles for the same Product-Topic. Find near-identical duplicates.\n\n${snippets}` }],
+      maxTokens: 2000,
+      temperature: 0.1,
+      model: SCORING_MODEL
+    });
+    const parsed = extractJson(extractText(resp));
+    return (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.confidence >= 0.85);
+  } catch {
+    return [];
+  }
 }
 
-async function showMergeSuggestion(pair) {
-  const body = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' } },
-      h('strong', null, 'A: '), `#${pair.a.articleNumber} ${pair.a.title}`,
-      h('br', null),
-      h('strong', null, 'B: '), `#${pair.b.articleNumber} ${pair.b.title}`
+async function showMerge(pair) {
+  const articles = getState('kb.articles') || [];
+  const artA = articles.find(a => a.articleNumber === pair.articleA);
+  const artB = articles.find(a => a.articleNumber === pair.articleB);
+
+  const streamEl = h('div', { id: 'merge-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
+  const content = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } },
+      h('div', null, h('strong', null, 'A: '), `#${pair.articleA} — ${pair.titleA}`),
+      h('div', null, h('strong', null, 'B: '), `#${pair.articleB} — ${pair.titleB}`),
+      h('div', { style: { marginTop: '4px', fontStyle: 'italic' } }, `Keep: #${pair.keepArticle} | ${pair.reason}`)
     ),
-    h('div', { id: 'merge-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', maxHeight: '400px', overflowY: 'auto' } }, spinner('md'))
+    streamEl
   );
 
-  modal('Merge Suggestion', body, {
+  modal('Merge Suggestion', content, {
     wide: true,
     primaryAction: { label: 'Copy', handler: () => {
-      const text = document.getElementById('merge-stream')?.textContent || '';
-      navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
+      navigator.clipboard.writeText(document.getElementById('merge-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
     }}
   });
 
+  const session = await detectSession();
+  let descA = '', resA = '', descB = '', resB = '';
+  if (session.sid && artA && artB) {
+    const bodyMap = await fetchBodiesForDedup(session, [artA.id, artB.id]);
+    descA = stripHtml(bodyMap.get(artA.id)?.description || '').slice(0, MAX_BODY_CHARS);
+    resA = stripHtml(bodyMap.get(artA.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
+    descB = stripHtml(bodyMap.get(artB.id)?.description || '').slice(0, MAX_BODY_CHARS);
+    resB = stripHtml(bodyMap.get(artB.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
+  }
+
+  const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide. Output:
+## TITLE
+[merged title]
+## SUMMARY
+[2-4 sentences]
+## DESCRIPTION
+[merged description]
+## RESOLUTION
+[merged resolution with numbered steps]`;
+
+  const user = `Merge these duplicates into one article.
+
+ARTICLE A (#${pair.articleA}):
+Title: ${pair.titleA || artA?.title || ''}
+Summary: ${artA?.summary || ''}
+Description: ${descA}
+Resolution: ${resA}
+
+ARTICLE B (#${pair.articleB}):
+Title: ${pair.titleB || artB?.title || ''}
+Summary: ${artB?.summary || ''}
+Description: ${descB}
+Resolution: ${resB}
+
+Keep best content from both. Prefer most complete and recent steps.`;
+
   try {
     await streamClaude({
-      system: 'Suggest how to merge these two duplicate KB articles into one. Provide the merged title and structure.',
-      messages: [{ role: 'user', content: `Article A: #${pair.a.articleNumber} "${pair.a.title}"\nSummary: ${pair.a.summary || ''}\n\nArticle B: #${pair.b.articleNumber} "${pair.b.title}"\nSummary: ${pair.b.summary || ''}` }],
-      maxTokens: 3000,
+      system,
+      messages: [{ role: 'user', content: user }],
+      maxTokens: 4000,
       onDelta: (chunk, full) => {
         const el = document.getElementById('merge-stream');
         if (el) el.textContent = full;
@@ -166,28 +315,48 @@ async function showMergeSuggestion(pair) {
 
 export async function handleDedup(port, msg) {
   const articles = msg.articles || [];
-  port.postMessage({ type: 'progress', label: 'Detecting duplicates…' });
-  const pairs = [];
-  const batches = [];
-  for (let i = 0; i < articles.length; i += DEDUP_BATCH_SIZE) {
-    batches.push(articles.slice(i, i + DEDUP_BATCH_SIZE));
+  if (articles.length < 2) { port.postMessage({ type: 'done', pairs: [] }); return; }
+
+  const ptGroups = new Map();
+  for (const a of articles) {
+    const pt = a.topicName || '__other__';
+    if (!ptGroups.has(pt)) ptGroups.set(pt, []);
+    ptGroups.get(pt).push(a);
   }
-  for (const batch of batches) {
-    try {
-      const batchPairs = await findDuplicatesInBatch(batch);
-      pairs.push(...batchPairs);
-    } catch {}
+
+  const workQueue = [];
+  for (const [ptName, ptArticles] of ptGroups) {
+    if (ptArticles.length < 2) continue;
+    for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
+      workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
+    }
   }
-  port.postMessage({ type: 'done', pairs: pairs.slice(0, 20) });
+
+  const allPairs = [];
+  let done = 0;
+  for (const item of workQueue) {
+    const pairs = await runDedupBatch(item.batch);
+    allPairs.push(...pairs);
+    done++;
+    port.postMessage({ type: 'progress', done, total: workQueue.length, ptName: item.ptName });
+  }
+
+  port.postMessage({ type: 'done', pairs: allPairs.filter(p => p.confidence >= 0.85).slice(0, 30) });
 }
 
 export async function handleMerge(port, msg) {
   const { articleA, articleB } = msg;
+  if (!articleA || !articleB) { port.postMessage({ type: 'error', error: 'Missing articles' }); return; }
+  const descA = stripHtml(articleA.description || '').slice(0, MAX_BODY_CHARS);
+  const resA = stripHtml(articleA.resolution || '').slice(0, MAX_BODY_CHARS);
+  const descB = stripHtml(articleB.description || '').slice(0, MAX_BODY_CHARS);
+  const resB = stripHtml(articleB.resolution || '').slice(0, MAX_BODY_CHARS);
+
   try {
     await streamClaude({
-      system: 'Suggest how to merge these two duplicate KB articles into one.',
-      messages: [{ role: 'user', content: `Article A: "${articleA.title}"\nSummary: ${articleA.summary || ''}\n\nArticle B: "${articleB.title}"\nSummary: ${articleB.summary || ''}` }],
-      maxTokens: 3000,
+      system: 'Merge two duplicate KB articles into one. Output: ## TITLE, ## SUMMARY, ## DESCRIPTION, ## RESOLUTION.',
+      messages: [{ role: 'user', content: `A: "${articleA.title}"\nDesc: ${descA}\nRes: ${resA}\n\nB: "${articleB.title}"\nDesc: ${descB}\nRes: ${resB}` }],
+      maxTokens: 4000,
       onDelta: (chunk) => port.postMessage({ type: 'delta', chunk }),
       onDone: (full) => port.postMessage({ type: 'done', text: full })
     });

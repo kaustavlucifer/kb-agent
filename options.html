@@ -74,7 +74,7 @@
   });
 
   document.getElementById('clear-btn').addEventListener('click', async () => {
-    await chrome.storage.local.remove(['kba_all_articles', 'kba_all_articles__ts', 'kba_article_scores', 'kba_dedup_results', 'kba_dedup_at']);
+    await chrome.storage.local.remove(['kba_all_articles', 'kba_all_articles_at', 'kba_all_articles_tier2_at', 'kba_article_scores', 'kba_dedup_results', 'kba_dedup_at']);
     statusEl.textContent = 'Cache cleared.';
     statusEl.style.color = 'var(--text-secondary)';
   });

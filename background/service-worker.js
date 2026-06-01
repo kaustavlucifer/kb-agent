@@ -43,11 +43,12 @@ async function handleMessage(msg) {
 }
 
 async function resolveCase(caseNumber) {
+  if (!/^\d{3,15}$/.test(caseNumber)) return { success: false, error: 'Invalid case number format' };
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
-  const { sfQuery } = await import('../shared/api.js');
+  const { sfQuery, escapeSoql } = await import('../shared/api.js');
   const records = await sfQuery(session.apiBase, session.sid,
-    `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${caseNumber}' LIMIT 1`
+    `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${escapeSoql(caseNumber)}' LIMIT 1`
   );
   if (!records.length) return { success: false, error: 'Case not found' };
   return { success: true, caseId: records[0].Id, caseNumber: records[0].CaseNumber, subject: records[0].Subject };

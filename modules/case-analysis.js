@@ -60,11 +60,11 @@ function renderIdle() {
   const searchBar = h('div', { class: 'card', style: { padding: '12px' } },
     h('div', { style: { display: 'flex', gap: '8px' } },
       h('input', { type: 'text', class: 'input', id: 'case-input', placeholder: 'Case number, ID, or URL…', autocomplete: 'off' }),
-      h('button', { class: 'btn btn--primary', onClick: handleAnalyze, id: 'analyze-btn' }, 'Analyze')
+      h('button', { class: 'btn btn--primary', onClick: onAnalyzeClick, id: 'analyze-btn' }, 'Analyze')
     )
   );
   _container.appendChild(searchBar);
-  document.getElementById('case-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') handleAnalyze(); });
+  document.getElementById('case-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') onAnalyzeClick(); });
 
   const recent = getState('case.recent') || [];
   if (recent.length) {
@@ -212,7 +212,7 @@ function copyDraft(draft) {
   navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
 }
 
-async function handleAnalyze() {
+async function onAnalyzeClick() {
   const input = document.getElementById('case-input');
   const value = (input?.value || '').trim();
   if (!value) { toast('Enter a Case number or ID.', 'error'); return; }
@@ -438,5 +438,10 @@ async function generateNewArticle(caseRecord, comments, abstract, intents) {
   return extractJson(extractText(resp)) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
 }
 
-export { handleAnalyze as handleThemeVolume };
-export { handleAnalyze as handleBroaden };
+export async function handleThemeVolume(port, msg) {
+  port.postMessage({ type: 'themeVolumeResult', success: false, error: 'Theme volume not yet implemented in this build.' });
+}
+
+export async function handleBroaden(port, msg) {
+  port.postMessage({ type: 'broadenResult', success: false, error: 'Broaden not yet implemented in this build.' });
+}
