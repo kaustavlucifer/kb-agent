@@ -11,6 +11,22 @@ let _ptAnalysisLoading = {};
 let _ptGaps = {};
 let _ptGapsLoading = {};
 
+function renderMarkdown(text, container) {
+  if (!text) return;
+  const lines = text.split('\n');
+  lines.forEach(line => {
+    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '8px', color: 'var(--text-primary)' } }, line.slice(4)));
+    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '10px' } }, line.slice(3)));
+    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '12px' } }, line.slice(2)));
+    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5' } }, '• ' + line.slice(2)));
+    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px', fontSize: '12px', lineHeight: '1.5' } }, line));
+    else if (line.startsWith('|')) {
+      container.appendChild(h('div', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px', padding: '2px 0', borderBottom: '1px solid var(--border)' } }, line));
+    }
+    else if (line.trim()) container.appendChild(h('p', { style: { margin: '3px 0', fontSize: '12px', lineHeight: '1.5' } }, line));
+  });
+}
+
 export function mount(container) {
   _container = container;
   if (!_data) loadData();
@@ -168,9 +184,11 @@ function renderPtDetail(ptName, articles) {
   _container.appendChild(headerCard);
 
   if (_ptAnalysis[ptName]) {
+    const narrativeContainer = h('div', null);
+    renderMarkdown(_ptAnalysis[ptName], narrativeContainer);
     const analysisCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
       h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AI Coverage Summary'),
-      h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, _ptAnalysis[ptName])
+      narrativeContainer
     );
     _container.appendChild(analysisCard);
   }

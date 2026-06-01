@@ -127,13 +127,19 @@ function renderStreaming() {
   sidebar.appendChild(renderSidebarArticles(topArticles));
   grid.appendChild(sidebar);
 
+  const result = getState('case.result');
+  const subject = result?.subject || getState('case.progress')?.caseNumber || 'case';
+  const showRaw = streamText && !streamText.trimStart().startsWith('{');
+
   const main = h('div', { style: { flex: '1', overflow: 'auto' } },
     h('div', { class: 'card' },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' } },
         spinner('sm'),
-        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)' } }, 'Generating…')
+        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--primary)' } }, `Generating recommendations for ${subject}…`)
       ),
-      h('div', { style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5', fontFamily: 'var(--font-mono)', maxHeight: '500px', overflow: 'auto' } }, streamText)
+      showRaw
+        ? h('div', { style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5', maxHeight: '500px', overflow: 'auto' } }, streamText)
+        : h('div', { style: { fontSize: '12px', color: 'var(--text-muted)', padding: '12px 0' } }, 'Processing…')
     )
   );
   grid.appendChild(main);
@@ -231,11 +237,21 @@ function renderSidebarArticles(articles) {
       body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0' } }, 'No articles found'));
     } else {
       articles.forEach(a => {
-        body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)', cursor: 'pointer' }, onClick: () => openArticle(a) },
-          h('div', { style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3' } }, a.title || 'Untitled'),
+        const articleUrl = a.url || `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`;
+        const link = h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none' } }, a.title || 'Untitled');
+        link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
+        link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
+        const scorePill = h('span', { style: { fontSize: '10px', color: 'var(--primary)', cursor: 'pointer' } }, `Score: ${a.score}`);
+        scorePill.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setState('app.activeTab', 'kb-articles');
+          setState('kb.focusArticle', a.id);
+        });
+        body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
+          link,
           h('div', { style: { display: 'flex', gap: '6px', marginTop: '3px' } },
             h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, `#${a.articleNumber || ''}`),
-            h('span', { style: { fontSize: '10px', color: 'var(--primary)' } }, `Score: ${a.score}`)
+            scorePill
           )
         ));
       });
@@ -279,9 +295,37 @@ function renderSidebarCoverage() {
   section.appendChild(header);
 
   if (!isCollapsed) {
-    section.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0', fontStyle: 'italic' } }, 'Theme-volume integration coming soon'));
+    const articles = getState('kb.articles') || [];
+    const result = getState('case.result');
+    const abstract = result?.caseAbstract;
+    const product = abstract?.product || '';
+    const symptom = abstract?.symptomClass || '';
+    const matching = articles.filter(a => {
+      const text = `${a.Title || ''} ${a.Summary || ''} ${a.Product || ''}`.toLowerCase();
+      return (product && text.includes(product.toLowerCase())) || (symptom && text.includes(symptom.toLowerCase()));
+    });
+    const count = matching.length;
+    let label, color;
+    if (count === 0) { label = 'Gap detected — no KB coverage for this topic'; color = 'var(--error)'; }
+    else if (count <= 2) { label = `Partial — ${count} article${count > 1 ? 's' : ''} found`; color = 'var(--warning)'; }
+    else { label = `Good — ${count} articles cover this topic`; color = 'var(--success)'; }
+    section.appendChild(h('div', { style: { fontSize: '11px', color, padding: '4px 0', fontWeight: '500' } }, label));
   }
   return section;
+}
+
+function renderMarkdown(text) {
+  if (!text) return h('span', null, '');
+  const lines = text.split('\n');
+  const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
+  lines.forEach(line => {
+    if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
+    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
+    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, h('span', null, '• ' + line.slice(2))));
+    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, line));
+    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, line));
+  });
+  return container;
 }
 
 function renderSuggestionItem(sug, i, total) {
@@ -299,7 +343,8 @@ function renderSuggestionItem(sug, i, total) {
     container.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' } }, `Location: ${sug.location}`));
   }
 
-  const contentArea = h('div', { id, style: { fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: '1.5', background: 'var(--surface-raised)', padding: '8px', borderRadius: 'var(--radius-xs)' } }, sug.content || '');
+  const contentArea = h('div', { id, style: { color: 'var(--text-primary)', background: 'var(--surface-raised)', padding: '8px', borderRadius: 'var(--radius-xs)' } });
+  contentArea.appendChild(renderMarkdown(sug.content));
   container.appendChild(contentArea);
 
   return container;
@@ -315,7 +360,8 @@ function renderEditableSection(sec, idx, prefix) {
     h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineSection(sec) }, 'Refine')
   ));
 
-  const contentArea = h('div', { id, style: { fontSize: '12px', whiteSpace: 'pre-wrap', lineHeight: '1.5' } }, sec.body || '');
+  const contentArea = h('div', { id, style: {} });
+  contentArea.appendChild(renderMarkdown(sec.body));
   container.appendChild(contentArea);
 
   return container;
@@ -342,7 +388,8 @@ function refineSection(section) {
 }
 
 function openArticle(article) {
-  toast(`Article #${article.articleNumber}: ${article.title}`, 'info');
+  const url = article.url || `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${article.id}/view`;
+  chrome.tabs.create({ url });
 }
 
 function groupByArticle(suggestions) {

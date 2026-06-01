@@ -34,18 +34,26 @@ export async function handleAnalyze(port, msg) {
   const ranked = rankArticles(searchResults, allQueries);
   const topArticles = ranked.slice(0, TOP_K);
 
-  const maxScore = topArticles.length ? topArticles[0]._score : 0;
-  const totalTerms = allQueries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2).length || 1;
-  const bestMatchPct = Math.round((maxScore / totalTerms) * 100);
+  const scoredArticles = await mapWithConcurrency(topArticles, async (a) => {
+    try {
+      const resp = await callClaudeFast({
+        system: 'Score this article 0-100 for relevance to the case. Return ONLY a number.',
+        messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nArticle: ${a.Title} ${(a.Summary || '').slice(0, 200)}` }],
+        maxTokens: 10,
+        temperature: 0
+      });
+      const num = parseInt(extractText(resp), 10);
+      return { id: a.Id, title: a.Title, articleNumber: a.ArticleNumber, score: isNaN(num) ? 0 : num, url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view` };
+    } catch {
+      return { id: a.Id, title: a.Title, articleNumber: a.ArticleNumber, score: 0, url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view` };
+    }
+  }, 5);
 
-  send({ type: 'meta', topArticles: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber, score: a._score })) });
+  send({ type: 'meta', topArticles: scoredArticles });
 
-  send({ type: 'progress', step: 5, label: 'Generating recommendation' });
-
-  let action;
-  if (bestMatchPct >= 70) action = 'UPDATE_EXISTING';
-  else if (bestMatchPct >= 30) action = 'BOTH';
-  else action = 'CREATE_NEW';
+  send({ type: 'progress', step: 5, label: 'Evaluating recommendation strategy' });
+  const decision = await makeDecision(caseRecord, caseAbstract, topArticles);
+  const action = decision.action;
 
   let structured;
 
@@ -54,8 +62,8 @@ export async function handleAnalyze(port, msg) {
     const suggestions = await generateSuggestionsStreaming(topArticles, bodies, caseRecord, comments, caseAbstract, send);
     structured = {
       action,
-      confidence: bestMatchPct >= 70 ? 'HIGH' : 'MEDIUM',
-      summary: `Best article match: ${bestMatchPct}%. ${action === 'BOTH' ? 'Showing existing article suggestions and a new article draft.' : 'Updating existing articles.'}`,
+      confidence: decision.confidence,
+      summary: `${decision.reason} ${action === 'BOTH' ? 'Showing existing article suggestions and a new article draft.' : 'Updating existing articles.'}`,
       suggestions,
       topologyAssessment: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber }))
     };
@@ -68,8 +76,8 @@ export async function handleAnalyze(port, msg) {
     } else {
       structured = {
         action: 'CREATE_NEW',
-        confidence: bestMatchPct < 10 ? 'HIGH' : 'MEDIUM',
-        summary: `No strong article match found (best: ${bestMatchPct}%). Drafting a new article.`,
+        confidence: decision.confidence,
+        summary: `${decision.reason} Drafting a new article.`,
         newArticleDraft: draft
       };
     }
@@ -180,6 +188,23 @@ async function generateSuggestionsStreaming(articles, bodyMap, caseRecord, comme
     } catch {}
   }
   return allSuggestions;
+}
+
+async function makeDecision(caseRecord, abstract, topArticles) {
+  if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.' };
+  const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" — ${(a.Summary || '').slice(0, 100)}`).join('\n');
+  const resp = await callClaudeFast({
+    system: `You decide whether to UPDATE existing KB articles or CREATE a new one. Rules:
+- Prefer UPDATE_EXISTING when ANY article covers the same root cause, even partially — article improvement is cheaper than proliferation
+- Only choose CREATE_NEW when the case describes a genuinely novel problem that no existing article addresses even tangentially
+- Choose BOTH when articles cover related but not identical issues and a new focused article would also add value
+Return JSON: {"action":"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence"}`,
+    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 400)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles:\n${articleList}` }],
+    maxTokens: 200,
+    temperature: 0.1
+  });
+  const parsed = extractJson(extractText(resp));
+  return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.' };
 }
 
 async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send) {

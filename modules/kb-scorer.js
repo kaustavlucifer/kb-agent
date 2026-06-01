@@ -200,7 +200,10 @@ function render() {
   }
 
   let filtered = articles;
-  if (_filterText) filtered = filtered.filter(a => `${a.title} ${a.articleNumber} ${a.topicName || ''}`.toLowerCase().includes(_filterText.toLowerCase()));
+  if (_filterText) {
+    const term = _filterText.toLowerCase();
+    filtered = filtered.filter(a => `${a.title || ''} ${a.articleNumber || ''} ${a.topicName || ''} ${a.summary || ''} ${a.knowledgeArticleId || ''}`.toLowerCase().includes(term));
+  }
   if (_filterPt.length) filtered = filtered.filter(a => _filterPt.includes(a.topicName));
   if (_filterValidation.length) filtered = filtered.filter(a => _filterValidation.includes(a.validationStatus));
   if (_filterScore.length) filtered = filtered.filter(a => {

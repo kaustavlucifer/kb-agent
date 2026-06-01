@@ -13,7 +13,9 @@ let _activeModule = null;
 let _tabContent = null;
 
 async function init() {
-  setState('app.activeTab', 'case-analysis');
+  const hashTab = location.hash.replace('#', '');
+  const validTab = TABS.find(t => t.id === hashTab);
+  setState('app.activeTab', validTab ? hashTab : 'case-analysis');
   setState('app.connections', { sf: null, ai: null, gus: null, slack: null });
   render();
   checkConnections();
@@ -24,6 +26,12 @@ async function init() {
     setState('app.activeTab', 'case-analysis');
     setState('case.pendingUrl', caseUrl);
   }
+
+  window.addEventListener('popstate', (event) => {
+    if (event.state && event.state.tab) {
+      setState('app.activeTab', event.state.tab);
+    }
+  });
 }
 
 function render() {
@@ -76,6 +84,10 @@ function activateTab(tabId) {
   document.querySelectorAll('#tab-nav .tab').forEach(btn => {
     btn.classList.toggle('tab--active', btn.dataset.tab === tabId);
   });
+
+  if (history.state?.tab !== tabId) {
+    history.pushState({ tab: tabId }, '', `#${tabId}`);
+  }
 
   if (_activeModule && _activeModule.unmount) {
     _activeModule.unmount();
