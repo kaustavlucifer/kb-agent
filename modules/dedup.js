@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { sfGet, soqlIdList, mapWithConcurrency, stripHtml } from '../shared/api.js';
@@ -33,73 +33,6 @@ Rules:
 - NEVER flag an article as a duplicate of ITSELF. articleA and articleB must be DIFFERENT article numbers.
 - If no duplicates: return {"pairs":[]}`;
 
-function multiSelect(id, label, options, selected, onChange) {
-  const wrap = h('div', { class: 'multi-select', id });
-  wrap.style.position = 'relative';
-  wrap.style.display = 'inline-block';
-
-  const trigger = h('div', {
-    style: {
-      padding: '6px 12px',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius-sm)',
-      fontSize: '12px',
-      cursor: 'pointer',
-      background: 'var(--surface)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '6px',
-      minWidth: '140px',
-      justifyContent: 'space-between'
-    }
-  },
-    h('span', { style: { color: selected.length ? 'var(--text-primary)' : 'var(--text-muted)' } },
-      selected.length ? `${label} (${selected.length})` : label
-    ),
-    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '▼')
-  );
-  trigger.addEventListener('click', toggleDropdown);
-  wrap.appendChild(trigger);
-
-  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '240px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
-
-  if (selected.length) {
-    const clearBtn = h('div', { style: { padding: '4px 8px', fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', borderBottom: '1px solid var(--border)', marginBottom: '4px' } }, 'Clear all');
-    clearBtn.addEventListener('click', (e) => { e.stopPropagation(); onChange([]); });
-    dropdown.appendChild(clearBtn);
-  }
-
-  options.forEach(opt => {
-    const checked = selected.includes(opt.value);
-    const checkbox = h('input', { type: 'checkbox' });
-    checkbox.checked = checked;
-    checkbox.addEventListener('change', (e) => {
-      const val = opt.value;
-      const newSel = e.target.checked ? [...selected, val] : selected.filter(v => v !== val);
-      onChange(newSel);
-    });
-    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-xs)' } },
-      checkbox,
-      h('span', null, opt.label)
-    );
-    item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
-    item.addEventListener('mouseleave', () => { item.style.background = ''; });
-    dropdown.appendChild(item);
-  });
-  wrap.appendChild(dropdown);
-
-  function toggleDropdown(e) {
-    e.stopPropagation();
-    const visible = dropdown.style.display !== 'none';
-    dropdown.style.display = visible ? 'none' : 'block';
-    if (!visible) {
-      const dismiss = (ev) => { if (!wrap.contains(ev.target)) { dropdown.style.display = 'none'; document.removeEventListener('click', dismiss); } };
-      setTimeout(() => document.addEventListener('click', dismiss), 0);
-    }
-  }
-
-  return wrap;
-}
 
 export function mount(container) {
   _container = container;
@@ -129,6 +62,11 @@ async function loadCachedResults() {
 function render() {
   if (!_container) return;
   _container.textContent = '';
+  const stickySection = h('div', { class: 'main__sticky' });
+  const scrollSection = h('div', { class: 'main__scroll' });
+  _container.appendChild(stickySection);
+  _container.appendChild(scrollSection);
+
   const pairs = getState('dedup.pairs') || [];
   const running = getState('dedup.running');
   const articles = getState('kb.articles') || [];
@@ -145,8 +83,8 @@ function render() {
     ? ptOptions.filter(pt => _filterCloud.some(c => pt.toLowerCase().startsWith(c.toLowerCase())))
     : ptOptions;
 
-  const ptMulti = multiSelect('dedup-pt-filter', 'P&T',
-    filteredPtOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
+  const ptMulti = multiSelect('dedup-pt-filter', 'Product & Topic',
+    filteredPtOptions.map(pt => ({ value: pt, label: pt })),
     _filterPt,
     (sel) => { _filterPt = sel; render(); }
   );
@@ -176,11 +114,11 @@ function render() {
     clearBtn,
     detectBtn
   );
-  _container.appendChild(toolbar);
+  stickySection.appendChild(toolbar);
 
   if (running) {
     const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
-    _container.appendChild(h('div', { class: 'card', style: { padding: '12px', marginBottom: '12px' } },
+    stickySection.appendChild(h('div', { class: 'card', style: { padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
         h('span', null, running.ptName ? `P&T: ${running.ptName}` : 'Preparing…'),
         h('span', null, `${pct}%`)
@@ -190,12 +128,12 @@ function render() {
   }
 
   if (!articles.length && !pairs.length) {
-    _container.appendChild(emptyState('🔗', 'Load articles in the KB Articles tab first, then detect duplicates.'));
+    scrollSection.appendChild(emptyState('🔗', 'Load articles in the KB Articles tab first, then detect duplicates.'));
     return;
   }
 
   if (!pairs.length && !running) {
-    _container.appendChild(emptyState('✓', 'No duplicates found. Click "Detect Duplicates" to scan articles grouped by Product & Topic.'));
+    scrollSection.appendChild(emptyState('✓', 'No duplicates found. Click "Detect Duplicates" to scan articles grouped by Product & Topic.'));
     return;
   }
 
@@ -232,7 +170,7 @@ function render() {
         )
       ));
     });
-    _container.appendChild(table);
+    scrollSection.appendChild(table);
   }
 }
 

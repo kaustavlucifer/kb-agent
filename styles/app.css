@@ -11,7 +11,8 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .header {
@@ -116,11 +117,28 @@ body {
 
 .main {
   flex: 1;
-  padding: var(--space-xl);
-  max-width: 1200px;
+  padding: 0 var(--space-xl) var(--space-xl);
   width: 100%;
-  margin: 0 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   animation: fadeIn 0.15s ease-out;
+}
+
+.main:has(.main__sticky) {
+  overflow: hidden;
+}
+
+.main__sticky {
+  flex-shrink: 0;
+  padding-top: var(--space-xl);
+}
+
+.main__scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: var(--space-md);
+  min-height: 0;
 }
 
 @keyframes fadeIn {
@@ -249,7 +267,7 @@ body {
   flex-direction: column;
 }
 
-.modal--wide { max-width: 800px; }
+.modal--wide { max-width: 900px; max-height: 85vh; }
 
 .modal__header {
   display: flex;

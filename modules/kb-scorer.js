@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText } from '../shared/api.js';
@@ -12,12 +12,13 @@ let _filterText = '';
 let _filterCloud = [];
 let _filterPt = [];
 let _filterScore = [];
-let _filterValidation = [];
-let _filterPublish = [];
+let _filterValidation = ['Validated External'];
+let _filterPublish = ['Online'];
 let _sortCol = 'articleNumber';
 let _sortDir = 'asc';
 let _page = 0;
 const _pageSize = 50;
+let _agfHits = null;
 
 const SCORE_META_FIELDS = [
   'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
@@ -42,93 +43,7 @@ const CRITERIA = [
   { id: 'taxonomy', label: 'Taxonomy & Product Context', baseMax: 8 }
 ];
 
-function multiSelect(id, label, options, selected, onChange) {
-  const wrap = h('div', { class: 'multi-select', id });
-  wrap.style.position = 'relative';
-  wrap.style.display = 'inline-block';
-  let pending = [...selected];
 
-  const trigger = h('div', {
-    style: {
-      padding: '6px 12px',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius-sm)',
-      fontSize: '12px',
-      cursor: 'pointer',
-      background: 'var(--surface)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '6px',
-      minWidth: '140px',
-      justifyContent: 'space-between'
-    }
-  },
-    h('span', { style: { color: selected.length ? 'var(--text-primary)' : 'var(--text-muted)' } },
-      selected.length ? `${label} (${selected.length})` : label
-    ),
-    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '▼')
-  );
-  trigger.addEventListener('click', toggleDropdown);
-  wrap.appendChild(trigger);
-
-  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px', maxHeight: '280px', overflowY: 'auto', zIndex: '500', minWidth: '200px', boxShadow: 'var(--shadow-md)' } });
-
-  const actionsBar = h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid var(--border)', marginBottom: '4px' } },
-    h('div', { style: { fontSize: '11px', color: 'var(--error)', cursor: 'pointer' }, onClick: (e) => { e.stopPropagation(); pending = []; updateCheckboxes(); } }, 'Clear'),
-    h('div', { style: { fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', fontWeight: '600' }, onClick: (e) => { e.stopPropagation(); dropdown.style.display = 'none'; onChange(pending); } }, 'Apply')
-  );
-  dropdown.appendChild(actionsBar);
-
-  const checkboxes = [];
-  options.forEach(opt => {
-    const checked = pending.includes(opt.value);
-    const checkbox = h('input', { type: 'checkbox' });
-    checkbox.checked = checked;
-    checkbox.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const val = opt.value;
-      if (e.target.checked) { if (!pending.includes(val)) pending.push(val); }
-      else { pending = pending.filter(v => v !== val); }
-    });
-    checkboxes.push({ checkbox, value: opt.value });
-    const item = h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-xs)' } },
-      checkbox,
-      h('span', null, opt.label)
-    );
-    item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
-    item.addEventListener('mouseleave', () => { item.style.background = ''; });
-    item.addEventListener('click', (e) => { e.stopPropagation(); });
-    dropdown.appendChild(item);
-  });
-  wrap.appendChild(dropdown);
-
-  function updateCheckboxes() {
-    checkboxes.forEach(({ checkbox, value }) => { checkbox.checked = pending.includes(value); });
-  }
-
-  function toggleDropdown(e) {
-    e.stopPropagation();
-    const visible = dropdown.style.display !== 'none';
-    if (visible) {
-      dropdown.style.display = 'none';
-      onChange(pending);
-    } else {
-      pending = [...selected];
-      updateCheckboxes();
-      dropdown.style.display = 'block';
-      const dismiss = (ev) => {
-        if (!wrap.contains(ev.target)) {
-          dropdown.style.display = 'none';
-          document.removeEventListener('click', dismiss);
-          onChange(pending);
-        }
-      };
-      setTimeout(() => document.addEventListener('click', dismiss), 0);
-    }
-  }
-
-  return wrap;
-}
 
 function toggleKbSort(col) {
   if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
@@ -145,6 +60,7 @@ export function mount(container) {
     setState('kb.scoring', null);
     loadArticles();
   }
+  if (!_agfHits) loadAgfHits();
   render();
   _unsubs.push(subscribe('kb.articles', render));
   _unsubs.push(subscribe('kb.scores', render));
@@ -161,6 +77,15 @@ export function mount(container) {
     setState('kb.focusArticle', null);
     setTimeout(() => handleFocusArticle(pendingFocus), 300);
   }
+}
+
+async function loadAgfHits() {
+  try {
+    const url = chrome.runtime.getURL('data/agf_article_hits.json');
+    const resp = await fetch(url);
+    _agfHits = await resp.json();
+    render();
+  } catch { _agfHits = {}; }
 }
 
 export function unmount() {
@@ -208,32 +133,41 @@ function render() {
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
   const scoring = getState('kb.scoring');
+  const filtered = getFilteredArticles();
+
+  const stickySection = h('div', { class: 'main__sticky' });
+  const scrollSection = h('div', { class: 'main__scroll' });
+  _container.appendChild(stickySection);
+  _container.appendChild(scrollSection);
 
   const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
   const scored = articles.filter(a => scores[a.id]?.overall != null);
   const avgScore = scored.length ? Math.round(scored.reduce((s, a) => s + scores[a.id].overall, 0) / scored.length) : null;
 
+  const filteredScored = filtered.filter(a => scores[a.id]?.overall != null);
+  const filteredAvg = filteredScored.length ? Math.round(filteredScored.reduce((s, a) => s + scores[a.id].overall, 0) / filteredScored.length) : null;
+
   const statsBar = h('div', { class: 'card', style: { padding: '12px', marginBottom: '12px' } },
     h('div', { style: { display: 'flex', gap: '24px', fontSize: '12px' } },
       h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700' } }, String(articles.length)),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Articles')
+        h('div', { style: { fontSize: '18px', fontWeight: '700' } }, String(filtered.length)),
+        h('div', { style: { color: 'var(--text-secondary)' } }, filtered.length !== articles.length ? `of ${articles.length} Articles` : 'Articles')
       ),
       h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--primary)' } }, `${scored.length}/${articles.length}`),
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--primary)' } }, `${filteredScored.length}/${filtered.length}`),
         h('div', { style: { color: 'var(--text-secondary)' } }, 'Scored')
       ),
-      avgScore != null ? h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: avgScore >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : avgScore >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(avgScore)),
+      filteredAvg != null ? h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: filteredAvg >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : filteredAvg >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(filteredAvg)),
         h('div', { style: { color: 'var(--text-secondary)' } }, 'Avg Score')
       ) : null,
-      scored.length ? h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--error)' } }, String(scored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length)),
+      filteredScored.length ? h('div', null,
+        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--error)' } }, String(filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length)),
         h('div', { style: { color: 'var(--text-secondary)' } }, 'Below 60')
       ) : null
     )
   );
-  _container.appendChild(statsBar);
+  stickySection.appendChild(statsBar);
 
   const validationOptions = [...new Set(articles.map(a => a.validationStatus).filter(Boolean))].sort();
 
@@ -246,8 +180,8 @@ function render() {
     (sel) => { _filterCloud = sel; _page = 0; render(); }
   );
 
-  const ptMulti = multiSelect('kb-pt-filter', 'P&T',
-    ptOptions.map(pt => ({ value: pt, label: pt.replace(/^(Industry|Revenue)\s*[-–]\s*/i, '') })),
+  const ptMulti = multiSelect('kb-pt-filter', 'Product & Topic',
+    ptOptions.map(pt => ({ value: pt, label: pt })),
     _filterPt,
     (sel) => { _filterPt = sel; _page = 0; render(); }
   );
@@ -278,12 +212,15 @@ function render() {
 
   const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: loading }, 'Refresh');
   refreshBtn.addEventListener('click', loadArticles);
-  const hasFilters = _filterText || _filterCloud.length || _filterPt.length || _filterScore.length || _filterValidation.length || _filterPublish.length;
-  const scoreBtnLabel = scoring ? 'Scoring…' : hasFilters ? 'Score Filtered' : 'Score All';
+  const totalPages = Math.ceil(filtered.length / _pageSize) || 1;
+  if (_page >= totalPages) _page = Math.max(0, totalPages - 1);
+  const pageStart = _page * _pageSize;
+  const pageArticleCount = Math.min(_pageSize, filtered.length - pageStart);
+  const scoreBtnLabel = scoring ? 'Scoring…' : `Score Page (${pageArticleCount})`;
   const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !articles.length || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
 
-  const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+  const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '0', flexWrap: 'wrap' } },
     searchInput,
     cloudMulti,
     ptMulti,
@@ -295,11 +232,11 @@ function render() {
       scoreBtn
     )
   );
-  _container.appendChild(filtersRow);
+  stickySection.appendChild(filtersRow);
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
-    _container.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
+    stickySection.appendChild(h('div', { class: 'card', style: { marginTop: '8px', padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
         h('span', null, `Scoring: ${scoring.done} / ${scoring.total}`),
         h('span', null, `${pct}%`)
@@ -309,22 +246,26 @@ function render() {
   }
 
   if (loading) {
-    _container.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
+    scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
     return;
   }
 
   if (!articles.length) {
-    _container.appendChild(emptyState('📄', 'No articles loaded. Click Refresh to fetch from Salesforce.'));
+    scrollSection.appendChild(emptyState('📄', 'No articles loaded. Click Refresh to fetch from Salesforce.'));
     return;
   }
-
-  let filtered = getFilteredArticles();
 
   filtered.sort((a, b) => {
     let va, vb;
     if (_sortCol === 'score') {
       va = scores[a.id]?.overall ?? -1;
       vb = scores[b.id]?.overall ?? -1;
+    } else if (_sortCol === 'agfHits') {
+      va = _agfHits?.[a.articleNumber]?.agfHits ?? a.viewCount ?? -1;
+      vb = _agfHits?.[b.articleNumber]?.agfHits ?? b.viewCount ?? -1;
+    } else if (_sortCol === 'lastPublished') {
+      va = a.lastPublished || '';
+      vb = b.lastPublished || '';
     } else {
       va = (a[_sortCol] || '').toLowerCase();
       vb = (b[_sortCol] || '').toLowerCase();
@@ -342,7 +283,9 @@ function render() {
     h('thead', null, h('tr', null,
       h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => { toggleKbSort('articleNumber'); } }, '#' + kbSortIndicator('articleNumber')),
       h('th', { style: { cursor: 'pointer' }, onClick: () => { toggleKbSort('title'); } }, 'Title' + kbSortIndicator('title')),
-      h('th', { style: { width: '140px', cursor: 'pointer' }, onClick: () => { toggleKbSort('topicName'); } }, 'P&T' + kbSortIndicator('topicName')),
+      h('th', { style: { width: '180px', cursor: 'pointer' }, onClick: () => { toggleKbSort('topicName'); } }, 'Product & Topic' + kbSortIndicator('topicName')),
+      h('th', { style: { width: '85px', cursor: 'pointer' }, onClick: () => { toggleKbSort('lastPublished'); } }, 'Published' + kbSortIndicator('lastPublished')),
+      h('th', { style: { width: '80px', cursor: 'pointer' }, onClick: () => { toggleKbSort('agfHits'); } }, 'AGF' + kbSortIndicator('agfHits')),
       h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + kbSortIndicator('score')),
       h('th', { style: { width: '120px' } }, 'Actions')
     )),
@@ -350,24 +293,36 @@ function render() {
   );
 
   const tbody = table.querySelector('tbody');
-  const totalPages = Math.ceil(filtered.length / _pageSize);
-  if (_page >= totalPages && totalPages > 0) _page = totalPages - 1;
-  const pageStart = _page * _pageSize;
   const pageEnd = pageStart + _pageSize;
-  filtered.slice(pageStart, pageEnd).forEach(a => {
+  const pageItems = filtered.slice(pageStart, pageEnd);
+  pageItems.forEach(a => {
     const scoreData = scores[a.id];
     const overall = scoreData?.overall;
     const scoreEl = overall != null
       ? h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
       : h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—');
 
+    const pubDate = a.lastPublished ? new Date(a.lastPublished).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—';
+    const agf = _agfHits?.[a.articleNumber];
+    const hasAnyMetric = agf || a.viewCount || a.caseAttachCount;
+    const agfEl = hasAnyMetric ? h('div', { style: { display: 'flex', gap: '3px', flexWrap: 'wrap' } },
+      agf ? h('span', { class: 'pill pill--neutral', style: { fontSize: '9px', padding: '1px 4px' }, title: 'AGF conversations citing this article' }, `${agf.agfHits} hits`) : null,
+      a.viewCount ? h('span', { class: 'pill pill--neutral', style: { fontSize: '9px', padding: '1px 4px' }, title: 'Total article views' }, `${a.viewCount} views`) : null,
+      a.caseAttachCount ? h('span', { class: 'pill pill--neutral', style: { fontSize: '9px', padding: '1px 4px' }, title: 'Cases linked to article' }, `${a.caseAttachCount} cases`) : null
+    ) : h('span', { style: { color: 'var(--text-muted)', fontSize: '10px' } }, '—');
+
+    const articleUrl = `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`;
     tbody.appendChild(h('tr', null,
-      h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)' } }, a.articleNumber || ''),
+      h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px' } },
+        h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)', textDecoration: 'none' } }, a.articleNumber || '')
+      ),
       h('td', null,
         h('div', { style: { fontSize: '12px', fontWeight: '500' } }, a.title || ''),
         a.validationStatus ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, a.validationStatus) : null
       ),
-      h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, (a.topicName || '').replace(/^(Industry|Revenue)\s*[-–]\s*/i, '')),
+      h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, a.topicName || ''),
+      h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, pubDate),
+      h('td', null, agfEl),
       h('td', null, scoreEl),
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px' } },
@@ -381,17 +336,18 @@ function render() {
     ));
   });
 
-  _container.appendChild(table);
+  scrollSection.appendChild(table);
 
-  const totalPagesBottom = Math.ceil(filtered.length / _pageSize);
-  if (totalPagesBottom > 1) {
-    const paginationRow = h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
-      h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev'),
-      h('span', { style: { color: 'var(--text-secondary)' } }, `Page ${_page + 1} of ${totalPagesBottom} (${filtered.length} articles)`),
-      h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPagesBottom - 1, onClick: () => { _page++; render(); } }, 'Next →')
-    );
-    _container.appendChild(paginationRow);
-  }
+  const paginationRow = h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
+    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev') : null,
+    h('span', { style: { color: 'var(--text-secondary)' } },
+      totalPages > 1
+        ? `Showing ${pageStart + 1}–${pageStart + pageItems.length} of ${filtered.length} articles (Page ${_page + 1}/${totalPages})`
+        : `${filtered.length} articles`
+    ),
+    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPages - 1, onClick: () => { _page++; render(); } }, 'Next →') : null
+  );
+  scrollSection.appendChild(paginationRow);
 }
 
 function showScoreDetail(article, scoreData) {
@@ -459,7 +415,7 @@ async function loadArticles() {
     if (!session.sid) { toast('Not connected to Salesforce.', 'error'); setState('kb.loading', false); return; }
 
     const records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
+      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
       (loaded, total) => setState('kb.loading', { loaded, total })
     );
 
@@ -554,9 +510,12 @@ function getFilteredArticles() {
 
 async function scoreAll() {
   const filtered = getFilteredArticles();
+  const pageStart = _page * _pageSize;
+  const pageEnd = pageStart + _pageSize;
+  const pageArticles = filtered.slice(pageStart, pageEnd);
   const existingScores = getState('kb.scores') || {};
-  const toScore = filtered.filter(a => !existingScores[a.id]?.overall);
-  if (!toScore.length) { toast('All visible articles already scored.', 'info'); return; }
+  const toScore = pageArticles.filter(a => !existingScores[a.id]?.overall);
+  if (!toScore.length) { toast('All articles on this page already scored.', 'info'); return; }
 
   setState('kb.scoring', { done: 0, total: toScore.length });
   const session = await detectSession();

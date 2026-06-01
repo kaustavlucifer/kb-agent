@@ -169,8 +169,13 @@ function renderView() {
   _container.textContent = '';
   const articles = getState('kb.articles') || [];
 
+  const stickySection = h('div', { class: 'main__sticky' });
+  const scrollSection = h('div', { class: 'main__scroll' });
+  _container.appendChild(stickySection);
+  _container.appendChild(scrollSection);
+
   if (!_data) {
-    _container.appendChild(h('div', { style: { textAlign: 'center', padding: '32px' } }, spinner('md')));
+    scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '32px' } }, spinner('md')));
     return;
   }
 
@@ -185,7 +190,7 @@ function renderView() {
     h('option', { value: 'Revenue', selected: _cloudFilter === 'Revenue' }, 'Revenue')
   );
 
-  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '0', flexWrap: 'wrap' } },
     cloudSelect,
     h('select', { class: 'input', id: 'pt-select', style: { maxWidth: '300px' } },
       h('option', { value: '' }, `All P&Ts (${ptNames.length})`),
@@ -195,7 +200,7 @@ function renderView() {
       articles.length ? `${articles.length} articles loaded` : 'Load articles in KB tab for coverage matching'
     )
   );
-  _container.appendChild(toolbar);
+  stickySection.appendChild(toolbar);
   document.getElementById('cloud-select')?.addEventListener('change', e => {
     _cloudFilter = e.target.value;
     _selectedPt = null;
@@ -208,9 +213,9 @@ function renderView() {
   });
 
   if (_selectedPt) {
-    renderPtDetail(_selectedPt, articles);
+    renderPtDetail(_selectedPt, articles, scrollSection);
   } else {
-    renderOverview(ptNames, articles);
+    renderOverview(ptNames, articles, scrollSection);
   }
 }
 
@@ -225,7 +230,7 @@ function sortIndicator(col) {
   return _sortCol === col ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
 }
 
-function renderOverview(ptNames, articles) {
+function renderOverview(ptNames, articles, target) {
   const rows = ptNames.map(pt => {
     const ptData = _data[pt];
     const clusters = ptData.clusters || [];
@@ -269,7 +274,7 @@ function renderOverview(ptNames, articles) {
       )
     )
   );
-  _container.appendChild(summaryCard);
+  target.appendChild(summaryCard);
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
@@ -306,10 +311,10 @@ function renderOverview(ptNames, articles) {
     );
     tbody.appendChild(row);
   });
-  _container.appendChild(table);
+  target.appendChild(table);
 }
 
-function renderPtDetail(ptName, articles) {
+function renderPtDetail(ptName, articles, target) {
   const ptData = _data[ptName];
   if (!ptData) return;
   const clusters = ptData.clusters || [];
@@ -337,7 +342,7 @@ function renderPtDetail(ptName, articles) {
       )
     )
   );
-  _container.appendChild(headerCard);
+  target.appendChild(headerCard);
 
   const table = h('table', { class: 'data-table' },
     h('thead', null, h('tr', null,
@@ -376,7 +381,7 @@ function renderPtDetail(ptName, articles) {
       )
     ));
   });
-  _container.appendChild(table);
+  target.appendChild(table);
 }
 
 function showCoverageResult(ptName, narrative) {

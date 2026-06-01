@@ -12,17 +12,28 @@ let _streamThrottle = null;
 export function mount(container) {
   _container = container;
   if (!getState('case.view')) setState('case.view', 'idle');
+
+  const view = getState('case.view');
+  if ((view === 'analyzing' || view === 'streaming') && !_port) {
+    const suggestions = getState('case.suggestions') || [];
+    if (suggestions.length || getState('case.result')) {
+      setState('case.view', 'result');
+    } else {
+      setState('case.view', 'idle');
+    }
+  }
+
   loadRecentCases();
   renderByView();
-  _unsubs.push(subscribe('case.view', renderByView));
-  _unsubs.push(subscribe('case.progress', () => { if (getState('case.view') === 'analyzing') renderByView(); }));
-  _unsubs.push(subscribe('case.result', () => { if (getState('case.view') === 'result') renderByView(); }));
-  _unsubs.push(subscribe('case.streamText', () => { if (getState('case.view') === 'streaming') renderStreaming(); }));
-  _unsubs.push(subscribe('case.topArticles', () => { if (getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.view', () => { if (_container) renderByView(); }));
+  _unsubs.push(subscribe('case.progress', () => { if (_container && getState('case.view') === 'analyzing') renderByView(); }));
+  _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
+  _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.topArticles', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
-    if (getState('case.view') !== 'streaming') return;
+    if (!_container || getState('case.view') !== 'streaming') return;
     if (_streamThrottle) return;
-    _streamThrottle = setTimeout(() => { _streamThrottle = null; renderStreaming(); }, STREAM_RENDER_THROTTLE_MS);
+    _streamThrottle = setTimeout(() => { _streamThrottle = null; if (_container) renderStreaming(); }, STREAM_RENDER_THROTTLE_MS);
   }));
 
   const pending = getState('case.pendingUrl');
@@ -60,6 +71,27 @@ function renderByView() {
   else if (view === 'analyzing') renderAnalyzing();
   else if (view === 'streaming') renderStreaming();
   else if (view === 'result') renderResult();
+}
+
+function buildInlineSearch() {
+  const input = h('input', { type: 'text', class: 'input', style: { flex: '1', maxWidth: '320px', fontSize: '12px', padding: '5px 10px' }, placeholder: 'New case #, ID, or URL…', id: 'case-inline-search' });
+  const btn = h('button', { class: 'btn btn--primary btn--sm', onClick: () => submitInlineSearch() }, 'Analyze');
+  const bar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+    input, btn,
+    h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginLeft: '8px' } }, 'Enter a case to start new analysis')
+  );
+  setTimeout(() => {
+    document.getElementById('case-inline-search')?.addEventListener('keydown', e => { if (e.key === 'Enter') submitInlineSearch(); });
+  }, 0);
+  return bar;
+}
+
+function submitInlineSearch() {
+  const input = document.getElementById('case-inline-search');
+  const val = (input?.value || '').trim();
+  if (!val) return;
+  const id = extractCaseId(val) || val;
+  startAnalysis(id);
 }
 
 let _typeaheadTimer = null;
@@ -355,6 +387,8 @@ function renderStreamingDraft(text, container) {
 function renderResult() {
   if (!_container) return;
   _container.textContent = '';
+  _container.appendChild(buildInlineSearch());
+
   const result = getState('case.result');
   if (!result) return;
 
@@ -422,10 +456,6 @@ function renderResult() {
     }
     main.appendChild(draftCard);
   }
-
-  main.appendChild(h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '16px' } },
-    h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { setState('case.view', 'idle'); setState('case.result', null); setState('case.topArticles', null); setState('case.streamText', ''); } }, 'New Analysis')
-  ));
 
   grid.appendChild(main);
   _container.appendChild(grid);
