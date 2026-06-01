@@ -4,6 +4,11 @@ import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, escapeSoql } from '../shared/api.js';
 import { STORAGE_KEYS } from '../shared/config.js';
 
+import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
+import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
+import { handleCoverage } from './handlers/coverage.js';
+import { handleDedup, handleMerge } from './handlers/dedup.js';
+
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
 });
@@ -27,8 +32,7 @@ async function handleMessage(msg) {
       const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN]);
       const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
       if (!token) return { connected: false, hasToken: false };
-      const result = await pingGateway(token);
-      return result;
+      return pingGateway(token);
     }
     case 'SAVE_TOKEN': {
       const token = msg.token;
@@ -62,102 +66,36 @@ async function resolveCase(caseNumber) {
 }
 
 function handlePort(port) {
+  const wrap = (fn) => (msg) => {
+    fn(port, msg).catch(e => {
+      try { port.postMessage({ type: 'error', error: e.message }); } catch {}
+    });
+  };
+
   switch (port.name) {
     case 'kba-analyze':
-      port.onMessage.addListener(msg => routeAnalyze(port, msg));
+      port.onMessage.addListener(wrap(handleAnalyze));
       break;
     case 'kba-theme-volume':
-      port.onMessage.addListener(msg => routeThemeVolume(port, msg));
+      port.onMessage.addListener(wrap(handleThemeVolume));
       break;
     case 'kba-broaden':
-      port.onMessage.addListener(msg => routeBroaden(port, msg));
+      port.onMessage.addListener(wrap(handleBroaden));
       break;
     case 'kbs-score-batch':
-      port.onMessage.addListener(msg => routeScoreBatch(port, msg));
+      port.onMessage.addListener(wrap(handleScoreBatch));
       break;
     case 'kbs-rewrite':
-      port.onMessage.addListener(msg => routeRewrite(port, msg));
+      port.onMessage.addListener(wrap(handleRewrite));
       break;
     case 'kbs-coverage':
-      port.onMessage.addListener(msg => routeCoverage(port, msg));
+      port.onMessage.addListener(wrap(handleCoverage));
       break;
     case 'kbs-dedup':
-      port.onMessage.addListener(msg => routeDedup(port, msg));
+      port.onMessage.addListener(wrap(handleDedup));
       break;
     case 'kbs-merge':
-      port.onMessage.addListener(msg => routeMerge(port, msg));
+      port.onMessage.addListener(wrap(handleMerge));
       break;
-  }
-}
-
-async function routeAnalyze(port, msg) {
-  try {
-    const { handleAnalyze } = await import('../modules/case-analysis.js');
-    await handleAnalyze(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeThemeVolume(port, msg) {
-  try {
-    const { handleThemeVolume } = await import('../modules/case-analysis.js');
-    await handleThemeVolume(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeBroaden(port, msg) {
-  try {
-    const { handleBroaden } = await import('../modules/case-analysis.js');
-    await handleBroaden(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeScoreBatch(port, msg) {
-  try {
-    const { handleScoreBatch } = await import('../modules/kb-scorer.js');
-    await handleScoreBatch(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeRewrite(port, msg) {
-  try {
-    const { handleRewrite } = await import('../modules/kb-scorer.js');
-    await handleRewrite(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeCoverage(port, msg) {
-  try {
-    const { handleCoverage } = await import('../modules/coverage.js');
-    await handleCoverage(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeDedup(port, msg) {
-  try {
-    const { handleDedup } = await import('../modules/dedup.js');
-    await handleDedup(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
-  }
-}
-
-async function routeMerge(port, msg) {
-  try {
-    const { handleMerge } = await import('../modules/dedup.js');
-    await handleMerge(port, msg);
-  } catch (e) {
-    port.postMessage({ type: 'error', error: e.message });
   }
 }
