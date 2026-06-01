@@ -117,9 +117,19 @@ async function resolveCase(caseNumber) {
 }
 
 function handlePort(port) {
+  let disconnected = false;
+  port.onDisconnect.addListener(() => { disconnected = true; });
+
+  const guardedPort = new Proxy(port, {
+    get(target, prop) {
+      if (prop === 'postMessage') return (...args) => { if (!disconnected) { try { target.postMessage(...args); } catch {} } };
+      return target[prop];
+    }
+  });
+
   const wrap = (fn) => (msg) => {
-    fn(port, msg).catch(e => {
-      try { port.postMessage({ type: 'error', error: e.message }); } catch {}
+    fn(guardedPort, msg).catch(e => {
+      if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
     });
   };
 
@@ -144,8 +154,8 @@ function handlePort(port) {
       break;
     case 'kba-coverage-stream':
       port.onMessage.addListener((msg) => {
-        analyzePtCoverage(msg, port).catch(e => {
-          try { port.postMessage({ type: 'error', error: e.message }); } catch {}
+        analyzePtCoverage(msg, guardedPort).catch(e => {
+          if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
         });
       });
       break;

@@ -49,6 +49,7 @@ export function unmount() {
   _unsubs = [];
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
   if (_streamThrottle) { clearTimeout(_streamThrottle); _streamThrottle = null; }
+  if (_typeaheadTimer) { clearTimeout(_typeaheadTimer); _typeaheadTimer = null; }
   _container = null;
   _collapsedSections = {};
 }
@@ -75,14 +76,12 @@ function renderByView() {
 
 function buildInlineSearch() {
   const input = h('input', { type: 'text', class: 'input', style: { flex: '1', maxWidth: '320px', fontSize: '12px', padding: '5px 10px' }, placeholder: 'New case #, ID, or URL…', id: 'case-inline-search' });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') submitInlineSearch(); });
   const btn = h('button', { class: 'btn btn--primary btn--sm', onClick: () => submitInlineSearch() }, 'Analyze');
   const bar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
     input, btn,
     h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginLeft: '8px' } }, 'Enter a case to start new analysis')
   );
-  setTimeout(() => {
-    document.getElementById('case-inline-search')?.addEventListener('keydown', e => { if (e.key === 'Enter') submitInlineSearch(); });
-  }, 0);
   return bar;
 }
 
@@ -798,8 +797,11 @@ async function onAnalyzeClick() {
   startAnalysis(caseId);
 }
 
+let _analysisGen = 0;
+
 function startAnalysis(caseId) {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
+  const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: 'Connecting…' });
   setState('case.result', null);
@@ -812,6 +814,7 @@ function startAnalysis(caseId) {
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
   _port.onMessage.addListener(onPortMessage);
   _port.onDisconnect.addListener(() => {
+    if (gen !== _analysisGen) return;
     _port = null;
     const view = getState('case.view');
     if (view === 'analyzing' || view === 'streaming') {

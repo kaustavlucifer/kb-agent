@@ -63,9 +63,9 @@ export function mount(container) {
   if (!_agfHits) loadAgfHits();
   render();
   _unsubs.push(subscribe('kb.articles', render));
-  _unsubs.push(subscribe('kb.scores', render));
+  _unsubs.push(subscribe('kb.scores', debouncedRender));
   _unsubs.push(subscribe('kb.loading', render));
-  _unsubs.push(subscribe('kb.scoring', render));
+  _unsubs.push(subscribe('kb.scoring', debouncedRender));
   _unsubs.push(subscribe('kb.focusArticle', (articleId) => {
     if (!articleId) return;
     setState('kb.focusArticle', null);
@@ -92,6 +92,7 @@ export function unmount() {
   _unsubs.forEach(u => u());
   _unsubs = [];
   _container = null;
+  if (_renderTimer) { clearTimeout(_renderTimer); _renderTimer = null; }
 }
 
 function handleFocusArticle(articleId) {
@@ -126,8 +127,16 @@ function handleFocusArticle(articleId) {
   }
 }
 
+let _searchFocused = false;
+let _renderTimer = null;
+function debouncedRender() {
+  if (_renderTimer) return;
+  _renderTimer = setTimeout(() => { _renderTimer = null; render(); }, 100);
+}
+
 function render() {
   if (!_container) return;
+  _searchFocused = document.activeElement?.id === 'kb-filter';
   _container.textContent = '';
   const loading = getState('kb.loading');
   const articles = getState('kb.articles') || [];
@@ -173,6 +182,9 @@ function render() {
 
   const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
   searchInput.addEventListener('input', e => { _filterText = e.target.value; _page = 0; render(); });
+  if (_searchFocused) {
+    setTimeout(() => { const el = document.getElementById('kb-filter'); if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; } }, 0);
+  }
 
   const cloudMulti = multiSelect('kb-cloud-filter', 'Cloud',
     [{ value: 'Industry', label: 'Industry' }, { value: 'Revenue', label: 'Revenue' }],
@@ -217,7 +229,7 @@ function render() {
   const pageStart = _page * _pageSize;
   const pageArticleCount = Math.min(_pageSize, filtered.length - pageStart);
   const scoreBtnLabel = scoring ? 'Scoring…' : `Score Page (${pageArticleCount})`;
-  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !articles.length || !!scoring }, scoreBtnLabel);
+  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !pageArticleCount || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
 
   const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '0', flexWrap: 'wrap' } },
@@ -261,8 +273,8 @@ function render() {
       va = scores[a.id]?.overall ?? -1;
       vb = scores[b.id]?.overall ?? -1;
     } else if (_sortCol === 'agfHits') {
-      va = _agfHits?.[a.articleNumber]?.agfHits ?? a.viewCount ?? -1;
-      vb = _agfHits?.[b.articleNumber]?.agfHits ?? b.viewCount ?? -1;
+      va = _agfHits?.[a.articleNumber]?.agfHits ?? 0;
+      vb = _agfHits?.[b.articleNumber]?.agfHits ?? 0;
     } else if (_sortCol === 'lastPublished') {
       va = a.lastPublished || '';
       vb = b.lastPublished || '';
@@ -486,7 +498,7 @@ function getCloudFromPt(topicName) {
 function getFilteredArticles() {
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
-  let filtered = articles;
+  let filtered = [...articles];
   if (_filterCloud.length) filtered = filtered.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
   if (_filterText) {
     const term = _filterText.toLowerCase();

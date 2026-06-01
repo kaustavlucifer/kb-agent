@@ -162,10 +162,17 @@ export function multiSelect(id, label, options, selected, onChange) {
     checkboxes.forEach(({ checkbox, value }) => { checkbox.checked = pending.includes(value); });
   }
 
+  let _dismiss = null;
+
+  function removeDismiss() {
+    if (_dismiss) { document.removeEventListener('click', _dismiss); _dismiss = null; }
+  }
+
   function toggleDropdown(e) {
     e.stopPropagation();
     const visible = dropdown.style.display === 'flex';
     if (visible) {
+      removeDismiss();
       dropdown.style.display = 'none';
       onChange(pending);
     } else {
@@ -175,14 +182,15 @@ export function multiSelect(id, label, options, selected, onChange) {
       filterOptions('');
       dropdown.style.display = 'flex';
       setTimeout(() => searchInput.focus(), 0);
-      const dismiss = ev => {
+      removeDismiss();
+      _dismiss = ev => {
         if (!wrap.contains(ev.target)) {
           dropdown.style.display = 'none';
-          document.removeEventListener('click', dismiss);
+          removeDismiss();
           onChange(pending);
         }
       };
-      setTimeout(() => document.addEventListener('click', dismiss), 0);
+      setTimeout(() => document.addEventListener('click', _dismiss), 0);
     }
   }
 

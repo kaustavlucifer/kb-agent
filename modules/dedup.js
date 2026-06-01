@@ -182,8 +182,9 @@ async function clearResults() {
 async function detectDuplicates() {
   try {
     let articles = getState('kb.articles') || [];
+    if (_filterCloud.length) articles = articles.filter(a => _filterCloud.some(c => (a.topicName || '').toLowerCase().startsWith(c.toLowerCase())));
     if (_filterPt.length) articles = articles.filter(a => _filterPt.includes(a.topicName));
-    if (articles.length < 2) { toast('Need at least 2 articles in selected P&T.', 'error'); return; }
+    if (articles.length < 2) { toast('Need at least 2 articles in selected filters.', 'error'); return; }
 
     const session = await detectSession();
     if (!session.sid) { toast('No SF session.', 'error'); return; }

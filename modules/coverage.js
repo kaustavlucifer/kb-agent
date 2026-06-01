@@ -133,11 +133,14 @@ export function mount(container) {
   window.addEventListener('popstate', _popstateHandler);
   localGet(['coverageCache']).then(d => {
     if (d.coverageCache) {
+      let loaded = false;
       for (const [key, val] of Object.entries(d.coverageCache)) {
         if (val.text && val.ts && Date.now() - val.ts < 7 * 24 * 60 * 60 * 1000) {
           _coverageCache[key] = val.text;
+          loaded = true;
         }
       }
+      if (loaded && _container) renderView();
     }
   });
 }
@@ -356,9 +359,9 @@ function renderPtDetail(ptName, articles, target) {
     h('tbody', null)
   );
   const tbody = table.querySelector('tbody');
-  clusters.sort((a, b) => (b.conversations || 0) - (a.conversations || 0));
+  const sortedClusters = [...clusters].sort((a, b) => (b.conversations || 0) - (a.conversations || 0));
 
-  clusters.forEach(c => {
+  sortedClusters.forEach(c => {
     const keywords = [c.name, c.label, ...(c.top_utterances || []).slice(0, 2)].map(k => (k || '').toLowerCase());
     const matchedArticles = ptArticles.filter(a => keywords.some(kw => kw && `${a.title} ${a.summary}`.toLowerCase().includes(kw)));
     const cited = c.cited_articles || [];
@@ -412,19 +415,22 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
 
   const content = h('div', null, statsHeader, streamEl);
 
+  let coveragePort = null;
+
   modal(`Coverage: ${ptName}`, content, {
     wide: true,
+    onClose: () => { if (coveragePort) { try { coveragePort.disconnect(); } catch {} coveragePort = null; } },
     primaryAction: { label: 'Copy', handler: () => {
       navigator.clipboard.writeText(document.getElementById('coverage-stream')?.getAttribute('data-raw') || '').then(() => toast('Copied.', 'success'));
     }}
   });
 
   try {
-    const port = chrome.runtime.connect({ name: 'kba-coverage-stream' });
-    port.postMessage({ ptName, clusters, articles: ptArticles });
+    coveragePort = chrome.runtime.connect({ name: 'kba-coverage-stream' });
+    coveragePort.postMessage({ ptName, clusters, articles: ptArticles });
     let fullText = '';
 
-    port.onMessage.addListener((msg) => {
+    coveragePort.onMessage.addListener((msg) => {
       const el = document.getElementById('coverage-stream');
       if (!el) return;
       if (msg.type === 'delta') {
@@ -443,13 +449,21 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
           cache[ptName] = { text: fullText, ts: Date.now() };
           localSet({ coverageCache: cache });
         });
-        port.disconnect();
+        coveragePort.disconnect();
+        coveragePort = null;
       } else if (msg.type === 'error') {
         el.textContent = 'Error: ' + (msg.error || 'Unknown');
-        port.disconnect();
+        coveragePort.disconnect();
+        coveragePort = null;
       }
     });
-    port.onDisconnect.addListener(() => {});
+    coveragePort.onDisconnect.addListener(() => {
+      coveragePort = null;
+      const el = document.getElementById('coverage-stream');
+      if (el && !el.getAttribute('data-raw')) {
+        el.textContent = 'Connection lost — try again.';
+      }
+    });
   } catch (e) {
     const el = document.getElementById('coverage-stream');
     if (el) el.textContent = 'Error: ' + e.message;

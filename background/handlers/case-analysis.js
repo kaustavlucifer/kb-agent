@@ -197,6 +197,14 @@ async function extractAbstract(caseRecord, comments) {
 }
 
 const _ptBodyCache = new Map();
+const _PT_CACHE_MAX = 5;
+
+function evictPtCache() {
+  while (_ptBodyCache.size > _PT_CACHE_MAX) {
+    const oldest = _ptBodyCache.keys().next().value;
+    _ptBodyCache.delete(oldest);
+  }
+}
 
 async function fetchPtBodies(apiBase, sid, product) {
   const data = await chrome.storage.local.get(['kba_all_articles']);
@@ -259,8 +267,9 @@ async function fetchPtBodies(apiBase, sid, product) {
     } catch {}
   }
 
-  // Cache results
+  // Cache results (bounded)
   _ptBodyCache.set(cacheKey, bodyMap);
+  evictPtCache();
   const serializable = Object.fromEntries(bodyMap);
   chrome.storage.local.set({ kba_pt_bodies: serializable, kba_pt_bodies_key: cacheKey, kba_pt_bodies_at: Date.now() }).catch(() => {});
 
@@ -331,22 +340,6 @@ function rankArticles(articles, queries) {
 }
 
 
-async function fetchArticleBodies(apiBase, sid, ids) {
-  const bodies = new Map();
-  const batches = [];
-  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
-  for (const batch of batches) {
-    try {
-      const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-      const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, sid);
-      for (const r of (result.records || [])) {
-        bodies.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
-      }
-    } catch {}
-  }
-  return bodies;
-}
 
 const SCORING_CRITERIA = [
   { id: 'title', label: 'Title Quality', baseMax: 12 },
