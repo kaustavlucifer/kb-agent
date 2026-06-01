@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>KB Agent — Settings</title>
+  <link rel="stylesheet" href="styles/tokens.css">
+  <link rel="stylesheet" href="styles/app.css">
+  <style>
+    body { background: var(--bg); padding: 32px; }
+    .settings { max-width: 500px; margin: 0 auto; }
+    .settings h1 { font-size: var(--text-xl); margin-bottom: var(--space-xl); }
+    .field { margin-bottom: var(--space-xl); }
+    .field label { display: block; font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-secondary); margin-bottom: var(--space-sm); }
+    .field select { width: 100%; padding: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-base); background: var(--surface); }
+    .actions { display: flex; gap: var(--space-md); margin-top: var(--space-2xl); }
+    #status { margin-top: var(--space-lg); font-size: var(--text-sm); }
+  </style>
+</head>
+<body>
+<div class="settings">
+  <h1>KB Agent Settings</h1>
+  <div class="card">
+    <div class="field">
+      <label for="token">AI Gateway Token</label>
+      <input type="password" id="token" class="input" placeholder="Paste gateway token…" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="model">Preferred Model</label>
+      <select id="model">
+        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (Recommended)</option>
+        <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Fastest)</option>
+        <option value="claude-opus-4-7">Claude Opus 4.7 (Highest Quality)</option>
+      </select>
+    </div>
+    <div class="actions">
+      <button class="btn btn--primary" id="save-btn">Save</button>
+      <button class="btn btn--secondary" id="test-btn">Test Connection</button>
+      <button class="btn btn--ghost" id="clear-btn">Clear Cache</button>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+<script>
+  const tokenEl = document.getElementById('token');
+  const modelEl = document.getElementById('model');
+  const statusEl = document.getElementById('status');
+
+  chrome.storage.local.get(['gatewayToken', 'modelName'], (data) => {
+    if (data.gatewayToken) tokenEl.placeholder = '••••••••  (saved)';
+    if (data.modelName) modelEl.value = data.modelName;
+  });
+
+  document.getElementById('save-btn').addEventListener('click', async () => {
+    const token = tokenEl.value.trim();
+    const model = modelEl.value;
+    const updates = { modelName: model };
+    if (token) updates.gatewayToken = token;
+    await chrome.storage.local.set(updates);
+    statusEl.textContent = 'Saved.';
+    statusEl.style.color = 'var(--success)';
+  });
+
+  document.getElementById('test-btn').addEventListener('click', async () => {
+    statusEl.textContent = 'Testing…';
+    statusEl.style.color = 'var(--text-secondary)';
+    const resp = await chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' });
+    if (resp.connected) {
+      statusEl.textContent = 'Connected.';
+      statusEl.style.color = 'var(--success)';
+    } else {
+      statusEl.textContent = 'Failed: ' + (resp.error || 'Unknown error');
+      statusEl.style.color = 'var(--error)';
+    }
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', async () => {
+    await chrome.storage.local.remove(['kba_all_articles', 'kba_all_articles__ts', 'kba_article_scores', 'kba_dedup_results', 'kba_dedup_at']);
+    statusEl.textContent = 'Cache cleared.';
+    statusEl.style.color = 'var(--text-secondary)';
+  });
+</script>
+</body>
+</html>

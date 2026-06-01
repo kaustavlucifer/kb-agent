@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "KB Agent",
+  "version": "1.0.0",
+  "description": "Unified KB quality scoring, case analysis, coverage gap detection, and duplicate identification for Industry & Revenue Cloud.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "cookies",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.salesforce.com/*",
+    "https://*.my.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://*.lightning.force.com/*",
+    "https://*.slack.com/*",
+    "https://eng-ai-model-gateway.sfproxy.devx-preprod.aws-esvc1-useast2.aws.sfdc.cl/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html", "data/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
