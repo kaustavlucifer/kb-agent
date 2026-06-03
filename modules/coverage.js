@@ -245,7 +245,8 @@ function renderOverview(ptNames, articles, target) {
       const matched = ptArticles.filter(a => keywords.some(kw => kw && `${a.title} ${a.summary}`.toLowerCase().includes(kw)));
       return matched.length < 1;
     }).length;
-    return { pt, totalConvs, resPct, clusterCount: clusters.length, gapCount, articleCount: ptArticles.length };
+    const validatedOnlineCount = ptArticles.filter(a => a.validationStatus === 'Validated External' && a.publishStatus === 'Online').length;
+    return { pt, totalConvs, resPct, clusterCount: clusters.length, gapCount, articleCount: validatedOnlineCount };
   });
 
   rows.sort((a, b) => {

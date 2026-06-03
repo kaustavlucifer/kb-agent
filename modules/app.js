@@ -1,6 +1,7 @@
 import { h, chip, toast } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
+import { STORAGE_KEYS } from '../shared/config.js';
 
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
@@ -150,6 +151,23 @@ function updateConnectionChips() {
   });
   aiChip.style.cursor = 'pointer';
   container.appendChild(aiChip);
+
+  const clearBtn = h('button', {
+    class: 'btn btn--ghost btn--sm',
+    style: { fontSize: '11px', padding: '2px 6px', marginLeft: '4px' },
+    title: 'Clear all cached data (articles, scores, dedup, coverage)',
+    onClick: async () => {
+      await chrome.storage.local.remove([
+        STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT,
+        STORAGE_KEYS.ARTICLE_SCORES, STORAGE_KEYS.DEDUP_RESULTS,
+        STORAGE_KEYS.DEDUP_AT, 'coverageCache'
+      ]);
+      setState('kb.articles', []);
+      setState('kb.scores', {});
+      toast('Cache cleared.', 'success');
+    }
+  }, 'Clear Cache');
+  container.appendChild(clearBtn);
 
 }
 

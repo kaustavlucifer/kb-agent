@@ -223,7 +223,7 @@ function render() {
   );
 
   const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: loading }, 'Refresh');
-  refreshBtn.addEventListener('click', loadArticles);
+  refreshBtn.addEventListener('click', () => loadArticles(true));
   const totalPages = Math.ceil(filtered.length / _pageSize) || 1;
   if (_page >= totalPages) _page = Math.max(0, totalPages - 1);
   const pageStart = _page * _pageSize;
@@ -258,7 +258,19 @@ function render() {
   }
 
   if (loading) {
-    scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
+    const progress = typeof loading === 'object' ? loading : null;
+    if (progress && progress.total > 0) {
+      const pct = Math.round((progress.loaded / progress.total) * 100);
+      scrollSection.appendChild(h('div', { style: { padding: '48px 24px', textAlign: 'center' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
+          h('span', null, `Fetching articles: ${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()}`),
+          h('span', null, `${pct}%`)
+        ),
+        progressBar(pct, 'default')
+      ));
+    } else {
+      scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
+    }
     return;
   }
 
@@ -406,29 +418,39 @@ function showScoreDetail(article, scoreData) {
   modal(`Score: ${article.articleNumber}`, body, { wide: true });
 }
 
-async function loadArticles() {
+async function loadArticles(forceLive = false) {
   setState('kb.loading', true);
   try {
-    const cachedData = await localGet([STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT]);
-    const cachedArticles = cachedData[STORAGE_KEYS.ALL_ARTICLES];
-    const cachedAt = cachedData[STORAGE_KEYS.ALL_ARTICLES_AT];
-    if (cachedArticles?.length && cachedAt && (Date.now() - cachedAt < 30 * 60 * 1000)) {
-      setState('kb.articles', cachedArticles);
-      const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
-      if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
-        setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
+    if (!forceLive) {
+      const cachedData = await localGet([STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT]);
+      const cachedArticles = cachedData[STORAGE_KEYS.ALL_ARTICLES];
+      const cachedAt = cachedData[STORAGE_KEYS.ALL_ARTICLES_AT];
+      if (cachedArticles?.length && cachedAt && (Date.now() - cachedAt < 30 * 60 * 1000)) {
+        setState('kb.articles', cachedArticles);
+        const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
+        if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
+          setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
+        }
+        toast(`Loaded ${cachedArticles.length} articles (cached).`, 'success');
+        setState('kb.loading', false);
+        return;
       }
-      toast(`Loaded ${cachedArticles.length} articles (cached).`, 'success');
-      setState('kb.loading', false);
-      return;
     }
 
     const session = await detectSession();
     if (!session.sid) { toast('Not connected to Salesforce.', 'error'); setState('kb.loading', false); return; }
 
+    const WHERE = `WHERE PublishStatus IN ('Online','Draft','Archived') AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')`;
+    const countResp = await sfGet(
+      `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(`SELECT COUNT() FROM Knowledge__kav ${WHERE}`)}`,
+      session.sid
+    );
+    const totalCount = countResp.totalSize || 0;
+    setState('kb.loading', { loaded: 0, total: totalCount });
+
     const records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
-      (loaded, total) => setState('kb.loading', { loaded, total })
+      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav ${WHERE} ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
+      (loaded, total) => setState('kb.loading', { loaded, total: total || totalCount })
     );
 
     const articles = records.map(r => ({

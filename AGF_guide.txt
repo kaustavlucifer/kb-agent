@@ -1,0 +1,511 @@
+================================================================================
+AGENTFORCE KNOWLEDGE ARTICLE OPTIMIZATION GUIDE
+Complete Reference for Scoring, Rewriting, and Creating AI-Ready KB Articles
+================================================================================
+
+Sources:
+- Slack Canvas: Best Practices Knowledge Articles Optimization for Agentforce on Help (F08NMB40X7D)
+- Agentforce and RAG Best Practices for Better Agents (Reinier van Leuken, Ph.D)
+- Best Practices for Optimizing Content for Generative AI (CX/DevDoc Guidance)
+- Salesforce Data 360 Chunking Strategies Documentation
+- Knowledge Article Content Guidelines (Internal)
+- Section-Aware Chunking (2026 Update)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. How Agentforce Retrieves Content (RAG Pipeline)
+2. Chunking: How Articles Are Broken Into Retrievable Pieces
+3. Title Requirements
+4. Summary Requirements
+5. Header Structure & Section-Aware Chunking
+6. Content Completeness & Intent Clarity
+7. Scannability & Structure
+8. Media, Screenshots & Alt Text
+9. Code Blocks
+10. Tables
+11. Links & Additional Resources
+12. Taxonomy & Product Context
+13. Security & PII
+14. Anti-Patterns (What NOT to Do)
+15. Scoring Rubric Summary
+
+================================================================================
+1. HOW AGENTFORCE RETRIEVES CONTENT (RAG PIPELINE)
+================================================================================
+
+Understanding the pipeline is critical to writing content that gets retrieved:
+
+Step 1: Customer Input → Tokens
+  - Agentforce Planner Service breaks customer input into tokens
+  - Natural language is decomposed into words/phrases based on English language usage
+
+Step 2: Token Matching → Chunking
+  - Data Cloud finds content with greatest mathematical similarity
+  - Uses Hybrid Search: standard search (1:1 exact match) + Vector Search (semantic)
+  - Creates a confidence score for each chunk matched to input tokens
+
+Step 3: Top 5 Selection
+  - From 195k+ content pieces, only the TOP 5 matched chunks are selected
+  - These pass through LLM Gateway for toxicity/bias/PII scrubbing
+
+Step 4: Summarization
+  - OpenAI summarizes the 5 chunks into an answer
+  - Answer is grounded in the identified source articles
+
+Step 5: Display
+  - All happens in <10 seconds
+  - Citations link back to source articles
+
+KEY IMPLICATION: Your article competes with 195k+ content chunks. Only the top 5
+win. Every optimization below improves your article's mathematical similarity
+score against customer queries.
+
+================================================================================
+2. CHUNKING: HOW ARTICLES ARE BROKEN INTO RETRIEVABLE PIECES
+================================================================================
+
+Articles are NOT retrieved whole. They are split into chunks before vectorization.
+
+SECTION-AWARE CHUNKING (Current Default, 2026+):
+  - Title and heading elements (<h1>-<h6>) define chunk boundaries
+  - All text under a heading is chunked together until the next heading
+  - Sections are NEVER split arbitrarily — respects content boundaries
+  - HTML tags are stripped before chunking
+  - If no headers exist, falls back to other strategies
+
+CHUNK SIZE LIMITS:
+  - Default max: 512 tokens per chunk (~2048 characters of English text)
+  - Token encoding: cl100k_base (same as GPT-4/GPT-4o)
+  - Roughly 1 token ≈ 4 characters of English text
+  - Chunks never split mid-sentence — extends to end of paragraph
+
+OVERLAP TOKENS:
+  - Small overlap added from end of one chunk to beginning of next
+  - Provides context continuity across chunk boundaries
+
+PREPEND FIELD CHUNKING:
+  - Article title gets prepended to description/resolution chunks
+  - Max 512 tokens for prepended fields
+  - This means title context appears in EVERY chunk from the article
+
+IMPLICATIONS FOR WRITERS:
+  - Each section under a header should be SELF-CONTAINED (readable alone)
+  - Sections exceeding ~512 tokens should be split with sub-headers
+  - Headers determine what gets retrieved — make them descriptive
+  - A great header + mediocre content still retrieves well
+  - A missing header means content gets lumped into the previous section's chunk
+
+================================================================================
+3. TITLE REQUIREMENTS
+================================================================================
+
+The title is prepended to every chunk. It directly affects retrieval.
+
+RULES:
+  - Maximum 60 characters (SEO + chunk token budget)
+  - Front-load keywords: most important terms FIRST
+  - Include specific product name (not generic terms)
+  - Must reflect the actual issue/topic contained in the article
+  - Include specificity: edition, product variant, user type if applicable
+  - No question format ("How do I...?" is wrong)
+  - No solution-focused titles for troubleshooting articles (use symptom/behavior)
+  - No generic terms when article is product-specific
+
+EXAMPLES:
+  BAD:  "How do I reset my Salesforce password?"
+  GOOD: "Reset Salesforce Password"
+
+  BAD:  "Troubleshooting Flows"
+  GOOD: "Troubleshooting Tableau Prep Flows"
+
+  BAD:  "Default Fonts in Email Editor"
+  GOOD: "Default Fonts in the Pardot Email Editor"
+
+  BAD:  "Salesforce.org Trial Extensions"
+  GOOD: "Salesforce.org Trial Extensions for Nonprofits"
+
+  BAD:  "Lead History report"
+  GOOD: "Lead History Report Displays No Results"
+
+SCORING GUIDANCE:
+  - Full marks: Specific, keyword-fronted, ≤60 chars, includes product, no question
+  - Deduct for: generic terms, question format, missing product, >60 chars
+  - Severe deduction: title doesn't match article content/intent
+
+================================================================================
+4. SUMMARY REQUIREMENTS
+================================================================================
+
+Summary is used by Agentforce but is "mathematically distant" — lower retrieval
+priority than body content. Still valuable for disambiguation.
+
+RULES:
+  - Maximum 170 characters (SEO constraint)
+  - MUST use different words than the title (expands search surface)
+  - Include keywords/synonyms NOT already in the title
+  - Provide brief preview of what the reader will learn
+  - Specify audience when applicable ("for administrators", "for developers")
+  - For error articles: include the EXACT full error message text
+  - Should be a complete, readable sentence
+
+EXAMPLES:
+  Title: "Disable Chatter"
+  Summary: "Learn how to turn off Chatter features for your entire Salesforce org."
+
+  Title: "Add or Change Salesforce System Administrators"
+  Summary: "Steps to create, change, or deactivate a System Administrator User in your Salesforce org."
+
+SCORING GUIDANCE:
+  - Full marks: Different words from title, ≤170 chars, includes synonyms, audience-specific
+  - Deduct for: repeating title words, empty/missing summary, >170 chars
+  - Deduct for: not mentioning error text in error-type articles
+
+================================================================================
+5. HEADER STRUCTURE & SECTION-AWARE CHUNKING
+================================================================================
+
+Headers are the MOST CRITICAL structural element for Agentforce retrieval.
+They define chunk boundaries in section-aware chunking.
+
+RULES:
+  - MUST use HTML header tags (<h1>-<h6>), NOT bold text
+  - Use <h2> for article section headings (most common)
+  - Logical hierarchy: h2 > h3 > h4 (never skip levels)
+  - Headers should be descriptive of the content below them
+  - Each section under a header should be self-contained (~512 tokens max)
+  - If a section is long, add sub-headers to create additional chunk boundaries
+  - Headers should contain intent keywords that match customer queries
+
+WHAT COUNTS AS A HEADER (for chunking):
+  - <h1>, <h2>, <h3>, <h4>, <h5>, <h6> tags: YES
+  - Bold text (<strong>, <b>): NO — these do NOT create chunk boundaries
+  - Underlined text: NO
+  - Font-size changes: NO
+
+BAD PATTERNS:
+  - Using bold sentences as pseudo-headers (invisible to chunker)
+  - One massive section with no sub-headers (creates oversized chunk)
+  - Generic headers ("Details", "Information", "Notes")
+  - Headers that don't describe what follows
+
+GOOD PATTERNS:
+  - "How to Fix Error X When Using Feature Y"
+  - "Configure OAuth 2.0 Authentication for Revenue Cloud APIs"
+  - "Troubleshooting Steps for Failed Batch Apex Jobs"
+
+SCORING GUIDANCE:
+  - Full marks: Proper h-tag hierarchy, descriptive headers, sections <512 tokens
+  - Deduct for: bold-as-header, missing headers, generic header text
+  - Severe deduction: no headers at all (entire article is one chunk)
+
+================================================================================
+6. CONTENT COMPLETENESS & INTENT CLARITY
+================================================================================
+
+Content must be complete, self-contained, and clearly express intent.
+
+RULES — INTENT CLARITY:
+  - Description section MUST explain WHAT question the article answers
+  - Description MUST explain WHY these steps should be performed
+  - Don't assume the description is enough context for the resolution
+  - Add a summary paragraph explaining the problem being solved
+  - Include original customer descriptions of the problem (sanitized)
+  - Capture questions in the customer's actual words
+
+RULES — COMPLETENESS:
+  - Complete problem/environment/cause/resolution described
+  - Environmental information fully captured (product version, edition, etc.)
+  - Steps are numbered and sequential
+  - Each step is a complete, actionable instruction
+  - Include expected outcomes/results after steps
+  - Mention prerequisites or conditions
+
+RULES — LANGUAGE & CLARITY:
+  - Use simple present tense for instructions
+  - Explain uncommon acronyms and abbreviations on first use
+    Example: "BDR (Business Development Representative)" — uncommon, explain
+    Example: "API" — common, no explanation needed
+  - Use conversational manner — helps retrieval matching
+  - Complete sentences with full context (chunks read in isolation)
+  - No speculative statements ("this looks like a bug", "will be fixed later")
+
+RULES — REAL-LIFE EXAMPLES:
+  - Always include real-life Salesforce examples
+  - Show actual commands with input/output
+  - Use Salesforce-format placeholder data (not "xxxxx" or "[value]")
+    GOOD: Use random UUID like "6c3c3e41-e5a1-4423-81bc-8c05778bd9cb"
+    BAD:  Use "xxxxx" or "<your-id-here>"
+  - Demonstrate scenarios showing WHY a user would need this content
+
+SCORING GUIDANCE:
+  - Full marks: Clear intent, complete solution, real examples, explained terms
+  - Deduct for: missing intent/why, incomplete steps, no examples
+  - Deduct for: unexplained acronyms, speculative language
+  - Severe deduction: resolution without description context
+
+================================================================================
+7. SCANNABILITY & STRUCTURE
+================================================================================
+
+How well the article can be parsed by both humans and AI chunking systems.
+
+RULES:
+  - Use multiple article sections (Description, Resolution, Steps, etc.)
+  - Don't put entire content in one section
+  - Use bulleted/numbered lists for sequential steps
+  - Short paragraphs (3-5 sentences max per paragraph)
+  - One idea per paragraph
+  - Use whitespace to separate logical blocks
+  - Error messages should be quoted exactly as they appear
+
+RULES — FAQs:
+  - Each FAQ item should have a descriptive section header
+    GOOD: "How to fix Problem 123 when it shows behavior xyz"
+    BAD:  "Q1" or "Question"
+  - Intent in description is very important for Agentforce
+  - Avoid very large FAQs — each item should be specific in intent
+  - Consider splitting multi-intent FAQs into separate articles
+  - Multiple intents in one article = poor retrieval for each intent
+
+RULES — LONG ARTICLES:
+  - Break into distinct sections with headers
+  - Each section self-contained and readable alone
+  - Use Description AND Resolution sections (not everything in one)
+  - AF delivers content better when spread across multiple sections
+
+SCORING GUIDANCE:
+  - Full marks: Multiple sections, short paragraphs, lists, clear flow
+  - Deduct for: wall of text, single-section articles, no lists
+  - Deduct for: FAQ items without descriptive headers
+
+================================================================================
+8. MEDIA, SCREENSHOTS & ALT TEXT
+================================================================================
+
+CRITICAL: Videos, screenshots, and file attachments are IGNORED by Agentforce.
+Only alt text descriptions get chunked and vectorized.
+
+RULES:
+  - All informative images MUST have descriptive alt text
+  - Alt text should describe WHAT the image shows in detail
+  - Key information visible in screenshots MUST also be in body text
+  - Steps shown in screenshots MUST also be written as text instructions
+  - Videos are completely ignored — never rely on video for solution delivery
+  - File attachments (PDFs, workbooks) are NOT provided via AF Zero
+  - Decorative images should have null alt (alt="")
+
+WHY THIS MATTERS:
+  - Alt text gets chunked and vectorized — it IS searchable content
+  - If your solution is only in a screenshot, AGF will say "I can't answer"
+  - Articles whose only purpose is file delivery will fail in AGF completely
+
+SCORING GUIDANCE:
+  - Full marks: All images have descriptive alt text, text mirrors visual content
+  - Deduct for: images without alt text, steps only shown in screenshots
+  - N/A: If article has no images/media, redistribute points to other criteria
+
+================================================================================
+9. CODE BLOCKS
+================================================================================
+
+CRITICAL: Agentforce does NOT consume code blocks well. Results in unstructured
+text, incomplete solutions, or "I can't answer" responses.
+
+RULES:
+  - Code blocks (<pre class="ckeditor_codeblock">) are poorly parsed by AF
+  - ALWAYS include a text explanation of what the code does
+  - Describe the code's purpose, inputs, outputs, and expected behavior in prose
+  - Don't rely solely on code blocks for the solution
+  - Include both: text explanation + code block (text is primary, code is supplementary)
+  - For API calls: describe the endpoint, method, headers, and body in text
+  - For scripts: explain each step in plain language before/after the code
+
+EXAMPLE:
+  BAD:  Just a code block with no surrounding explanation
+  GOOD: "To query all active accounts, use the following SOQL query. This returns
+         Account records where IsActive is true, ordered by creation date.
+         [code block]
+         The query returns up to 2000 records. For larger result sets, use
+         queryMore with the nextRecordsUrl."
+
+SCORING GUIDANCE:
+  - Full marks: Every code block has text explanation, purpose is clear without code
+  - Deduct for: code-only solutions, unexplained code blocks
+  - N/A: If article has no code blocks, redistribute points to other criteria
+
+================================================================================
+10. TABLES
+================================================================================
+
+Tables can be provided as-is or summarized into sentences by Agentforce.
+
+RULES:
+  - NO visual indicators (checkmarks ✓, circles ●, icons, emojis)
+  - Tables must contain actual TEXT that can be parsed
+  - Use the built-in table editor in the article — do NOT copy/paste from external sources
+  - External sources (Google Sheets, web) add redundant HTML tags that break parsing
+  - Each cell should have meaningful text content
+  - Column headers should be descriptive
+  - Avoid very wide tables (>5 columns) — they chunk poorly
+
+WHY NO VISUAL INDICATORS:
+  - Customer may ask about one row — visual indicators are not text-parseable
+  - "✓" doesn't tell AGF what the answer is — text "Supported" or "Yes" does
+  - AGF may summarize table rows into sentences — needs actual text to do this
+
+SCORING GUIDANCE:
+  - Full marks: Text-only tables, built-in editor, descriptive headers, reasonable width
+  - Deduct for: visual indicators, copy-pasted tables, no text in cells
+  - N/A: If article has no tables, redistribute points to other criteria
+
+================================================================================
+11. LINKS & ADDITIONAL RESOURCES
+================================================================================
+
+The Additional Resources section IS used by Agentforce. Citations allow customers
+to click through to source articles.
+
+RULES:
+  - Additional Resources section is indexed and retrieved
+  - Use smart links for internal article references
+  - Ensure all hyperlinks are persistently available (no broken links)
+  - Use descriptive link text (page title, not "click here")
+  - Don't make articles link-heavy with no substance
+  - Article should be self-contained — links supplement, not replace content
+  - Internal URLs (orgcs.lightning.force.com) should not appear in customer-facing articles
+
+RULES — CITATIONS:
+  - Customers can now click citation links to see source articles
+  - This means Additional Resources links have direct customer value
+  - Link to related articles that deepen understanding
+
+SCORING GUIDANCE:
+  - Full marks: Relevant additional resources, smart links, no broken links, descriptive text
+  - Deduct for: internal-only URLs, "click here" text, broken links, link-heavy articles
+  - Deduct for: empty Additional Resources when related content exists
+
+================================================================================
+12. TAXONOMY & PRODUCT CONTEXT
+================================================================================
+
+CURRENT STATE: Product & Topic tags and Data Categories are NOT yet used by
+Agentforce RAG — but WILL BE in future metadata enrichment.
+
+WORKAROUND (CRITICAL):
+  - Since tags aren't used yet, product name MUST appear in article body text
+  - Use specific product + feature together: "Tableau Prep Flows" not "Flows"
+  - Use specific product + feature together: "MuleSoft APIs" not "APIs"
+  - If article applies to specific edition/cloud, say so in the text
+
+RULES:
+  - Mention product name explicitly in Description or Resolution text
+  - Use the P&T (Product & Topic) name or close variant in the body
+  - For shared functionality, disambiguate: which product? which edition?
+  - Fill out Data Categories (Article type, Product, Audience, Status)
+  - Add search keywords relevant to the topic
+
+SCORING GUIDANCE:
+  - Full marks: Product name in body text, P&T alignment, categories filled
+  - Deduct for: generic terms without product context, P&T mismatch
+  - Severe deduction: article about specific product but product never named in text
+
+================================================================================
+13. SECURITY & PII
+================================================================================
+
+Articles must not expose sensitive information.
+
+RULES:
+  - No credentials: passwords, tokens, API keys, usernames
+  - No customer private information: names, org IDs, environment IDs
+  - No internal IPs, VPC IDs, internal hostnames
+  - No customer email addresses
+  - Replace sensitive data with format-similar examples
+    GOOD: Random UUID "6c3c3e41-e5a1-4423-81bc-8c05778bd9cb"
+    BAD:  "xxxxx" or "[YOUR_ID]" (not realistic format)
+  - No speculative statements about bugs or future fixes
+  - No direct copy from customer cases without sanitization
+  - No custom solutions without appropriate disclaimer
+
+SCORING GUIDANCE:
+  - Flag presence of internal URLs (orgcs.lightning.force.com, *.internal.*)
+  - Flag credential-like patterns (Bearer tokens, API keys, passwords)
+  - Flag real org IDs or specific customer references
+
+================================================================================
+14. ANTI-PATTERNS (WHAT NOT TO DO)
+================================================================================
+
+These patterns make articles FAIL in Agentforce:
+
+CONTENT ANTI-PATTERNS:
+  - Screenshot-heavy articles with no text description of steps
+  - Articles whose only purpose is file delivery (PDF/workbook download)
+  - FAQ articles with multiple unrelated intents
+  - Resolution section with no context about what problem it solves
+  - Copy/paste from case notes without making article stand-alone
+  - Copy from external sites without rewriting (reference instead)
+  - Bold text used as headers (invisible to section-aware chunking)
+  - One massive section with no sub-headers
+
+FORMATTING ANTI-PATTERNS:
+  - Tables with checkmarks/icons instead of text
+  - Tables pasted from Google Sheets (extra HTML tags)
+  - Code blocks with no prose explanation
+  - Generic headers: "Details", "Info", "Steps", "Resolution" without context
+  - Question-format titles
+  - Titles that don't match article content/intent
+
+RETRIEVAL ANTI-PATTERNS:
+  - Title says "Flows" when article is about "Tableau Prep Flows"
+  - No product name anywhere in text (relying only on P&T tag)
+  - Summary repeats title words (no new keywords for search)
+  - Very long section under one header (>512 tokens = truncated chunk)
+  - Article is link-heavy/reference-heavy with no self-contained solution
+
+================================================================================
+15. SCORING RUBRIC SUMMARY
+================================================================================
+
+Total: 100 points across 10 criteria (with dynamic redistribution for N/A items)
+
+CRITERION         | BASE MAX | KEY CHECKS
+------------------|----------|----------------------------------------------------
+Title             | 12       | ≤60 chars, front-loaded keywords, specific product,
+                  |          | no question format, matches article intent
+Summary           | 10       | ≤170 chars, different words than title, includes
+                  |          | synonyms/keywords, audience-specific, error text
+Headers           | 10       | Proper h-tags (not bold), descriptive, logical
+                  |          | hierarchy, sections <512 tokens, chunk-friendly
+Content           | 18       | Complete solution, intent/why explained, real
+                  |          | examples, acronyms defined, present tense,
+                  |          | conversational, self-contained sections
+Scannability      | 10       | Multiple sections, short paragraphs, lists,
+                  |          | logical flow, no wall-of-text, no mega-FAQs
+Media/Alt Text    | 8        | Descriptive alt text on all images, text mirrors
+                  |          | visual content, no screenshot-only solutions
+Code Blocks       | 8        | Text explanation alongside code, purpose clear
+                  |          | without reading code, not code-only solution
+Tables            | 8        | Text-only (no icons/checkmarks), built-in editor,
+                  |          | descriptive headers, reasonable width
+Links             | 8        | Additional Resources populated, smart links,
+                  |          | descriptive text, no internal URLs, no broken links
+Taxonomy          | 8        | Product name in body text, P&T alignment,
+                  |          | data categories filled, specific not generic
+
+DYNAMIC REDISTRIBUTION:
+  - If article has no images/video: media points → content + others
+  - If article has no code blocks: code points → content + others
+  - If article has no tables: table points → content + others
+  - Total always sums to 100
+
+STRICTNESS CALIBRATION:
+  - Most articles should score 55-75
+  - Score 90+ should be genuinely rare (near-perfect AGF optimization)
+  - Score below 40 indicates fundamental structural/content problems
+
+================================================================================
+END OF GUIDE
+================================================================================
