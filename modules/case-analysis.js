@@ -475,6 +475,28 @@ function renderResult() {
     main.appendChild(noActionCard);
   }
 
+  // Product Documentation Gap callout
+  const prodDocGap = getState('case.prodDocGap') || result.prodDocGap;
+  if (prodDocGap && prodDocGap.hasGap) {
+    const recColors = { DOCS_SUFFICIENT: 'var(--success)', DOCS_NEED_UPDATE: 'var(--warning)', DOCS_MISSING: 'var(--error)' };
+    const recLabels = { DOCS_SUFFICIENT: 'Docs Cover This', DOCS_NEED_UPDATE: 'Docs Need Update', DOCS_MISSING: 'Docs Missing' };
+    const recColor = recColors[prodDocGap.recommendation] || 'var(--text-muted)';
+    const recLabel = recLabels[prodDocGap.recommendation] || prodDocGap.recommendation;
+
+    const gapCard = h('div', { class: 'card', style: { marginBottom: '12px', border: `1px solid ${recColor}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
+      h('div', { style: { padding: '12px 16px', background: `color-mix(in srgb, ${recColor} 6%, transparent)` } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } },
+          h('span', { style: { fontSize: '13px' } }, '📄'),
+          h('span', { style: { fontSize: '12px', fontWeight: '600', color: recColor } }, 'Product Documentation Assessment'),
+          h('span', { class: `pill pill--${prodDocGap.recommendation === 'DOCS_SUFFICIENT' ? 'success' : prodDocGap.recommendation === 'DOCS_NEED_UPDATE' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, recLabel)
+        ),
+        h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || ''),
+        prodDocGap.recommendation !== 'DOCS_SUFFICIENT' ? h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px', fontStyle: 'italic' } }, 'This case could benefit from better product documentation coverage. Product Docs are not suggested for KB content updates.') : null
+      )
+    );
+    main.appendChild(gapCard);
+  }
+
   if (structured.suggestions?.length) {
     for (const sug of structured.suggestions) {
       if (sug.isFullRewrite) {
@@ -1098,6 +1120,7 @@ function startAnalysis(caseId) {
   setState('case.gusItems', null);
   setState('case.productDocs', null);
   setState('case.hypotheses', null);
+  setState('case.prodDocGap', null);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
@@ -1129,6 +1152,7 @@ function onPortMessage(msg) {
       if (msg.gusItems) setState('case.gusItems', msg.gusItems);
       if (msg.productDocs) setState('case.productDocs', msg.productDocs);
       if (msg.hypotheses) setState('case.hypotheses', msg.hypotheses);
+      if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
       if (msg.topArticles) setState('case.topArticles', msg.topArticles);
       if (!msg.topArticles) break;
       const kbScores = getState('kb.scores') || {};

@@ -4,6 +4,9 @@ import { callClaudeFast, streamClaude, extractText, extractJson } from '../../sh
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
 import { resolveTargetPts, matchPtPatterns } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
+import { WRITING_GUIDE } from '../../data/writing_guide.js';
+
+const WRITING_GUIDE_EXCERPT = WRITING_GUIDE.slice(0, 3000);
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];
@@ -67,27 +70,22 @@ export async function handleAnalyze(port, msg) {
   const caseSummary = await generateCaseSummary(caseRecord, comments, gusData);
   send({ type: 'meta', caseSummary, gusItems: gusData.items });
 
-  send({ type: 'progress', step: 3, label: 'Fetching KB articles for this product area' });
+  send({ type: 'progress', step: 3, label: 'Searching KB articles (SOSL)' });
   const product = caseAbstract?.product || intentsResult.product || '';
   const allQueries = intentsResult.intents.flatMap(i => i.queries);
+  const ptPatterns = resolveTargetPts(product, caseRecord.Subject, caseRecord.Description);
 
-  const [ptBodies, productDocs] = await Promise.all([
-    fetchPtBodies(session.apiBase, session.sid, product, caseRecord.Subject, caseRecord.Description),
+  // SOSL-first: primary search with P&T-scoped SOSL queries
+  const [soslResults, productDocs] = await Promise.all([
+    soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns),
     searchProductDocs(session.apiBase, session.sid, allQueries)
   ]);
 
-  // Search using full content (title + summary + description + resolution)
-  let searchResults = searchKBWithBodies(allQueries, ptBodies);
-  if (!searchResults.length) {
-    searchResults = await fallbackSoslSearch(session.apiBase, session.sid, allQueries);
-  }
+  send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
+  const candidates = soslResults.slice(0, 15);
 
-  send({ type: 'progress', step: 4, label: `Ranking ${searchResults.length} articles` });
-  const ranked = rankArticles(searchResults, allQueries);
-  const candidates = ranked.slice(0, 15);
-
-  const candidateBodies = new Map();
-  candidates.forEach(a => { if (ptBodies.has(a.Id)) candidateBodies.set(a.Id, ptBodies.get(a.Id)); });
+  // Fetch full bodies for candidates
+  const candidateBodies = await fetchCandidateBodies(session.apiBase, session.sid, candidates);
 
   const articleDetailsForAI = candidates.map((a, i) => {
     const body = candidateBodies.get(a.Id) || {};
@@ -102,6 +100,9 @@ export async function handleAnalyze(port, msg) {
   let topArticles;
   const aiScoringPrompt = {
     system: `You are assessing KB article relevance to a support case. Read the FULL content of each article (Title, Summary, Description, Resolution) carefully.
+
+AGENTFORCE WRITING GUIDE (articles optimized for this standard are higher quality):
+${WRITING_GUIDE_EXCERPT.slice(0, 1200)}
 
 Score EACH article 0-100 for relevance. Scoring criteria:
 - 80-100: Article directly addresses the SAME error, symptom, or exact scenario in the case
@@ -226,7 +227,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     }
   }
 
-  send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured });
+  // Product Documentation Gap assessment
+  let prodDocGap = null;
+  if (productDocs.length) {
+    prodDocGap = await assessProductDocGap(caseRecord, caseAbstract, productDocs);
+    if (prodDocGap) send({ type: 'meta', prodDocGap });
+  }
+
+  send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 }
 
 export async function handleThemeVolume(port, msg) {
@@ -240,7 +248,12 @@ export async function handleBroaden(port, msg) {
 async function extractIntents(caseRecord, comments) {
   const commentsText = comments.slice(0, 10).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   const resp = await callClaudeFast({
-    system: 'Extract search intents from this support case. Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}',
+    system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
+
+WRITING GUIDE CONTEXT (use for query formulation):
+${WRITING_GUIDE_EXCERPT.slice(0, 800)}
+
+Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}`,
     messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
     maxTokens: 800,
     temperature: 0.1
@@ -270,7 +283,9 @@ async function generateCaseSummary(caseRecord, comments, gusData) {
 
   try {
     const resp = await callClaudeFast({
-      system: 'Summarize this support case in 3-5 sentences. Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.',
+      system: `Summarize this support case in 3-5 sentences. Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.
+
+AGENTFORCE KB CONTEXT: ${WRITING_GUIDE_EXCERPT.slice(0, 500)}`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
       maxTokens: 300,
       temperature: 0.1
@@ -356,58 +371,108 @@ async function fetchPtBodies(apiBase, sid, product, caseSubject, caseDescription
   return bodyMap;
 }
 
-function searchKBWithBodies(queries, ptBodies) {
-  if (!ptBodies.size) return [];
 
-  const rawTerms = queries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2);
-  const terms = [...new Set(rawTerms)];
-  const importantTerms = terms.filter(t => t.length > 4);
-
-  const results = [];
-  for (const [id, article] of ptBodies) {
-    const titleText = (article.title || '').toLowerCase();
-    const summaryText = (article.summary || '').toLowerCase();
-    const descText = stripHtml(article.description).toLowerCase().slice(0, 3000);
-    const resText = stripHtml(article.resolution).toLowerCase().slice(0, 3000);
-    const fullText = `${titleText} ${summaryText} ${descText} ${resText}`;
-
-    let score = 0;
-    for (const t of terms) {
-      if (fullText.includes(t)) score += (t.length > 5 ? 2 : 1);
-    }
-    for (const t of importantTerms) {
-      if (titleText.includes(t)) score += 4;
-      if (summaryText.includes(t)) score += 2;
-    }
-
-    if (score > 0) {
-      results.push({
-        Id: id,
-        Title: article.title,
-        Summary: article.summary,
-        ArticleNumber: article.articleNumber,
-        topicName: article.topicName,
-        _score: score
-      });
-    }
-  }
-
-  return results.sort((a, b) => b._score - a._score).slice(0, 20);
-}
-
-async function fallbackSoslSearch(apiBase, sid, queries) {
+async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
   const seen = new Set();
   const results = [];
-  const uniqueQueries = [...new Set(queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(Boolean))].slice(0, MAX_SOSL_QUERIES);
+  const uniqueQueries = [...new Set(
+    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(q => q.length > 2)
+  )].slice(0, MAX_SOSL_QUERIES);
+
+  // Build P&T WHERE clause from routing
+  let ptFilter = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
+  if (ptPatterns.length && ptPatterns.length <= 5) {
+    const ptClauses = ptPatterns.map(p => `Product_And_Topic__r.Name = '${p.replace(/'/g, "\\'")}'`);
+    ptFilter = `(${ptClauses.join(' OR ')})`;
+  }
+
   for (const q of uniqueQueries) {
+    if (results.length >= 20) break;
     try {
       const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus WHERE PublishStatus = 'Online' AND Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`
       );
-      for (const r of records) { if (!seen.has(r.Id)) { seen.add(r.Id); results.push(r); } }
+      for (const r of records) {
+        if (!seen.has(r.Id)) {
+          seen.add(r.Id);
+          results.push({
+            ...r,
+            topicName: r.Product_And_Topic__r?.Name || ''
+          });
+        }
+      }
     } catch {}
   }
+
+  // If P&T-scoped search returned too few, broaden to all Industry/Revenue
+  if (results.length < 5 && ptPatterns.length) {
+    for (const q of uniqueQueries.slice(0, 3)) {
+      if (results.length >= 15) break;
+      try {
+        const records = await sfSearch(apiBase, sid,
+          `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
+        );
+        for (const r of records) {
+          if (!seen.has(r.Id)) {
+            seen.add(r.Id);
+            results.push({ ...r, topicName: r.Product_And_Topic__r?.Name || '' });
+          }
+        }
+      } catch {}
+    }
+  }
+
   return results;
+}
+
+async function fetchCandidateBodies(apiBase, sid, candidates) {
+  const bodyMap = new Map();
+  if (!candidates.length) return bodyMap;
+  const ids = candidates.map(c => c.Id);
+  const batches = [];
+  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
+
+  for (const batch of batches) {
+    try {
+      const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
+      const result = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, sid);
+      for (const r of (result.records || [])) {
+        bodyMap.set(r.Id, {
+          id: r.Id,
+          title: r.Title || '',
+          summary: r.Summary || '',
+          articleNumber: r.ArticleNumber || '',
+          topicName: r.Product_And_Topic__r?.Name || '',
+          description: r.Description__c || '',
+          resolution: r.Resolution__c || '',
+          steps: r.Steps__c || ''
+        });
+      }
+    } catch {}
+  }
+  return bodyMap;
+}
+
+async function assessProductDocGap(caseRecord, caseAbstract, productDocs) {
+  if (!productDocs.length) return null;
+  const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}" — ${(d.summary || '').slice(0, 100)}`).join('\n');
+  try {
+    const resp = await callClaudeFast({
+      system: `You assess whether a support case situation could have been better handled via existing product documentation. Consider:
+- Could the customer have found the answer in these product docs before raising a case?
+- Is there a gap in the product documentation that would have prevented this case?
+- Should the product docs be updated to better address this scenario?
+
+Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs]}
+- DOCS_SUFFICIENT: Product docs already cover this well; case could have been self-served
+- DOCS_NEED_UPDATE: Product docs exist but don't adequately address this specific scenario
+- DOCS_MISSING: No product documentation covers this topic at all`,
+      messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
+      maxTokens: 200,
+      temperature: 0.1
+    });
+    return extractJson(extractText(resp)) || null;
+  } catch { return null; }
 }
 
 async function searchProductDocs(apiBase, sid, queries) {
@@ -439,14 +504,6 @@ async function searchProductDocs(apiBase, sid, queries) {
   return results.slice(0, 5);
 }
 
-function rankArticles(articles, queries) {
-  const terms = queries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2);
-  return articles.map(a => {
-    const text = `${a.Title || ''} ${a.Summary || ''}`.toLowerCase();
-    const score = terms.reduce((s, t) => s + (text.includes(t) ? 1 : 0), 0);
-    return { ...a, _score: score };
-  }).sort((a, b) => b._score - a._score);
-}
 
 
 
@@ -508,6 +565,10 @@ async function scoreArticleForCaseScan(article) {
   const m = maxes;
   const resp = await callClaudeFast({
     system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
+
+AGENTFORCE WRITING GUIDE (score against these standards):
+${WRITING_GUIDE_EXCERPT.slice(0, 1500)}
+
 Score this article. Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
 ${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
 SCORING: Be STRICT. Most articles score 55-75.
@@ -546,14 +607,20 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
 
     try {
       const fullText = await streamClaude({
-        system: `You are an expert KB editor. Given an existing article and a support case, produce a FULL REWRITTEN version of the article that incorporates learnings from the case. Follow Agentforce writing rules:
+        system: `You are an expert KB editor. Given an existing article and a support case, produce a FULL REWRITTEN version of the article that incorporates learnings from the case.
+
+AGENTFORCE WRITING GUIDE (follow strictly):
+${WRITING_GUIDE_EXCERPT}
+
+KEY RULES:
 - Title: product-specific, describes exact issue
 - Summary: 2-4 sentences covering problem context and resolution approach
-- Use H2/H3 headers for structure (used in chunking)
+- Use H2/H3 headers for structure (used in chunking for Agentforce)
 - Description: state problem, symptoms, context, and WHY
 - Resolution: brief summary of what steps accomplish, then numbered steps
 - Explain acronyms. Use present tense. Be specific about product + feature.
 - After code blocks, add plain-text explanation
+- Tables should use text, not visual indicators
 
 Return the COMPLETE rewritten article as publication-ready content.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"...","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
@@ -589,7 +656,12 @@ async function makeDecision(caseRecord, abstract, topArticles) {
   if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.' };
   const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" (relevance: ${a._relevanceScore || 'N/A'}) — ${(a.Summary || '').slice(0, 150)}`).join('\n');
   const resp = await callClaudeFast({
-    system: `You decide the KB action for a support case given existing related articles. Choose ONE action:
+    system: `You decide the KB action for a support case given existing related articles.
+
+AGENTFORCE WRITING GUIDE CONTEXT (use to assess whether existing articles meet the standard):
+${WRITING_GUIDE_EXCERPT.slice(0, 1000)}
+
+Choose ONE action:
 
 NO_ACTION — Choose when:
 - An existing article ALREADY fully covers the case's exact error, symptom, or scenario
@@ -621,9 +693,12 @@ Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confid
 async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send) {
   const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
   const fullText = await streamClaude({
-    system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption. Follow these Agentforce writing rules strictly:
+    system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption.
 
-KEY RULES FROM THE WRITING GUIDE:
+AGENTFORCE WRITING GUIDE (follow strictly):
+${WRITING_GUIDE_EXCERPT}
+
+KEY RULES:
 - TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario.
 - SUMMARY: 2-4 sentences covering problem context and resolution approach.
 - HEADERS: Use H2/H3 headers to break content into logical sections. Headers are used in chunking for Agentforce.
@@ -631,6 +706,7 @@ KEY RULES FROM THE WRITING GUIDE:
 - RESOLUTION: Begin with a brief statement of what the steps accomplish, then provide numbered steps.
 - Explain acronyms and abbreviations. Use simple present tense.
 - Code blocks should be described succinctly in text.
+- Tables should use text, not visual indicators.
 
 ALSO: Identify any claims or assertions where you are NOT fully confident (e.g., inferred root cause, assumed configuration, unclear error conditions). These become "hypotheses" that need SME validation.
 
