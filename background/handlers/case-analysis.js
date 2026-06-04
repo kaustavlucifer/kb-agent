@@ -623,7 +623,8 @@ KEY RULES:
 - Tables should use text, not visual indicators
 
 Return the COMPLETE rewritten article as publication-ready content.
-JSON: {"title":"...","summary":"...","sections":[{"heading":"...","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
+IMPORTANT: Use EXACTLY these 4 sections — Title, Summary, Description, Resolution. No other section headings.
+JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
         messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 3000,
         temperature: 0.2,
@@ -710,7 +711,8 @@ KEY RULES:
 
 ALSO: Identify any claims or assertions where you are NOT fully confident (e.g., inferred root cause, assumed configuration, unclear error conditions). These become "hypotheses" that need SME validation.
 
-Return JSON: {"title":"...","summary":"...","sections":[{"heading":"...","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["heading names"]}]}`,
+IMPORTANT: Use EXACTLY these 4 fields — title, summary, and two sections: Description and Resolution. No other section headings.
+Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["Description"|"Resolution"]}]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}` }],
     maxTokens: FINAL_MAX_TOKENS,
     temperature: 0.3,

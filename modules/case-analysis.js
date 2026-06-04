@@ -430,9 +430,10 @@ function renderResult() {
   // AI Case Summary
   const caseSummary = getState('case.caseSummary');
   if (caseSummary) {
+    const summaryContent = renderMarkdown(caseSummary);
     const summaryCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px 16px', borderLeft: '3px solid var(--primary)' } },
       h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '6px' } }, 'Case Summary'),
-      h('p', { style: { fontSize: '12px', lineHeight: '1.6', color: 'var(--text-primary)', margin: '0' } }, caseSummary)
+      summaryContent
     );
     const gusItems = getState('case.gusItems') || [];
     if (gusItems.length) {
@@ -1089,17 +1090,18 @@ async function searchCases(query) {
 async function onAnalyzeClick() {
   hideTypeahead();
   const input = document.getElementById('case-input');
-  const value = (input?.value || '').trim();
+  const value = (input?.value || '').trim().replace(/^#/, '');
   if (!value) { toast('Enter a Case number or ID.', 'error'); return; }
 
   let caseId = extractCaseId(value);
   if (!caseId) {
     if (/^[a-zA-Z0-9]{15,18}$/.test(value)) caseId = value;
     else if (/^\d{3,15}$/.test(value)) {
+      toast('Resolving case number…', 'info');
       const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: value });
-      if (resp.success) caseId = resp.caseId;
-      else { toast(resp.error || ('Case not found: ' + value), 'error'); return; }
-    } else { toast('Invalid Case number or ID.', 'error'); return; }
+      if (resp?.success) caseId = resp.caseId;
+      else { toast(resp?.error || ('Case not found: ' + value), 'error'); return; }
+    } else { toast('Invalid input. Enter a case number (digits), Salesforce ID (15-18 chars), or case URL.', 'error'); return; }
   }
   startAnalysis(caseId);
 }

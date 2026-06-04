@@ -118,20 +118,27 @@ async function searchCases(query) {
 
 async function resolveCase(caseNumber) {
   if (!/^\d{3,15}$/.test(caseNumber)) return { success: false, error: 'Invalid case number format' };
-  const session = await detectSession();
-  console.log('[KB-Agent] resolveCase session:', session.key, 'sid:', !!session.sid, 'apiBase:', session.apiBase);
-  if (!session.sid) return { success: false, error: 'No SF session — log into OrgCS first' };
-  try {
-    const soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${escapeSoql(caseNumber)}' LIMIT 1`;
-    console.log('[KB-Agent] resolveCase SOQL:', soql);
-    const records = await sfQuery(session.apiBase, session.sid, soql);
-    console.log('[KB-Agent] resolveCase result:', records.length, 'records');
-    if (!records.length) return { success: false, error: `Case #${caseNumber} not found in ${session.key || 'org'}` };
-    return { success: true, caseId: records[0].Id, caseNumber: records[0].CaseNumber, subject: records[0].Subject };
-  } catch (e) {
-    console.error('[KB-Agent] resolveCase error:', e);
-    return { success: false, error: `Query failed: ${e.message}` };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await detectSession();
+    if (!session.sid) {
+      if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
+      return { success: false, error: 'No SF session — log into OrgCS first' };
+    }
+    try {
+      const soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${escapeSoql(caseNumber)}' LIMIT 1`;
+      const records = await sfQuery(session.apiBase, session.sid, soql);
+      if (!records.length) return { success: false, error: `Case #${caseNumber} not found in ${session.key || 'org'}` };
+      return { success: true, caseId: records[0].Id, caseNumber: records[0].CaseNumber, subject: records[0].Subject };
+    } catch (e) {
+      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      return { success: false, error: `Query failed: ${e.message}` };
+    }
   }
+  return { success: false, error: 'Failed to resolve case number after retries' };
 }
 
 function handlePort(port) {
