@@ -112,11 +112,12 @@ function activateTab(tabId) {
 }
 
 async function checkConnections() {
-  const [sfResp, aiResp] = await Promise.all([
+  const [sfResp, aiResp, gusResp] = await Promise.all([
     chrome.runtime.sendMessage({ action: 'CHECK_CONNECTION' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false }))
+    chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false })),
+    chrome.runtime.sendMessage({ action: 'CHECK_GUS_CONNECTION' }).catch(() => ({ connected: false }))
   ]);
-  setState('app.connections', { sf: sfResp, ai: aiResp });
+  setState('app.connections', { sf: sfResp, ai: aiResp, gus: gusResp });
 }
 
 function updateConnectionChips() {
@@ -151,6 +152,13 @@ function updateConnectionChips() {
   });
   aiChip.style.cursor = 'pointer';
   container.appendChild(aiChip);
+
+  const gusState = conn.gus?.connected ? 'connected' : 'disconnected';
+  const gusLabel = conn.gus?.connected ? 'GUS' : 'GUS Offline';
+  container.appendChild(chip(gusState, gusLabel, {
+    title: conn.gus?.connected ? 'Connected to GUS' : 'Log into GUS for work item enrichment',
+    onClick: () => chrome.tabs.create({ url: 'https://gus.lightning.force.com' })
+  }));
 
   const clearBtn = h('button', {
     class: 'btn btn--ghost btn--sm',

@@ -52,5 +52,6 @@ export const STORAGE_KEYS = {
   DEDUP_RESULTS: 'kba_dedup_results',
   DEDUP_AT: 'kba_dedup_at',
   RECENT_CASES: 'recentCases',
-  LAST_LIGHTNING_HOST: 'lastLightningHost'
+  LAST_LIGHTNING_HOST: 'lastLightningHost',
+  BYPASS_GUARD_RAILS: 'bypassGuardRails'
 };

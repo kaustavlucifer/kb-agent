@@ -1,7 +1,16 @@
-import { detectSession } from '../../shared/auth.js';
+import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE } from '../../shared/config.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
+import { resolveTargetPts, matchPtPatterns } from '../../data/pt_routing.js';
+import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
+
+function getGuardRailExtraFields(guardRailFields) {
+  const extra = [];
+  if (guardRailFields?.supportLevelName) extra.push(guardRailFields.supportLevelName);
+  if (guardRailFields?.hyperforceName) extra.push(guardRailFields.hyperforceName);
+  return extra.length ? ',' + extra.join(',') : '';
+}
 
 export async function handleAnalyze(port, msg) {
   const session = await detectSession();
@@ -13,25 +22,59 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
 
   send({ type: 'progress', step: 1, label: 'Fetching case + comments' });
-  const caseFields = 'Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate';
+
+  // Guard rail field discovery first (fast, cached), then case fetch with extra fields
+  const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
+  const extraFields = getGuardRailExtraFields(guardRailFields);
+  const caseFields = `Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate${extraFields}`;
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
   if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
+
+  // Check bypass setting
+  const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
+  const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
+
+  if (!bypassEnabled && guardRailFields.bothPresent) {
+    const supportLevel = guardRailFields.supportLevelName ? (caseRecord[guardRailFields.supportLevelName] || '') : '';
+    const hyperforce = guardRailFields.hyperforceName ? (caseRecord[guardRailFields.hyperforceName] || '') : '';
+    caseRecord.__supportLevel = supportLevel;
+    caseRecord.__hyperforce = hyperforce;
+    const guardCheck = isCaseAnalysisAllowed(caseRecord);
+    if (!guardCheck.allowed) {
+      send({ type: 'error', error: guardCheck.reason });
+      return;
+    }
+  }
+
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
   const comments = await sfQuery(session.apiBase, session.sid,
     `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
   );
 
+  // GUS enrichment (non-blocking — run in parallel with intent extraction)
+  const gusWorkNames = extractWorkItemNames(comments);
+  const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames) : Promise.resolve({ items: [], feed: [], error: null });
+
   send({ type: 'progress', step: 2, label: 'Extracting intents' });
-  const intentsResult = await extractIntents(caseRecord, comments);
-  const caseAbstract = await extractAbstract(caseRecord, comments);
+  const [intentsResult, caseAbstract, gusData] = await Promise.all([
+    extractIntents(caseRecord, comments),
+    extractAbstract(caseRecord, comments),
+    gusPromise
+  ]);
+
+  // Generate AI case summary
+  const caseSummary = await generateCaseSummary(caseRecord, comments, gusData);
+  send({ type: 'meta', caseSummary, gusItems: gusData.items });
 
   send({ type: 'progress', step: 3, label: 'Fetching KB articles for this product area' });
   const product = caseAbstract?.product || intentsResult.product || '';
   const allQueries = intentsResult.intents.flatMap(i => i.queries);
 
-  // Fetch bodies for all articles in the relevant P&T — cached for subsequent runs
-  const ptBodies = await fetchPtBodies(session.apiBase, session.sid, product);
+  const [ptBodies, productDocs] = await Promise.all([
+    fetchPtBodies(session.apiBase, session.sid, product, caseRecord.Subject, caseRecord.Description),
+    searchProductDocs(session.apiBase, session.sid, allQueries)
+  ]);
 
   // Search using full content (title + summary + description + resolution)
   let searchResults = searchKBWithBodies(allQueries, ptBodies);
@@ -57,15 +100,15 @@ export async function handleAnalyze(port, msg) {
   }).join('\n\n');
 
   let topArticles;
-  try {
-    const resp = await callClaudeFast({
-      system: `You are assessing KB article relevance to a support case. Read the FULL content of each article (Title, Summary, Description, Resolution) carefully.
+  const aiScoringPrompt = {
+    system: `You are assessing KB article relevance to a support case. Read the FULL content of each article (Title, Summary, Description, Resolution) carefully.
 
 Score EACH article 0-100 for relevance. Scoring criteria:
 - 80-100: Article directly addresses the SAME error, symptom, or exact scenario in the case
 - 60-79: Article covers the same feature/component and a closely related problem
 - 40-59: Article is in the same product area but addresses a different specific issue
-- 0-39: Article is tangentially related or different product area
+- 20-39: Article is tangentially related or different product area
+- 0-19: Not relevant at all
 
 Key matching signals:
 - Same error message, exception code, or error pattern
@@ -73,25 +116,37 @@ Key matching signals:
 - Same workflow or user scenario described
 - Resolution in article would directly help this case
 
-Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason"}, ...]}
-Include ALL articles. Do not omit any.`,
-      messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nPriority: ${caseRecord.Priority || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
-      maxTokens: 1200,
-      temperature: 0.1
-    });
-    const parsed = extractJson(extractText(resp));
-    if (parsed?.articles?.length) {
-      const scored = parsed.articles
-        .filter(a => a.index >= 0 && a.index < candidates.length && a.score > 50)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
-      topArticles = scored.map(s => ({
-        ...candidates[s.index],
-        _relevanceScore: s.score,
-        _relevanceReason: s.reason
-      }));
+Be STRICT. Do not inflate scores. An article about the same PRODUCT but a DIFFERENT issue should score 30-50, not 60+.
+
+Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason", "notRelevant": false}, ...]}
+Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
+    messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nPriority: ${caseRecord.Priority || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
+    maxTokens: 1200,
+    temperature: 0.1
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const resp = await callClaudeFast(aiScoringPrompt);
+      const parsed = extractJson(extractText(resp));
+      if (parsed?.articles?.length) {
+        const scored = parsed.articles
+          .filter(a => a.index >= 0 && a.index < candidates.length && !a.notRelevant && a.score > 30)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 5);
+        if (scored.length) {
+          topArticles = scored.map(s => ({
+            ...candidates[s.index],
+            _relevanceScore: s.score,
+            _relevanceReason: s.reason
+          }));
+        }
+      }
+      break;
+    } catch (e) {
+      if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
     }
-  } catch {}
+  }
 
   if (!topArticles?.length) {
     topArticles = candidates.slice(0, TOP_K);
@@ -99,12 +154,14 @@ Include ALL articles. Do not omit any.`,
 
   const scoredArticles = topArticles.map(a => ({
     id: a.Id, title: a.Title, articleNumber: a.ArticleNumber,
-    score: a._relevanceScore || 50,
+    score: a._relevanceScore || null,
     reason: a._relevanceReason || '',
+    publishStatus: a.publishStatus || a.PublishStatus || 'Online',
+    validationStatus: a.validationStatus || a.ValidationStatus || '',
     url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view`
   }));
 
-  send({ type: 'meta', topArticles: scoredArticles });
+  send({ type: 'meta', topArticles: scoredArticles, productDocs: productDocs || [] });
 
   // Run KB scoring and decision in parallel — send score updates as each completes
   send({ type: 'progress', step: 5, label: 'Scoring articles & evaluating strategy…' });
@@ -133,9 +190,19 @@ Include ALL articles. Do not omit any.`,
   const action = decision.action;
   let structured;
 
-  if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    // Bodies already fetched for candidates — reuse candidateBodies
-    const suggestions = await generateSuggestionsParallel(topArticles, candidateBodies, caseRecord, comments, caseAbstract, send);
+  if (action === 'NO_ACTION') {
+    const coveringIndices = decision.coveringArticles || [];
+    const coveringArticles = coveringIndices
+      .filter(i => i >= 0 && i < topArticles.length)
+      .map(i => ({ id: topArticles[i].Id, title: topArticles[i].Title, articleNumber: topArticles[i].ArticleNumber }));
+    structured = {
+      action: 'NO_ACTION',
+      confidence: decision.confidence,
+      summary: decision.reason,
+      coveringArticles: coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)
+    };
+  } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
+    const suggestions = await generateFullRewrites(topArticles, candidateBodies, caseRecord, comments, caseAbstract, send);
     structured = {
       action,
       confidence: decision.confidence,
@@ -147,7 +214,7 @@ Include ALL articles. Do not omit any.`,
 
   if (action === 'CREATE_NEW' || action === 'BOTH') {
     const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, send);
-    if (structured) {
+    if (structured && action === 'BOTH') {
       structured.newArticleDraft = draft;
     } else {
       structured = {
@@ -196,6 +263,22 @@ async function extractAbstract(caseRecord, comments) {
   } catch { return null; }
 }
 
+async function generateCaseSummary(caseRecord, comments, gusData) {
+  const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
+  const gusContext = (gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n');
+  const gusFeedText = (gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n');
+
+  try {
+    const resp = await callClaudeFast({
+      system: 'Summarize this support case in 3-5 sentences. Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.',
+      messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
+      maxTokens: 300,
+      temperature: 0.1
+    });
+    return extractText(resp) || null;
+  } catch { return null; }
+}
+
 const _ptBodyCache = new Map();
 const _PT_CACHE_MAX = 5;
 
@@ -206,26 +289,23 @@ function evictPtCache() {
   }
 }
 
-async function fetchPtBodies(apiBase, sid, product) {
+async function fetchPtBodies(apiBase, sid, product, caseSubject, caseDescription) {
   const data = await chrome.storage.local.get(['kba_all_articles']);
   const allArticles = data.kba_all_articles || [];
   if (!allArticles.length) return new Map();
 
-  // Identify matching P&Ts based on product name
-  const productLower = (product || '').toLowerCase();
-  const matchingPts = [...new Set(allArticles.map(a => a.topicName).filter(Boolean))].filter(pt => {
-    const ptLower = pt.toLowerCase();
-    if (!productLower) return true;
-    return ptLower.includes(productLower) || productLower.split(/\s+/).some(w => w.length > 3 && ptLower.includes(w));
-  });
+  const ptPatterns = resolveTargetPts(product, caseSubject, caseDescription);
+  const allTopicNames = [...new Set(allArticles.map(a => a.topicName).filter(Boolean))];
 
-  // If no product match, use all Industry/Revenue P&Ts
-  const targetPts = matchingPts.length > 0 && matchingPts.length < allArticles.length / 2
-    ? matchingPts : allArticles.map(a => a.topicName).filter(Boolean);
+  let targetPts;
+  if (ptPatterns.length) {
+    targetPts = allTopicNames.filter(tn => matchPtPatterns(tn, ptPatterns));
+    if (!targetPts.length) targetPts = allTopicNames;
+  } else {
+    targetPts = allTopicNames;
+  }
 
   const ptArticles = allArticles.filter(a =>
-    a.validationStatus === 'Validated External' &&
-    a.publishStatus === 'Online' &&
     targetPts.includes(a.topicName)
   );
 
@@ -330,6 +410,35 @@ async function fallbackSoslSearch(apiBase, sid, queries) {
   return results;
 }
 
+async function searchProductDocs(apiBase, sid, queries) {
+  const uniqueQueries = [...new Set(
+    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(Boolean)
+  )].slice(0, 3);
+  const seen = new Set();
+  const results = [];
+  for (const q of uniqueQueries) {
+    if (results.length >= 5) break;
+    try {
+      const records = await sfSearch(apiBase, sid,
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,UrlName,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 3`
+      );
+      for (const r of records) {
+        if (!seen.has(r.Id)) {
+          seen.add(r.Id);
+          results.push({
+            id: r.Id,
+            title: r.Title,
+            summary: r.Summary || '',
+            articleNumber: r.ArticleNumber,
+            url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${r.Id}/view`
+          });
+        }
+      }
+    } catch {}
+  }
+  return results.slice(0, 5);
+}
+
 function rankArticles(articles, queries) {
   const terms = queries.join(' ').toLowerCase().split(/\s+/).filter(t => t.length > 2);
   return articles.map(a => {
@@ -425,7 +534,7 @@ Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":
   return { overall, criteria, error: null };
 }
 
-async function generateSuggestionsParallel(articles, bodyMap, caseRecord, comments, abstract, send) {
+async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
 
@@ -433,29 +542,39 @@ async function generateSuggestionsParallel(articles, bodyMap, caseRecord, commen
     const body = bodyMap.get(article.Id) || {};
     const descText = stripHtml(body.description).slice(0, MAX_BODY_CHARS);
     const resText = stripHtml(body.resolution).slice(0, MAX_BODY_CHARS);
+    const stepsText = stripHtml(body.steps || '').slice(0, 1500);
 
     try {
       const fullText = await streamClaude({
-        system: `You are an expert KB editor optimizing articles for Agentforce readiness. Given an article and a case, identify 1-3 improvements based on these rules:
-- Titles must be product-specific and describe the exact issue
-- Use H2/H3 headers (not bold text) to break content into sections for chunking
-- Description should state problem, symptoms, context and WHY
-- Resolution should start with what steps accomplish, then numbered steps
-- Code blocks need plain-text explanations
+        system: `You are an expert KB editor. Given an existing article and a support case, produce a FULL REWRITTEN version of the article that incorporates learnings from the case. Follow Agentforce writing rules:
+- Title: product-specific, describes exact issue
+- Summary: 2-4 sentences covering problem context and resolution approach
+- Use H2/H3 headers for structure (used in chunking)
+- Description: state problem, symptoms, context, and WHY
+- Resolution: brief summary of what steps accomplish, then numbered steps
 - Explain acronyms. Use present tense. Be specific about product + feature.
-Return JSON: {"suggestions":[{"title":"...","location":"...","content":"...","impact":"HIGH"|"MEDIUM"|"LOW"}]}`,
-        messages: [{ role: 'user', content: `ARTICLE: #${article.ArticleNumber} "${article.Title}"\nDESCRIPTION: ${descText.slice(0, 2000)}\nRESOLUTION: ${resText.slice(0, 2000)}\n\nCASE: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
-        maxTokens: 1500,
+- After code blocks, add plain-text explanation
+
+Return the COMPLETE rewritten article as publication-ready content.
+JSON: {"title":"...","summary":"...","sections":[{"heading":"...","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
+        messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
+        maxTokens: 3000,
         temperature: 0.2,
         onDelta: (chunk) => {
           send({ type: 'suggestion-delta', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, chunk });
         }
       });
       const parsed = extractJson(fullText);
-      if (parsed?.suggestions) {
-        const articleSugs = parsed.suggestions.map(s => ({ ...s, articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title }));
-        allSuggestions.push(...articleSugs);
-        send({ type: 'suggestion-ready', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, suggestions: articleSugs });
+      if (parsed) {
+        const rewrite = {
+          ...parsed,
+          articleId: article.Id,
+          articleNumber: article.ArticleNumber,
+          articleTitle: article.Title,
+          isFullRewrite: true
+        };
+        allSuggestions.push(rewrite);
+        send({ type: 'suggestion-ready', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, suggestions: [rewrite] });
       }
     } catch (e) {
       send({ type: 'suggestion-error', articleId: article.Id, articleNumber: article.ArticleNumber, error: e?.message || 'Failed' });
@@ -468,17 +587,31 @@ Return JSON: {"suggestions":[{"title":"...","location":"...","content":"...","im
 
 async function makeDecision(caseRecord, abstract, topArticles) {
   if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.' };
-  const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" — ${(a.Summary || '').slice(0, 150)}`).join('\n');
+  const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" (relevance: ${a._relevanceScore || 'N/A'}) — ${(a.Summary || '').slice(0, 150)}`).join('\n');
   const resp = await callClaudeFast({
-    system: `You decide whether to UPDATE existing KB articles or CREATE a new one. Rules:
-- STRONGLY prefer UPDATE_EXISTING or BOTH — article proliferation is expensive, updating existing articles is always better
-- If ANY article covers the same product area, same feature, or same category of problem, choose UPDATE_EXISTING — even if the specific error is different, the article can be expanded
-- Only choose CREATE_NEW when ZERO articles relate to the same product feature area at all — this should be very rare when articles exist
-- Choose BOTH when you want to update existing articles AND also draft a new one for a distinctly different aspect not covered
-- When in doubt, choose BOTH over CREATE_NEW — always produce update suggestions for existing articles
-Return JSON: {"action":"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence"}`,
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (these were already scored as relevant):\n${articleList}` }],
-    maxTokens: 200,
+    system: `You decide the KB action for a support case given existing related articles. Choose ONE action:
+
+NO_ACTION — Choose when:
+- An existing article ALREADY fully covers the case's exact error, symptom, or scenario
+- The resolution in the existing article would directly solve this case without any modification
+- Only trivial cosmetic changes would improve the article (punctuation, minor wording)
+- The case describes a well-known issue that is completely documented
+
+UPDATE_EXISTING — Choose when:
+- Articles cover the same product/feature area but miss this specific error or scenario
+- The article could be meaningfully improved by adding resolution steps, error details, or context from this case
+- Prefer this over CREATE_NEW when an article exists in the same domain
+
+CREATE_NEW — Choose when:
+- ZERO articles relate to the same product feature area or specific issue category
+- This should be rare when relevant articles exist
+
+BOTH — Choose when:
+- Existing articles should be updated AND a distinctly different aspect needs a new article
+
+Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence explaining the decision","coveringArticles":[indices of articles that already cover this case, if NO_ACTION]}`,
+    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (scored for relevance to this case):\n${articleList}` }],
+    maxTokens: 250,
     temperature: 0.1
   });
   const parsed = extractJson(extractText(resp));
@@ -491,21 +624,25 @@ async function generateNewArticleStreaming(caseRecord, comments, abstract, inten
     system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption. Follow these Agentforce writing rules strictly:
 
 KEY RULES FROM THE WRITING GUIDE:
-- TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario. Not general (e.g. "Troubleshooting Tableau Prep Flows" not "Troubleshooting Flows").
+- TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario.
 - SUMMARY: 2-4 sentences covering problem context and resolution approach.
-- HEADERS: Use H2/H3 headers to break content into logical sections. Never use bold text as substitute for headers. Headers are used in chunking for Agentforce.
-- DESCRIPTION: State the problem, symptoms, and context. Explain WHY this happens. Include product name with feature terms to avoid ambiguity.
-- RESOLUTION: Begin with a brief statement of what the steps accomplish, then provide numbered steps. After code blocks, add plain-text explanation.
+- HEADERS: Use H2/H3 headers to break content into logical sections. Headers are used in chunking for Agentforce.
+- DESCRIPTION: State the problem, symptoms, and context. Explain WHY this happens. Include product name with feature terms.
+- RESOLUTION: Begin with a brief statement of what the steps accomplish, then provide numbered steps.
 - Explain acronyms and abbreviations. Use simple present tense.
-- Each FAQ item must be specific in intent and solution. Very large FAQs are not consumed well.
-- Code blocks should be described succinctly in text for better Agentforce response.
-- Tables should use text, not visual indicators like checkmarks.
+- Code blocks should be described succinctly in text.
 
-Return JSON: {"title":"...","sections":[{"heading":"...","body":"..."}]}`,
+ALSO: Identify any claims or assertions where you are NOT fully confident (e.g., inferred root cause, assumed configuration, unclear error conditions). These become "hypotheses" that need SME validation.
+
+Return JSON: {"title":"...","summary":"...","sections":[{"heading":"...","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["heading names"]}]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}` }],
     maxTokens: FINAL_MAX_TOKENS,
     temperature: 0.3,
     onDelta: (chunk) => { send({ type: 'delta', chunk }); }
   });
-  return extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
+  const parsed = extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
+  if (parsed.hypotheses?.length) {
+    send({ type: 'meta', hypotheses: parsed.hypotheses.map((h, i) => ({ ...h, id: `h${i}`, status: 'pending' })) });
+  }
+  return parsed;
 }

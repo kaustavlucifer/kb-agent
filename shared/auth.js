@@ -79,6 +79,48 @@ export async function detectSession() {
   return orgs.length ? { ...orgs[0], orgs } : { sid: null, apiBase: null, lightningHost: null, orgs: [] };
 }
 
+export async function detectGusSession() {
+  const sfCookies = await loadFreshSfCookies();
+  if (!sfCookies.length) return { sid: null, apiBase: null, lightningHost: null };
+
+  const groups = groupCookiesByOrg(sfCookies);
+  for (const [key, group] of groups.entries()) {
+    if (!group.bestCookie?.value) continue;
+    if (key.toLowerCase() !== 'gus') continue;
+    const hosts = Array.from(group.hosts);
+    const apiHost = hosts.find(h => h.endsWith('.my.salesforce.com')) || hosts[0];
+    const lightHost = hosts.find(h => h.endsWith('.lightning.force.com')) || `${key}.lightning.force.com`;
+    return {
+      sid: group.bestCookie.value,
+      apiBase: `https://${apiHost}`,
+      lightningHost: lightHost,
+      key
+    };
+  }
+  return { sid: null, apiBase: null, lightningHost: null };
+}
+
+let _gusPingCache = null;
+
+export async function pingGusSession() {
+  const session = await detectGusSession();
+  if (!session.sid) return { status: 'none', apiBase: null };
+  if (_gusPingCache && _gusPingCache.sid === session.sid && Date.now() - _gusPingCache.ts < 5 * 60 * 1000) {
+    return { status: _gusPingCache.status, apiBase: session.apiBase };
+  }
+  try {
+    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/chatter/users/me`, {
+      headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
+    });
+    const status = r.ok ? 'active' : 'expired';
+    _gusPingCache = { sid: session.sid, status, ts: Date.now() };
+    return { status, apiBase: session.apiBase };
+  } catch {
+    _gusPingCache = { sid: session.sid, status: 'error', ts: Date.now() };
+    return { status: 'error', apiBase: session.apiBase };
+  }
+}
+
 export function describeAuthError(session) {
   if (!session || !session.sid) {
     return 'No active Salesforce session found. Please log into OrgCS in this browser, then retry.';

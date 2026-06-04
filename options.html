@@ -32,6 +32,15 @@
         <option value="claude-opus-4-7">Claude Opus 4.7 (Highest Quality)</option>
       </select>
     </div>
+    <div class="field" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+        <input type="checkbox" id="bypass-guard-rails" style="width: 16px; height: 16px;">
+        <span>Bypass case guard rails (Gov/Premier/Non-Hyperforce)</span>
+      </label>
+      <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px; padding-left: 24px;">
+        When enabled, allows analysis of restricted-tier cases (Gov Cloud, EU/US Premier, US Signature, Non-Hyperforce). Use only when authorized — case content will be sent to the AI gateway.
+      </div>
+    </div>
     <div class="actions">
       <button class="btn btn--primary" id="save-btn">Save</button>
       <button class="btn btn--secondary" id="test-btn">Test Connection</button>
@@ -43,17 +52,20 @@
 <script>
   const tokenEl = document.getElementById('token');
   const modelEl = document.getElementById('model');
+  const bypassEl = document.getElementById('bypass-guard-rails');
   const statusEl = document.getElementById('status');
 
-  chrome.storage.local.get(['gatewayToken', 'modelName'], (data) => {
+  chrome.storage.local.get(['gatewayToken', 'modelName', 'bypassGuardRails'], (data) => {
     if (data.gatewayToken) tokenEl.placeholder = '••••••••  (saved)';
     if (data.modelName) modelEl.value = data.modelName;
+    if (data.bypassGuardRails) bypassEl.checked = true;
   });
 
   document.getElementById('save-btn').addEventListener('click', async () => {
     const token = tokenEl.value.trim();
     const model = modelEl.value;
-    const updates = { modelName: model };
+    const bypass = bypassEl.checked;
+    const updates = { modelName: model, bypassGuardRails: bypass };
     if (token) updates.gatewayToken = token;
     await chrome.storage.local.set(updates);
     statusEl.textContent = 'Saved.';

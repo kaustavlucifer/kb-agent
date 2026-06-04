@@ -9,6 +9,8 @@ import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
 import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
 import { handleDedup, handleMerge } from './handlers/dedup.js';
+import { publishNewArticle, publishUpdateDraft } from './handlers/article-publish.js';
+import { checkGusConnection } from './handlers/gus-enrichment.js';
 
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
@@ -45,6 +47,9 @@ async function handleMessage(msg) {
     case 'SEARCH_CASES': return searchCases(msg.query);
     case 'COVERAGE_ANALYZE_PT': return analyzePtCoverage(msg);
     case 'REFINE_SECTION': return refineSection(msg);
+    case 'PUBLISH_NEW_ARTICLE': return publishNewArticle(msg.payload);
+    case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
+    case 'CHECK_GUS_CONNECTION': return checkGusConnection();
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }
@@ -81,21 +86,34 @@ Return ONLY the improved text, no JSON wrapping or explanation.`,
 
 async function searchCases(query) {
   if (!query || query.length < 3) return { cases: [] };
-  const session = await detectSession();
-  if (!session.sid) return { cases: [] };
-  try {
-    const escaped = escapeSoql(query);
-    let soql;
-    if (/^\d+$/.test(query)) {
-      soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escaped}%' ORDER BY CreatedDate DESC LIMIT 8`;
-    } else {
-      soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE (Subject LIKE '%${escaped}%' OR CaseNumber LIKE '%${escaped}%') ORDER BY CreatedDate DESC LIMIT 8`;
+  const escaped = escapeSoql(query);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await detectSession();
+    if (!session.sid) {
+      if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
+      return { cases: [] };
     }
-    const records = await sfQuery(session.apiBase, session.sid, soql);
-    return { cases: records };
-  } catch {
-    return { cases: [] };
+    try {
+      let soql;
+      if (/^\d+$/.test(query)) {
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escaped}%' ORDER BY CreatedDate DESC LIMIT 8`;
+      } else if (/^[a-zA-Z0-9]{15,18}$/.test(query)) {
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE Id = '${escaped}' LIMIT 1`;
+      } else {
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE (Subject LIKE '%${escaped}%' OR CaseNumber LIKE '%${escaped}%') ORDER BY CreatedDate DESC LIMIT 8`;
+      }
+      const records = await sfQuery(session.apiBase, session.sid, soql);
+      return { cases: records };
+    } catch (e) {
+      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      return { cases: [] };
+    }
   }
+  return { cases: [] };
 }
 
 async function resolveCase(caseNumber) {
