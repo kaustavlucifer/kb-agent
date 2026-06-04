@@ -577,7 +577,7 @@ Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":
     messages: [{ role: 'user', content: `Title: ${article.title}\nArticle#: ${article.articleNumber}\nP&T: ${article.topicName || '(none)'}\nSUMMARY: ${article.summary || '(empty)'}\nDESCRIPTION (${descText.length} chars): ${descText || '(empty)'}\nRESOLUTION (${resText.length} chars): ${resText || '(empty)'}${stepsText ? '\nSTEPS: ' + stepsText : ''}` }],
     maxTokens: 2200,
     temperature: 0.1,
-    model: 'claude-haiku-4-5-20251001'
+    model: 'claude-sonnet-4-6'
   });
 
   const text = extractText(resp);

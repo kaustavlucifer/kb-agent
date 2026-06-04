@@ -1,8 +1,8 @@
 export const GATEWAY_BASE = 'https://eng-ai-model-gateway.sfproxy.devx-preprod.aws-esvc1-useast2.aws.sfdc.cl';
 
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
-export const FAST_MODEL = 'claude-haiku-4-5-20251001';
-export const SCORING_MODEL = 'claude-haiku-4-5-20251001';
+export const FAST_MODEL = 'claude-sonnet-4-6';
+export const SCORING_MODEL = 'claude-sonnet-4-6';
 
 export const SF_API_VERSION = 'v62.0';
 export const ANTHROPIC_VERSION = '2023-06-01';
