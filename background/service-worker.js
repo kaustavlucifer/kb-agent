@@ -50,7 +50,48 @@ async function handleMessage(msg) {
     case 'PUBLISH_NEW_ARTICLE': return publishNewArticle(msg.payload);
     case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
     case 'CHECK_GUS_CONNECTION': return checkGusConnection();
+    case 'REFINE_WITH_HYPOTHESES': return refineWithHypotheses(msg);
     default: return { error: `Unknown action: ${msg.action}` };
+  }
+}
+
+async function refineWithHypotheses(msg) {
+  const { hypotheses, structured } = msg;
+  if (!hypotheses?.length || !structured) return { success: false, error: 'No data' };
+
+  const accepted = hypotheses.filter(h => h.status === 'accepted').map(h => h.claim);
+  const rejected = hypotheses.filter(h => h.status === 'rejected').map(h => h.claim);
+
+  const contentToRefine = structured.newArticleDraft || structured.suggestions?.[0];
+  if (!contentToRefine) return { success: false, error: 'No content to refine' };
+
+  const sectionsText = (contentToRefine.sections || []).map(s => `## ${s.heading}\n${s.body}`).join('\n\n');
+
+  try {
+    const resp = await callClaude({
+      system: `You are refining a KB article draft based on SME decisions about uncertain claims (hypotheses).
+- ACCEPTED hypotheses: keep and strengthen the related content
+- REJECTED hypotheses: remove or rewrite the related content to avoid the incorrect claim
+
+Return the refined article in the same JSON structure: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
+      messages: [{ role: 'user', content: `CURRENT DRAFT:\nTitle: ${contentToRefine.title || ''}\nSummary: ${contentToRefine.summary || ''}\n\n${sectionsText}\n\nACCEPTED CLAIMS (keep these):\n${accepted.map(c => '- ' + c).join('\n') || '(none)'}\n\nREJECTED CLAIMS (remove/rewrite these):\n${rejected.map(c => '- ' + c).join('\n') || '(none)'}` }],
+      maxTokens: 3000,
+      temperature: 0.2
+    });
+    const text = extractText(resp);
+    const parsed = text ? JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || 'null') : null;
+    if (!parsed) return { success: false, error: 'Could not parse refined content' };
+
+    const refined = {};
+    if (structured.newArticleDraft) refined.newArticleDraft = parsed;
+    if (structured.suggestions?.length) {
+      refined.suggestions = structured.suggestions.map((s, i) =>
+        i === 0 ? { ...s, ...parsed } : s
+      );
+    }
+    return { success: true, refined };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 }
 

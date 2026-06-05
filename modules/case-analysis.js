@@ -86,12 +86,25 @@ function buildInlineSearch() {
   return bar;
 }
 
-function submitInlineSearch() {
+async function submitInlineSearch() {
   const input = document.getElementById('case-inline-search');
-  const val = (input?.value || '').trim();
+  const val = (input?.value || '').trim().replace(/^#/, '');
   if (!val) return;
-  const id = extractCaseId(val) || val;
-  startAnalysis(id);
+
+  let caseId = extractCaseId(val);
+  if (!caseId) {
+    if (/^[a-zA-Z0-9]{15,18}$/.test(val)) {
+      caseId = val;
+    } else if (/^\d{3,15}$/.test(val)) {
+      const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: val });
+      if (resp?.success) caseId = resp.caseId;
+      else { toast(resp?.error || 'Case not found', 'error'); return; }
+    } else {
+      toast('Invalid input. Use a case number, ID, or URL.', 'error');
+      return;
+    }
+  }
+  startAnalysis(caseId);
 }
 
 let _typeaheadTimer = null;
@@ -583,10 +596,12 @@ function renderSidebarArticles(articles) {
           statusBadge = h('span', { class: 'pill pill--warning', style: { fontSize: '9px' } }, 'Not Validated');
         }
 
+        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '9px', padding: '1px 5px', marginLeft: 'auto' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
         body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
             link,
-            statusBadge
+            statusBadge,
+            updateBtn
           ),
           a.reason ? h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: '1.3' } }, a.reason) : null,
           statusBadge && a.publishStatus !== 'Online' ? h('div', { style: { fontSize: '10px', color: 'var(--warning)', marginTop: '2px', fontStyle: 'italic' } }, 'Internal/unpublished article — could be published directly or with changes') : null,
@@ -615,8 +630,25 @@ function formatAction(action) {
 function renderSidebarQuality(structured) {
   const isCollapsed = _collapsedSections['quality'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
+
+  // Calculate AFG readiness score (0-100)
+  const topArticles = getState('case.topArticles') || [];
+  const avgKbScore = topArticles.length
+    ? Math.round(topArticles.filter(a => a.kbScore != null).reduce((s, a) => s + a.kbScore, 0) / Math.max(1, topArticles.filter(a => a.kbScore != null).length))
+    : null;
+  const confidenceScore = structured.confidence === 'HIGH' ? 90 : structured.confidence === 'MEDIUM' ? 60 : 30;
+  const actionScore = structured.action === 'NO_ACTION' ? 95 : structured.action === 'UPDATE_EXISTING' ? 70 : structured.action === 'CREATE_NEW' ? 40 : 55;
+  const readinessScore = avgKbScore != null
+    ? Math.round((avgKbScore * 0.4) + (confidenceScore * 0.3) + (actionScore * 0.3))
+    : Math.round((confidenceScore * 0.5) + (actionScore * 0.5));
+  const scoreColor = readinessScore >= 75 ? 'var(--success)' : readinessScore >= 50 ? 'var(--warning)' : 'var(--error)';
+  const scoreLabel = readinessScore >= 75 ? 'AGF Ready' : readinessScore >= 50 ? 'Needs Work' : 'Not Ready';
+
   const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['quality'] = !_collapsedSections['quality']; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Quality & Readiness'),
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+      h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AF Readiness'),
+      h('span', { style: { fontSize: '14px', fontWeight: '700', color: scoreColor } }, `${readinessScore}`)
+    ),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
   section.appendChild(header);
@@ -624,31 +656,32 @@ function renderSidebarQuality(structured) {
   if (!isCollapsed) {
     const body = h('div', { style: { fontSize: '11px' } });
 
+    // Score bar
+    const barOuter = h('div', { style: { width: '100%', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' } });
+    barOuter.appendChild(h('div', { style: { width: `${readinessScore}%`, height: '100%', background: scoreColor, borderRadius: '3px', transition: 'width 0.3s' } }));
+    body.appendChild(barOuter);
+    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '8px' } },
+      h('span', { style: { color: scoreColor, fontWeight: '600' } }, scoreLabel),
+      h('span', { style: { color: 'var(--text-muted)' } }, `${readinessScore}/100`)
+    ));
+
     const items = [
       ['Action', formatAction(structured.action)],
       ['Confidence', structured.confidence || 'N/A'],
-      ['Articles Found', String((getState('case.topArticles') || []).length)],
-      ['Suggestions', String((structured.suggestions || []).length)]
+      ['Articles Found', String(topArticles.length)],
+      ['Avg KB Score', avgKbScore != null ? String(avgKbScore) : '…']
     ];
 
-    if (structured.newArticleDraft) {
-      items.push(['Draft Sections', String((structured.newArticleDraft.sections || []).length)]);
-    }
-
-    items.push(['AGF Readiness', structured.confidence === 'HIGH' ? 'Ready for Agentforce' : 'Needs review']);
+    if (structured.suggestions?.length) items.push(['Rewrites', String(structured.suggestions.length)]);
+    if (structured.newArticleDraft) items.push(['New Draft', 'Yes']);
 
     items.forEach(([label, value]) => {
-      body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid var(--border)' } },
+      const valueColor = label === 'Confidence' ? (value === 'HIGH' ? 'var(--success)' : value === 'MEDIUM' ? 'var(--warning)' : 'var(--error)') : 'var(--text-primary)';
+      body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' } },
         h('span', { style: { color: 'var(--text-muted)' } }, label),
-        h('span', { style: { fontWeight: '500', color: label === 'Confidence' ? (value === 'HIGH' ? 'var(--success)' : value === 'MEDIUM' ? 'var(--warning)' : 'var(--error)') : 'var(--text-primary)' } }, value)
+        h('span', { style: { fontWeight: '500', color: valueColor } }, value)
       ));
     });
-
-    body.appendChild(h('div', { style: { marginTop: '8px', padding: '6px 8px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '10px', color: 'var(--text-secondary)', lineHeight: '1.4' } },
-      structured.confidence === 'HIGH'
-        ? 'This recommendation is high-confidence and suitable for Agentforce consumption after review.'
-        : 'Review the suggestions carefully before publishing. Some recommendations may need manual verification.'
-    ));
 
     section.appendChild(body);
   }
@@ -694,15 +727,36 @@ function renderSidebarHypotheses(hypotheses) {
   return section;
 }
 
-function handleHypothesis(index, status) {
+async function handleHypothesis(index, status) {
   const hypotheses = getState('case.hypotheses') || [];
   if (index >= 0 && index < hypotheses.length) {
     hypotheses[index].status = status;
     setState('case.hypotheses', [...hypotheses]);
     renderByView();
+
     const allDecided = hypotheses.every(h => h.status !== 'pending');
     if (allDecided) {
-      toast('All hypotheses reviewed. Content can be refined with these decisions.', 'info');
+      toast('Refining content based on hypothesis decisions…', 'info');
+      try {
+        const result = getState('case.result');
+        const resp = await chrome.runtime.sendMessage({
+          action: 'REFINE_WITH_HYPOTHESES',
+          hypotheses,
+          structured: result?.structured || null,
+          caseAbstract: result?.caseAbstract || null
+        });
+        if (resp?.success && resp.refined) {
+          const currentResult = getState('case.result');
+          if (currentResult?.structured) {
+            currentResult.structured = { ...currentResult.structured, ...resp.refined };
+            setState('case.result', { ...currentResult });
+          }
+          toast('Content refined with hypothesis decisions.', 'success');
+          renderByView();
+        }
+      } catch (e) {
+        toast('Refinement failed: ' + e.message, 'error');
+      }
     }
   }
 }
@@ -847,11 +901,17 @@ function renderFullRewriteCard(rewrite) {
       ));
     }
     const body = h('div', { style: { padding: '14px 16px' } });
-    if (rewrite.summary) {
-      body.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', padding: '8px', background: 'var(--surface)', borderRadius: 'var(--radius-xs)', fontStyle: 'italic' } }, rewrite.summary));
+    // Title section
+    if (rewrite.title) {
+      body.appendChild(renderEditableSection({ heading: 'Title', body: rewrite.title }, 0, `rewrite-${rewrite.articleId}`));
     }
+    // Summary section
+    if (rewrite.summary) {
+      body.appendChild(renderEditableSection({ heading: 'Summary', body: rewrite.summary }, 1, `rewrite-${rewrite.articleId}`));
+    }
+    // Description and Resolution sections
     (rewrite.sections || []).forEach((sec, idx) => {
-      body.appendChild(renderEditableSection(sec, idx, `rewrite-${rewrite.articleId}`));
+      body.appendChild(renderEditableSection(sec, idx + 2, `rewrite-${rewrite.articleId}`));
     });
     card.appendChild(body);
   }
@@ -997,6 +1057,47 @@ function refineSection(section) {
     } catch (e) {
       toast('Refine error: ' + e.message, 'error');
     }
+  }
+}
+
+async function triggerUpdateForArticle(article) {
+  const result = getState('case.result');
+  if (!result) { toast('No analysis result available.', 'error'); return; }
+
+  const existingSuggestions = result.structured?.suggestions || [];
+  const alreadyHasRewrite = existingSuggestions.some(s => s.articleId === article.id);
+  if (alreadyHasRewrite) {
+    toast('A rewrite for this article already exists. Check the suggestions below.', 'info');
+    return;
+  }
+
+  toast('Generating update for this article…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      action: 'REFINE_SECTION',
+      content: `Generate a full KB article rewrite for article #${article.articleNumber} "${article.title}" incorporating context from the current case analysis.`,
+      title: article.title,
+      focus: 'full rewrite based on case context'
+    });
+    if (resp?.success && resp.refined) {
+      toast('Content generated. You can use "Update in ORGCS" to publish.', 'success');
+      const structured = result.structured || {};
+      if (!structured.suggestions) structured.suggestions = [];
+      structured.suggestions.push({
+        articleId: article.id,
+        articleNumber: article.articleNumber,
+        articleTitle: article.title,
+        isFullRewrite: true,
+        title: article.title,
+        summary: '',
+        sections: [{ heading: 'Description', body: resp.refined.split('\n').slice(0, 15).join('\n') }, { heading: 'Resolution', body: resp.refined.split('\n').slice(15).join('\n') }],
+        changesSummary: 'Manual update triggered from sidebar'
+      });
+      setState('case.result', { ...result, structured });
+      renderByView();
+    }
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
   }
 }
 
@@ -1198,6 +1299,9 @@ function onPortMessage(msg) {
       if (getState('case.view') === 'streaming') renderStreaming();
       break;
     }
+    case 'summary-delta':
+      setState('case.caseSummary', (getState('case.caseSummary') || '') + (msg.chunk || ''));
+      break;
     case 'delta':
       setState('case.streamText', (getState('case.streamText') || '') + (msg.chunk || ''));
       break;

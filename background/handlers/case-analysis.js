@@ -55,20 +55,20 @@ export async function handleAnalyze(port, msg) {
     `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
   );
 
-  // GUS enrichment (non-blocking — run in parallel with intent extraction)
+  // GUS enrichment + intent extraction + abstract + case summary — ALL in parallel
   const gusWorkNames = extractWorkItemNames(comments);
   const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames) : Promise.resolve({ items: [], feed: [], error: null });
 
-  send({ type: 'progress', step: 2, label: 'Extracting intents' });
+  send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
   const [intentsResult, caseAbstract, gusData] = await Promise.all([
     extractIntents(caseRecord, comments),
     extractAbstract(caseRecord, comments),
     gusPromise
   ]);
 
-  // Generate AI case summary
-  const caseSummary = await generateCaseSummary(caseRecord, comments, gusData);
-  send({ type: 'meta', caseSummary, gusItems: gusData.items });
+  // Case summary streams to UI for better UX
+  const caseSummaryPromise = streamCaseSummary(caseRecord, comments, gusData, send);
+  send({ type: 'meta', gusItems: gusData.items });
 
   send({ type: 'progress', step: 3, label: 'Searching KB articles (SOSL)' });
   const product = caseAbstract?.product || intentsResult.product || '';
@@ -164,29 +164,30 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'meta', topArticles: scoredArticles, productDocs: productDocs || [] });
 
-  // Run KB scoring and decision in parallel — send score updates as each completes
-  send({ type: 'progress', step: 5, label: 'Scoring articles & evaluating strategy…' });
+  // KB scoring runs in background (non-blocking) — decision proceeds immediately
+  send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
   const kbScoredArticles = [...scoredArticles];
-  const [, decision] = await Promise.all([
-    mapWithConcurrency(scoredArticles, 3, async (sa, idx) => {
-      try {
-        const body = candidateBodies.get(sa.id) || {};
-        const article = {
-          ...sa,
-          description: body.description || '',
-          resolution: body.resolution || '',
-          steps: body.steps || '',
-          additionalResources: body.additionalResources || '',
-          summary: candidates.find(c => c.Id === sa.id)?.Summary || '',
-          topicName: candidates.find(c => c.Id === sa.id)?.topicName || ''
-        };
-        const kbScore = await scoreArticleForCaseScan(article);
-        kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
-        send({ type: 'meta', topArticles: [...kbScoredArticles] });
-      } catch {}
-    }),
-    makeDecision(caseRecord, caseAbstract, topArticles)
-  ]);
+
+  // Fire-and-forget scoring — sends progressive updates to UI
+  mapWithConcurrency(scoredArticles, 3, async (sa, idx) => {
+    try {
+      const body = candidateBodies.get(sa.id) || {};
+      const article = {
+        ...sa,
+        description: body.description || '',
+        resolution: body.resolution || '',
+        steps: body.steps || '',
+        summary: candidates.find(c => c.Id === sa.id)?.Summary || '',
+        topicName: candidates.find(c => c.Id === sa.id)?.topicName || ''
+      };
+      const kbScore = await scoreArticleForCaseScan(article);
+      kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
+      send({ type: 'meta', topArticles: [...kbScoredArticles] });
+    } catch {}
+  }).catch(() => {});
+
+  // Decision proceeds immediately (doesn't wait for scoring)
+  const decision = await makeDecision(caseRecord, caseAbstract, topArticles);
 
   const action = decision.action;
   let structured;
@@ -227,7 +228,9 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     }
   }
 
-  // Product Documentation Gap assessment
+  // Await case summary (started earlier in parallel) and assess product doc gap
+  await caseSummaryPromise;
+
   let prodDocGap = null;
   if (productDocs.length) {
     prodDocGap = await assessProductDocGap(caseRecord, caseAbstract, productDocs);
@@ -276,21 +279,21 @@ async function extractAbstract(caseRecord, comments) {
   } catch { return null; }
 }
 
-async function generateCaseSummary(caseRecord, comments, gusData) {
+async function streamCaseSummary(caseRecord, comments, gusData, send) {
   const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
   const gusContext = (gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n');
   const gusFeedText = (gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n');
 
   try {
-    const resp = await callClaudeFast({
-      system: `Summarize this support case in 3-5 sentences. Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.
-
-AGENTFORCE KB CONTEXT: ${WRITING_GUIDE_EXCERPT.slice(0, 500)}`,
+    const fullText = await streamClaude({
+      system: `Summarize this support case in 3-5 sentences. Use markdown formatting (bold for labels). Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
-      maxTokens: 300,
-      temperature: 0.1
+      maxTokens: 400,
+      temperature: 0.1,
+      onDelta: (chunk) => { send({ type: 'summary-delta', chunk }); }
     });
-    return extractText(resp) || null;
+    send({ type: 'meta', caseSummary: fullText });
+    return fullText;
   } catch { return null; }
 }
 
@@ -566,8 +569,7 @@ async function scoreArticleForCaseScan(article) {
   const resp = await callClaudeFast({
     system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
 
-AGENTFORCE WRITING GUIDE (score against these standards):
-${WRITING_GUIDE_EXCERPT.slice(0, 1500)}
+KEY AGF STANDARDS: Titles must be product-specific. Use H2/H3 headers (not bold) for chunking. Summaries 2-4 sentences. Description must state the problem+WHY. Resolution must start with what steps accomplish, then numbered steps. Explain acronyms. After code blocks add plain-text explanation. Tables use text not visual indicators. Give real-life examples.
 
 Score this article. Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
 ${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
