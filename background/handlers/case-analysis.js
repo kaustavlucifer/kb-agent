@@ -4,12 +4,7 @@ import { callClaudeFast, streamClaude, extractText, extractJson } from '../../sh
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
-import { WRITING_GUIDE } from '../../data/writing_guide.js';
-
-// Smart slices of writing guide for different prompt contexts
-const GUIDE_GENERATION = WRITING_GUIDE.slice(0, WRITING_GUIDE.indexOf('Technical Details')).trim();
-const GUIDE_SCORING = `KEY AGF STANDARDS: Titles must be product-specific. Use H2/H3 headers (not bold) for chunking. Summaries 2-4 sentences. Description must state the problem+WHY. Resolution must start with what steps accomplish, then numbered steps. Explain acronyms. After code blocks add plain-text explanation. Tables use text not visual indicators. Give real-life examples. Each FAQ item must be very specific in intent and solution.`;
-const GUIDE_DECISION = WRITING_GUIDE.slice(0, WRITING_GUIDE.indexOf('Content Best Practices')).trim().slice(0, 1200);
+import { GUIDE_GENERATION, GUIDE_SCORING, GUIDE_DECISION } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];

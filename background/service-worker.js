@@ -3,7 +3,7 @@ import { pingGateway, callClaude, extractText } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS } from '../shared/config.js';
-import { WRITING_GUIDE } from '../data/writing_guide.js';
+import { GUIDE_GENERATION } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
@@ -74,10 +74,10 @@ async function generateArticleUpdate(msg) {
   if (!articleBody) articleBody = `Title: ${articleTitle}\n(Article body could not be fetched)`;
 
   try {
-    const guideRules = WRITING_GUIDE.slice(0, 2500);
+    const guideRules = GUIDE_GENERATION;
     const resp = await callClaude({
       system: `You are rewriting a Salesforce KB article to incorporate new case context. Follow Agentforce writing rules:
-${guideRules.slice(0, 1500)}
+${guideRules}
 
 Return the FULL rewritten article. Use EXACTLY these 4 fields.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
@@ -138,7 +138,7 @@ async function refineSection(msg) {
   const { content, title, focus } = msg;
   if (!content) return { success: false, error: 'No content provided' };
   try {
-    const guideRules = WRITING_GUIDE.slice(0, 2500);
+    const guideRules = GUIDE_GENERATION;
     const focusInstruction = focus ? `\n\nUSER FOCUS: "${focus}" — prioritize this aspect in your refinement.` : '';
     const resp = await callClaude({
       system: `You are an expert KB editor for Salesforce Agentforce. Refine this section following the Agentforce writing guide rules:
