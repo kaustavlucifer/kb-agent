@@ -2,7 +2,7 @@ import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
-import { resolveTargetPts, matchPtPatterns } from '../../data/pt_routing.js';
+import { resolveTargetPts } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { WRITING_GUIDE } from '../../data/writing_guide.js';
 
@@ -141,9 +141,10 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
             _relevanceScore: s.score,
             _relevanceReason: s.reason
           }));
+          break;
         }
       }
-      break;
+      if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
     } catch (e) {
       if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
     }
@@ -173,16 +174,18 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   const kbScoredArticles = [...scoredArticles];
 
   // Fire-and-forget scoring — sends progressive updates to UI
-  mapWithConcurrency(scoredArticles, 3, async (sa, idx) => {
+  mapWithConcurrency(scoredArticles, 5, async (sa, idx) => {
     try {
       const body = candidateBodies.get(sa.id) || {};
+      const candidate = candidates.find(c => c.Id === sa.id) || {};
       const article = {
         ...sa,
+        title: sa.title || body.title || candidate.Title || '',
         description: body.description || '',
         resolution: body.resolution || '',
         steps: body.steps || '',
-        summary: candidates.find(c => c.Id === sa.id)?.Summary || '',
-        topicName: candidates.find(c => c.Id === sa.id)?.topicName || ''
+        summary: body.summary || candidate.Summary || '',
+        topicName: body.topicName || candidate.topicName || ''
       };
       const kbScore = await scoreArticleForCaseScan(article);
       kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
@@ -301,89 +304,12 @@ async function streamCaseSummary(caseRecord, comments, gusData, send) {
   } catch { return null; }
 }
 
-const _ptBodyCache = new Map();
-const _PT_CACHE_MAX = 5;
-
-function evictPtCache() {
-  while (_ptBodyCache.size > _PT_CACHE_MAX) {
-    const oldest = _ptBodyCache.keys().next().value;
-    _ptBodyCache.delete(oldest);
-  }
-}
-
-async function fetchPtBodies(apiBase, sid, product, caseSubject, caseDescription) {
-  const data = await chrome.storage.local.get(['kba_all_articles']);
-  const allArticles = data.kba_all_articles || [];
-  if (!allArticles.length) return new Map();
-
-  const ptPatterns = resolveTargetPts(product, caseSubject, caseDescription);
-  const allTopicNames = [...new Set(allArticles.map(a => a.topicName).filter(Boolean))];
-
-  let targetPts;
-  if (ptPatterns.length) {
-    targetPts = allTopicNames.filter(tn => matchPtPatterns(tn, ptPatterns));
-    if (!targetPts.length) targetPts = allTopicNames;
-  } else {
-    targetPts = allTopicNames;
-  }
-
-  const ptArticles = allArticles.filter(a =>
-    targetPts.includes(a.topicName)
-  );
-
-  // Check cache
-  const cacheKey = targetPts.sort().join('|').slice(0, 100);
-  if (_ptBodyCache.has(cacheKey)) return _ptBodyCache.get(cacheKey);
-
-  // Also check localStorage cache
-  const cached = await chrome.storage.local.get(['kba_pt_bodies', 'kba_pt_bodies_key', 'kba_pt_bodies_at']);
-  if (cached.kba_pt_bodies && cached.kba_pt_bodies_key === cacheKey && cached.kba_pt_bodies_at && Date.now() - cached.kba_pt_bodies_at < 60 * 60 * 1000) {
-    const bodyMap = new Map(Object.entries(cached.kba_pt_bodies));
-    _ptBodyCache.set(cacheKey, bodyMap);
-    return bodyMap;
-  }
-
-  // Fetch bodies in batches
-  const bodyMap = new Map();
-  const ids = ptArticles.map(a => a.id);
-  const batches = [];
-  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
-
-  for (const batch of batches) {
-    try {
-      const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-      const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, sid);
-      for (const r of (result.records || [])) {
-        bodyMap.set(r.Id, {
-          id: r.Id,
-          title: r.Title || '',
-          summary: r.Summary || '',
-          articleNumber: r.ArticleNumber || '',
-          topicName: r.Product_And_Topic__r?.Name || '',
-          description: r.Description__c || '',
-          resolution: r.Resolution__c || '',
-          steps: r.Steps__c || ''
-        });
-      }
-    } catch {}
-  }
-
-  // Cache results (bounded)
-  _ptBodyCache.set(cacheKey, bodyMap);
-  evictPtCache();
-  const serializable = Object.fromEntries(bodyMap);
-  chrome.storage.local.set({ kba_pt_bodies: serializable, kba_pt_bodies_key: cacheKey, kba_pt_bodies_at: Date.now() }).catch(() => {});
-
-  return bodyMap;
-}
-
 
 async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
   const seen = new Set();
   const results = [];
   const uniqueQueries = [...new Set(
-    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(q => q.length > 2)
+    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= 10)
   )].slice(0, MAX_SOSL_QUERIES);
 
   // Build P&T WHERE clause from routing

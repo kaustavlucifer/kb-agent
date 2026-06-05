@@ -51,7 +51,46 @@ async function handleMessage(msg) {
     case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
     case 'CHECK_GUS_CONNECTION': return checkGusConnection();
     case 'REFINE_WITH_HYPOTHESES': return refineWithHypotheses(msg);
+    case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
     default: return { error: `Unknown action: ${msg.action}` };
+  }
+}
+
+async function generateArticleUpdate(msg) {
+  const { articleId, articleTitle, articleNumber, caseSubject, caseAbstract } = msg;
+  const session = await detectSession();
+  if (!session.sid) return { success: false, error: 'No SF session' };
+
+  let articleBody = '';
+  try {
+    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${articleId}' LIMIT 1`;
+    const records = await sfQuery(session.apiBase, session.sid, soql);
+    if (records.length) {
+      const r = records[0];
+      articleBody = `Title: ${r.Title || ''}\nSummary: ${r.Summary || ''}\nDescription: ${(r.Description__c || '').slice(0, 3000)}\nResolution: ${(r.Resolution__c || '').slice(0, 3000)}`;
+    }
+  } catch {}
+
+  if (!articleBody) articleBody = `Title: ${articleTitle}\n(Article body could not be fetched)`;
+
+  try {
+    const guideRules = WRITING_GUIDE.slice(0, 2500);
+    const resp = await callClaude({
+      system: `You are rewriting a Salesforce KB article to incorporate new case context. Follow Agentforce writing rules:
+${guideRules.slice(0, 1500)}
+
+Return the FULL rewritten article. Use EXACTLY these 4 fields.
+JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
+      messages: [{ role: 'user', content: `EXISTING ARTICLE:\n${articleBody}\n\nCASE CONTEXT:\nSubject: ${caseSubject || ''}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nError: ${caseAbstract?.errorSignature || ''}` }],
+      maxTokens: 3000,
+      temperature: 0.2
+    });
+    const text = extractText(resp);
+    const parsed = text ? JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || 'null') : null;
+    if (!parsed) return { success: false, error: 'Could not parse AI response' };
+    return { success: true, rewrite: parsed };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 }
 

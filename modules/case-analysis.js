@@ -550,18 +550,28 @@ function renderResult() {
 
     if (!draftCollapsed) {
       const draftBody = h('div', { style: { padding: '14px 16px' } });
-      if (draft.title) {
-        draftBody.appendChild(renderEditableSection({ heading: 'Title', body: draft.title }, 0, 'draft'));
+      draftBody.appendChild(renderEditableSection({ heading: 'Title', body: draft.title || 'Untitled' }, 0, 'draft'));
+      const summaryText = draft.summary || (draft.sections || []).find(s => /summary/i.test(s.heading))?.body || '';
+      draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: summaryText || '(No summary generated — add a 2-4 sentence overview)' }, 1, 'draft'));
+      const contentSections = (draft.sections || []).filter(s => !/summary/i.test(s.heading));
+      const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading)) || contentSections[0];
+      const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading)) || contentSections[1];
+      if (descSection) draftBody.appendChild(renderEditableSection({ heading: 'Description', body: descSection.body }, 2, 'draft'));
+      if (resSection && resSection !== descSection) draftBody.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection.body }, 3, 'draft'));
+      if (!descSection && !resSection) {
+        contentSections.forEach((sec, idx) => draftBody.appendChild(renderEditableSection(sec, idx + 2, 'draft')));
       }
-      if (draft.summary) {
-        draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: draft.summary }, 1, 'draft'));
-      }
-      (draft.sections || []).forEach((sec, idx) => {
-        draftBody.appendChild(renderEditableSection(sec, idx + 2, 'draft'));
-      });
       draftCard.appendChild(draftBody);
     }
     main.appendChild(draftCard);
+  }
+
+  // Show "Create New Article" button when no draft exists (only update suggestions shown)
+  if (!structured.newArticleDraft && !isNoAction) {
+    const createBtn = h('div', { style: { padding: '12px', textAlign: 'center', borderTop: '1px solid var(--border)', marginTop: '8px' } },
+      h('button', { class: 'btn btn--primary', onClick: () => { overrideDecision('CREATE_NEW'); toast('Re-analyze the case to generate a new article draft.', 'info'); } }, '+ Create New Article Instead')
+    );
+    main.appendChild(createBtn);
   }
 
   grid.appendChild(main);
@@ -644,8 +654,9 @@ function renderSidebarQuality(structured) {
 
   // Calculate AFG readiness score (0-100)
   const topArticles = getState('case.topArticles') || [];
-  const avgKbScore = topArticles.length
-    ? Math.round(topArticles.filter(a => a.kbScore != null).reduce((s, a) => s + a.kbScore, 0) / Math.max(1, topArticles.filter(a => a.kbScore != null).length))
+  const articlesWithKbScore = topArticles.filter(a => a.kbScore != null);
+  const avgKbScore = articlesWithKbScore.length
+    ? Math.round(articlesWithKbScore.reduce((s, a) => s + a.kbScore, 0) / articlesWithKbScore.length)
     : null;
   const confidenceScore = structured.confidence === 'HIGH' ? 90 : structured.confidence === 'MEDIUM' ? 60 : 30;
   const actionScore = structured.action === 'NO_ACTION' ? 95 : structured.action === 'UPDATE_EXISTING' ? 70 : structured.action === 'CREATE_NEW' ? 40 : 55;
@@ -704,15 +715,22 @@ function renderSidebarHypotheses(hypotheses) {
   const isCollapsed = _collapsedSections['hypotheses'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
   const pendingCount = hypotheses.filter(h => h.status === 'pending').length;
+  const headerLabel = _hypothesisRefining ? 'Refining…' : `Hypotheses (${pendingCount} pending)`;
   const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['hypotheses'] = !_collapsedSections['hypotheses']; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Hypotheses (${pendingCount} pending)`),
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: _hypothesisRefining ? 'var(--primary)' : 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' } }, _hypothesisRefining ? spinner('sm') : null, headerLabel),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
   section.appendChild(header);
 
   if (!isCollapsed) {
     const body = h('div', null);
-    body.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px' } }, 'AI-identified claims needing SME validation'));
+    if (_hypothesisRefining) {
+      body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', fontSize: '12px', color: 'var(--primary)' } },
+        spinner('sm'),
+        h('span', null, 'AI is refining content based on your decisions…')
+      ));
+    }
+    body.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px' } }, pendingCount > 0 ? 'Accept or reject ALL claims to trigger AI refinement' : 'All decided — refinement applied'));
     hypotheses.forEach((hyp, idx) => {
       const confidencePct = Math.round((hyp.confidence || 0) * 100);
       const statusColor = hyp.status === 'accepted' ? 'var(--success)' : hyp.status === 'rejected' ? 'var(--error)' : 'var(--warning)';
@@ -738,16 +756,25 @@ function renderSidebarHypotheses(hypotheses) {
   return section;
 }
 
+let _hypothesisRefining = false;
+
 async function handleHypothesis(index, status) {
   const hypotheses = getState('case.hypotheses') || [];
   if (index < 0 || index >= hypotheses.length) return;
 
   hypotheses[index].status = status;
   setState('case.hypotheses', [...hypotheses]);
+
+  const allDecided = hypotheses.every(h => h.status !== 'pending');
+  if (!allDecided) {
+    renderByView();
+    return;
+  }
+
+  // All hypotheses decided — trigger refinement
+  _hypothesisRefining = true;
   renderByView();
 
-  // Trigger refinement immediately on each decision
-  toast(`Hypothesis ${status}. Refining content…`, 'info');
   try {
     const result = getState('case.result');
     const resp = await chrome.runtime.sendMessage({
@@ -756,19 +783,22 @@ async function handleHypothesis(index, status) {
       structured: result?.structured || null,
       caseAbstract: result?.caseAbstract || null
     });
+    _hypothesisRefining = false;
     if (resp?.success && resp.refined) {
       const currentResult = getState('case.result');
       if (currentResult?.structured) {
         currentResult.structured = { ...currentResult.structured, ...resp.refined };
         setState('case.result', { ...currentResult });
       }
-      toast('Content refined.', 'success');
-      renderByView();
+      toast('Content refined based on hypothesis decisions.', 'success');
     } else {
       toast(resp?.error || 'Refinement returned no changes.', 'error');
     }
+    renderByView();
   } catch (e) {
+    _hypothesisRefining = false;
     toast('Refinement failed: ' + e.message, 'error');
+    renderByView();
   }
 }
 
@@ -912,18 +942,18 @@ function renderFullRewriteCard(rewrite) {
       ));
     }
     const body = h('div', { style: { padding: '14px 16px' } });
-    // Title section
-    if (rewrite.title) {
-      body.appendChild(renderEditableSection({ heading: 'Title', body: rewrite.title }, 0, `rewrite-${rewrite.articleId}`));
+    const prefix = `rewrite-${rewrite.articleId}`;
+    body.appendChild(renderEditableSection({ heading: 'Title', body: rewrite.title || rewrite.articleTitle || 'Untitled' }, 0, prefix));
+    const summaryText = rewrite.summary || (rewrite.sections || []).find(s => /summary/i.test(s.heading))?.body || '';
+    body.appendChild(renderEditableSection({ heading: 'Summary', body: summaryText || '(No summary — add overview)' }, 1, prefix));
+    const contentSections = (rewrite.sections || []).filter(s => !/summary/i.test(s.heading));
+    const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading)) || contentSections[0];
+    const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading)) || contentSections[1];
+    if (descSection) body.appendChild(renderEditableSection({ heading: 'Description', body: descSection.body }, 2, prefix));
+    if (resSection && resSection !== descSection) body.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection.body }, 3, prefix));
+    if (!descSection && !resSection) {
+      contentSections.forEach((sec, idx) => body.appendChild(renderEditableSection(sec, idx + 2, prefix)));
     }
-    // Summary section
-    if (rewrite.summary) {
-      body.appendChild(renderEditableSection({ heading: 'Summary', body: rewrite.summary }, 1, `rewrite-${rewrite.articleId}`));
-    }
-    // Description and Resolution sections
-    (rewrite.sections || []).forEach((sec, idx) => {
-      body.appendChild(renderEditableSection(sec, idx + 2, `rewrite-${rewrite.articleId}`));
-    });
     card.appendChild(body);
   }
 
@@ -1078,38 +1108,46 @@ async function triggerUpdateForArticle(article) {
   const existingSuggestions = result.structured?.suggestions || [];
   const alreadyHasRewrite = existingSuggestions.some(s => s.articleId === article.id);
   if (alreadyHasRewrite) {
-    toast('A rewrite for this article already exists. Check the suggestions below.', 'info');
+    toast('A rewrite for this article already exists below.', 'info');
     return;
   }
 
-  toast('Generating update for this article…', 'info');
+  toast('Generating rewrite (streaming)…', 'info');
+  // Use the streaming suggestion-delta pattern
+  setState('case.view', 'streaming');
+  setState('case.suggestionDeltas', { [article.id]: '' });
+
   try {
     const resp = await chrome.runtime.sendMessage({
-      action: 'REFINE_SECTION',
-      content: `Generate a full KB article rewrite for article #${article.articleNumber} "${article.title}" incorporating context from the current case analysis.`,
-      title: article.title,
-      focus: 'full rewrite based on case context'
+      action: 'GENERATE_ARTICLE_UPDATE',
+      articleId: article.id,
+      articleTitle: article.title,
+      articleNumber: article.articleNumber,
+      caseId: result.caseId,
+      caseSubject: result.subject,
+      caseAbstract: result.caseAbstract
     });
-    if (resp?.success && resp.refined) {
-      toast('Content generated. You can use "Update in ORGCS" to publish.', 'success');
+    if (resp?.success && resp.rewrite) {
       const structured = result.structured || {};
       if (!structured.suggestions) structured.suggestions = [];
       structured.suggestions.push({
+        ...resp.rewrite,
         articleId: article.id,
         articleNumber: article.articleNumber,
         articleTitle: article.title,
         isFullRewrite: true,
-        title: article.title,
-        summary: '',
-        sections: [{ heading: 'Description', body: resp.refined.split('\n').slice(0, 15).join('\n') }, { heading: 'Resolution', body: resp.refined.split('\n').slice(15).join('\n') }],
         changesSummary: 'Manual update triggered from sidebar'
       });
       setState('case.result', { ...result, structured });
-      renderByView();
+      toast('Rewrite generated.', 'success');
+    } else {
+      toast(resp?.error || 'Generation failed.', 'error');
     }
   } catch (e) {
     toast('Failed: ' + e.message, 'error');
   }
+  setState('case.suggestionDeltas', {});
+  setState('case.view', 'result');
 }
 
 function overrideDecision(newAction) {
