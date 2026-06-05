@@ -1,4 +1,4 @@
-import { detectGusSession } from '../../shared/auth.js';
+import { detectGusSession, pingGusSession } from '../../shared/auth.js';
 import { sfGet, sfQuery, soqlIdList, escapeSoql } from '../../shared/api.js';
 import { SF_API_VERSION } from '../../shared/config.js';
 
@@ -32,25 +32,27 @@ export async function fetchGusWorkItems(workNames) {
   const batches = [];
   for (let i = 0; i < workNames.length; i += 20) batches.push(workNames.slice(i, i + 20));
 
-  for (const batch of batches) {
+  const batchResults = await Promise.all(batches.map(async (batch) => {
     const inList = batch.map(n => `'${escapeSoql(n)}'`).join(',');
     try {
       const soql = `SELECT ${GUS_FIELDS.join(', ')} FROM ${WORK_OBJECT} WHERE Name IN (${inList})`;
-      const records = await sfQuery(apiBase, sid, soql);
-      for (const r of records) {
-        items.push({
-          id: r.Id,
-          name: r.Name,
-          subject: r.Subject__c || null,
-          status: r.Status__c || null,
-          priority: r.Priority__c || null,
-          assignee: r.Assignee__r?.Name || null,
-          scrumTeam: r.Scrum_Team__r?.Name || null,
-          productTag: r.Product_Tag__r?.Name || null,
-          createdDate: r.CreatedDate || null
-        });
-      }
-    } catch {}
+      return await sfQuery(apiBase, sid, soql);
+    } catch { return []; }
+  }));
+  for (const records of batchResults) {
+    for (const r of records) {
+      items.push({
+        id: r.Id,
+        name: r.Name,
+        subject: r.Subject__c || null,
+        status: r.Status__c || null,
+        priority: r.Priority__c || null,
+        assignee: r.Assignee__r?.Name || null,
+        scrumTeam: r.Scrum_Team__r?.Name || null,
+        productTag: r.Product_Tag__r?.Name || null,
+        createdDate: r.CreatedDate || null
+      });
+    }
   }
 
   let feed = [];
@@ -72,14 +74,6 @@ export async function fetchGusWorkItems(workNames) {
 }
 
 export async function checkGusConnection() {
-  const gusSession = await detectGusSession();
-  if (!gusSession.sid) return { connected: false };
-  try {
-    const resp = await fetch(`${gusSession.apiBase}/services/data/${SF_API_VERSION}/chatter/users/me`, {
-      headers: { Authorization: `Bearer ${gusSession.sid}`, Accept: 'application/json' }
-    });
-    return { connected: resp.ok };
-  } catch {
-    return { connected: false };
-  }
+  const result = await pingGusSession();
+  return { connected: result.status === 'active' };
 }

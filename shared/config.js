@@ -45,7 +45,6 @@ export const STORAGE_KEYS = {
   MODEL: 'modelName',
   ALL_ARTICLES: 'kba_all_articles',
   ALL_ARTICLES_AT: 'kba_all_articles_at',
-  ALL_ARTICLES_TIER2_AT: 'kba_all_articles_tier2_at',
   ARTICLE_SCORES: 'kba_article_scores',
   DEDUP_RESULTS: 'kba_dedup_results',
   DEDUP_AT: 'kba_dedup_at',

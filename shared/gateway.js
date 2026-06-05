@@ -167,22 +167,3 @@ export function extractJson(text) {
   }
 }
 
-export async function callWithRetry(opts, maxRetries = 3) {
-  let lastErr;
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      return await callClaude(opts);
-    } catch (e) {
-      lastErr = e;
-      if (e.status === 429) {
-        const wait = e.retryAfter ? parseInt(e.retryAfter, 10) * 1000 : Math.min(2000 * Math.pow(2, i), 30000);
-        await new Promise(r => setTimeout(r, wait));
-      } else if (e.status >= 500) {
-        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-      } else {
-        throw e;
-      }
-    }
-  }
-  throw lastErr;
-}

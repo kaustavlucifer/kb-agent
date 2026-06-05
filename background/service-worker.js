@@ -5,7 +5,7 @@ import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS } from '../shared/config.js';
 import { GUIDE_GENERATION } from '../data/writing_guide_prompts.js';
 
-import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
+import { handleAnalyze } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
 import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
 import { handleDedup, handleMerge } from './handlers/dedup.js';
@@ -241,12 +241,6 @@ function handlePort(port) {
   switch (port.name) {
     case 'kba-analyze':
       port.onMessage.addListener(wrap(handleAnalyze));
-      break;
-    case 'kba-theme-volume':
-      port.onMessage.addListener(wrap(handleThemeVolume));
-      break;
-    case 'kba-broaden':
-      port.onMessage.addListener(wrap(handleBroaden));
       break;
     case 'kbs-score-batch':
       port.onMessage.addListener(wrap(handleScoreBatch));

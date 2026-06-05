@@ -242,13 +242,6 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 }
 
-export async function handleThemeVolume(port, msg) {
-  port.postMessage({ type: 'themeVolumeResult', success: false, error: 'Theme volume not yet implemented.' });
-}
-
-export async function handleBroaden(port, msg) {
-  port.postMessage({ type: 'broadenResult', success: false, error: 'Broaden not yet implemented.' });
-}
 
 async function extractIntents(caseRecord, comments) {
   const commentsText = comments.slice(0, 10).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');

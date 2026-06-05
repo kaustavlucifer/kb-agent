@@ -184,6 +184,7 @@ export function multiSelect(id, label, options, selected, onChange) {
       setTimeout(() => searchInput.focus(), 0);
       removeDismiss();
       _dismiss = ev => {
+        if (!wrap.isConnected) { removeDismiss(); return; }
         if (!wrap.contains(ev.target)) {
           dropdown.style.display = 'none';
           removeDismiss();
