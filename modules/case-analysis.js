@@ -30,7 +30,12 @@ export function mount(container) {
   _unsubs.push(subscribe('case.progress', () => { if (_container && getState('case.view') === 'analyzing') renderByView(); }));
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
   _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
-  _unsubs.push(subscribe('case.topArticles', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.topArticles', () => {
+    if (!_container) return;
+    const view = getState('case.view');
+    if (view === 'streaming') renderStreaming();
+    else if (view === 'result') renderByView();
+  }));
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
     if (!_container || getState('case.view') !== 'streaming') return;
     if (_streamThrottle) return;
@@ -545,8 +550,14 @@ function renderResult() {
 
     if (!draftCollapsed) {
       const draftBody = h('div', { style: { padding: '14px 16px' } });
+      if (draft.title) {
+        draftBody.appendChild(renderEditableSection({ heading: 'Title', body: draft.title }, 0, 'draft'));
+      }
+      if (draft.summary) {
+        draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: draft.summary }, 1, 'draft'));
+      }
       (draft.sections || []).forEach((sec, idx) => {
-        draftBody.appendChild(renderEditableSection(sec, idx, 'draft'));
+        draftBody.appendChild(renderEditableSection(sec, idx + 2, 'draft'));
       });
       draftCard.appendChild(draftBody);
     }
@@ -729,35 +740,35 @@ function renderSidebarHypotheses(hypotheses) {
 
 async function handleHypothesis(index, status) {
   const hypotheses = getState('case.hypotheses') || [];
-  if (index >= 0 && index < hypotheses.length) {
-    hypotheses[index].status = status;
-    setState('case.hypotheses', [...hypotheses]);
-    renderByView();
+  if (index < 0 || index >= hypotheses.length) return;
 
-    const allDecided = hypotheses.every(h => h.status !== 'pending');
-    if (allDecided) {
-      toast('Refining content based on hypothesis decisions…', 'info');
-      try {
-        const result = getState('case.result');
-        const resp = await chrome.runtime.sendMessage({
-          action: 'REFINE_WITH_HYPOTHESES',
-          hypotheses,
-          structured: result?.structured || null,
-          caseAbstract: result?.caseAbstract || null
-        });
-        if (resp?.success && resp.refined) {
-          const currentResult = getState('case.result');
-          if (currentResult?.structured) {
-            currentResult.structured = { ...currentResult.structured, ...resp.refined };
-            setState('case.result', { ...currentResult });
-          }
-          toast('Content refined with hypothesis decisions.', 'success');
-          renderByView();
-        }
-      } catch (e) {
-        toast('Refinement failed: ' + e.message, 'error');
+  hypotheses[index].status = status;
+  setState('case.hypotheses', [...hypotheses]);
+  renderByView();
+
+  // Trigger refinement immediately on each decision
+  toast(`Hypothesis ${status}. Refining content…`, 'info');
+  try {
+    const result = getState('case.result');
+    const resp = await chrome.runtime.sendMessage({
+      action: 'REFINE_WITH_HYPOTHESES',
+      hypotheses,
+      structured: result?.structured || null,
+      caseAbstract: result?.caseAbstract || null
+    });
+    if (resp?.success && resp.refined) {
+      const currentResult = getState('case.result');
+      if (currentResult?.structured) {
+        currentResult.structured = { ...currentResult.structured, ...resp.refined };
+        setState('case.result', { ...currentResult });
       }
+      toast('Content refined.', 'success');
+      renderByView();
+    } else {
+      toast(resp?.error || 'Refinement returned no changes.', 'error');
     }
+  } catch (e) {
+    toast('Refinement failed: ' + e.message, 'error');
   }
 }
 

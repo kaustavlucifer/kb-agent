@@ -150,12 +150,16 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   }
 
   if (!topArticles?.length) {
-    topArticles = candidates.slice(0, TOP_K);
+    topArticles = candidates.slice(0, TOP_K).map((a, i) => ({
+      ...a,
+      _relevanceScore: Math.max(40, 70 - (i * 8)),
+      _relevanceReason: 'Ranked by SOSL search relevance'
+    }));
   }
 
   const scoredArticles = topArticles.map(a => ({
     id: a.Id, title: a.Title, articleNumber: a.ArticleNumber,
-    score: a._relevanceScore || null,
+    score: a._relevanceScore != null ? a._relevanceScore : null,
     reason: a._relevanceReason || '',
     publishStatus: a.publishStatus || a.PublishStatus || 'Online',
     validationStatus: a.validationStatus || a.ValidationStatus || '',
