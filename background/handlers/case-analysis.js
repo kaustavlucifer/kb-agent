@@ -1,5 +1,5 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
-import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, mapWithConcurrency, stripHtml } from '../../shared/api.js';
+import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
@@ -294,7 +294,7 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
   const seen = new Set();
   const results = [];
   const uniqueQueries = [...new Set(
-    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= 10)
+    queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= 10)
   )].slice(0, MAX_SOSL_QUERIES);
 
   let ptFilter = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
@@ -391,12 +391,13 @@ Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendati
 
 async function searchProductDocs(apiBase, sid, queries) {
   const uniqueQueries = [...new Set(
-    queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').trim()).filter(Boolean)
+    queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2)
   )].slice(0, 3);
   const seen = new Set();
   const results = [];
-  for (const q of uniqueQueries) {
-    if (results.length >= 5) break;
+
+  await mapWithConcurrency(uniqueQueries, 3, async (q) => {
+    if (results.length >= 5) return;
     try {
       const records = await sfSearch(apiBase, sid,
         `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,UrlName,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 3`
@@ -414,7 +415,7 @@ async function searchProductDocs(apiBase, sid, queries) {
         }
       }
     } catch {}
-  }
+  });
   return results.slice(0, 5);
 }
 

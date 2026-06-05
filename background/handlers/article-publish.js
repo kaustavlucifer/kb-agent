@@ -41,14 +41,30 @@ function sectionsToHtml(sections) {
 }
 
 function markdownToHtml(text) {
-  return String(text || '').split('\n').map(line => {
-    if (line.startsWith('## ')) return `<h3>${escapeHtml(line.slice(3))}</h3>`;
-    if (line.startsWith('# ')) return `<h2>${escapeHtml(line.slice(2))}</h2>`;
-    if (/^\d+\.\s/.test(line)) return `<li>${escapeHtml(line.replace(/^\d+\.\s/, ''))}</li>`;
-    if (line.startsWith('- ')) return `<li>${escapeHtml(line.slice(2))}</li>`;
-    if (line.trim()) return `<p>${escapeHtml(line)}</p>`;
-    return '';
-  }).join('\n');
+  const lines = String(text || '').split('\n');
+  const output = [];
+  let inList = null;
+  for (const line of lines) {
+    const isOl = /^\d+\.\s/.test(line);
+    const isUl = line.startsWith('- ');
+    if (isOl || isUl) {
+      const listType = isOl ? 'ol' : 'ul';
+      if (inList !== listType) {
+        if (inList) output.push(`</${inList}>`);
+        output.push(`<${listType}>`);
+        inList = listType;
+      }
+      const content = isOl ? line.replace(/^\d+\.\s/, '') : line.slice(2);
+      output.push(`<li>${escapeHtml(content)}</li>`);
+    } else {
+      if (inList) { output.push(`</${inList}>`); inList = null; }
+      if (line.startsWith('## ')) output.push(`<h3>${escapeHtml(line.slice(3))}</h3>`);
+      else if (line.startsWith('# ')) output.push(`<h2>${escapeHtml(line.slice(2))}</h2>`);
+      else if (line.trim()) output.push(`<p>${escapeHtml(line)}</p>`);
+    }
+  }
+  if (inList) output.push(`</${inList}>`);
+  return output.join('\n');
 }
 
 const _ptLookupCache = new Map();

@@ -1,7 +1,7 @@
 import { detectSession } from '../shared/auth.js';
-import { pingGateway, callClaude, extractText } from '../shared/gateway.js';
+import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
+import { sfQuery, sfQueryAll, escapeSoql, sanitizeId } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS } from '../shared/config.js';
 import { GUIDE_GENERATION } from '../data/writing_guide_prompts.js';
 
@@ -57,13 +57,14 @@ async function handleMessage(msg) {
 }
 
 async function generateArticleUpdate(msg) {
-  const { articleId, articleTitle, articleNumber, caseSubject, caseAbstract } = msg;
+  const { articleTitle, caseSubject, caseAbstract } = msg;
+  const safeId = sanitizeId(msg.articleId);
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
 
   let articleBody = '';
   try {
-    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${articleId}' LIMIT 1`;
+    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (records.length) {
       const r = records[0];
@@ -74,10 +75,9 @@ async function generateArticleUpdate(msg) {
   if (!articleBody) articleBody = `Title: ${articleTitle}\n(Article body could not be fetched)`;
 
   try {
-    const guideRules = GUIDE_GENERATION;
     const resp = await callClaude({
       system: `You are rewriting a Salesforce KB article to incorporate new case context. Follow Agentforce writing rules:
-${guideRules}
+${GUIDE_GENERATION}
 
 Return the FULL rewritten article. Use EXACTLY these 4 fields.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
@@ -86,7 +86,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
       temperature: 0.2
     });
     const text = extractText(resp);
-    const parsed = text ? JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || 'null') : null;
+    const parsed = extractJson(text);
     if (!parsed) return { success: false, error: 'Could not parse AI response' };
     return { success: true, rewrite: parsed };
   } catch (e) {
@@ -118,7 +118,7 @@ Return the refined article in the same JSON structure: {"title":"...","summary":
       temperature: 0.2
     });
     const text = extractText(resp);
-    const parsed = text ? JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || 'null') : null;
+    const parsed = extractJson(text);
     if (!parsed) return { success: false, error: 'Could not parse refined content' };
 
     const refined = {};

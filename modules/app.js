@@ -110,6 +110,9 @@ function activateTab(tabId) {
     if (gen !== _tabGen) return;
     _activeModule = m;
     m.mount(_tabContent);
+  }).catch(e => {
+    if (gen !== _tabGen) return;
+    _tabContent.textContent = `Module load failed: ${e.message}`;
   });
 }
 

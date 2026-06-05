@@ -60,6 +60,7 @@ export function unmount() {
   if (_typeaheadTimer) { clearTimeout(_typeaheadTimer); _typeaheadTimer = null; }
   _container = null;
   _collapsedSections = {};
+  _editingSections.clear();
 }
 
 async function loadRecentCases() {
@@ -365,11 +366,6 @@ function renderStreamingSuggestion(text, container) {
     container.appendChild(sugEl);
   });
 
-  // If we're still mid-stream (incomplete last suggestion)
-  const lastContentComplete = contents.length >= titles.length;
-  if (!lastContentComplete && titles.length > contents.length) {
-    // Already shown the spinner above
-  }
 }
 
 function renderStreamingDraft(text, container) {
@@ -716,7 +712,7 @@ function renderSidebarQuality(structured) {
 function renderSidebarHypotheses(hypotheses) {
   const isCollapsed = _collapsedSections['hypotheses'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
-  const pendingCount = hypotheses.filter(h => h.status === 'pending').length;
+  const pendingCount = hypotheses.filter(hyp => hyp.status === 'pending').length;
   const headerLabel = _hypothesisRefining ? 'Refining…' : `Hypotheses (${pendingCount} pending)`;
   const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['hypotheses'] = !_collapsedSections['hypotheses']; renderByView(); } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: _hypothesisRefining ? 'var(--primary)' : 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' } }, _hypothesisRefining ? spinner('sm') : null, headerLabel),
@@ -767,7 +763,7 @@ async function handleHypothesis(index, status) {
   const updated = hypotheses.map((hyp, i) => i === index ? { ...hyp, status } : hyp);
   setState('case.hypotheses', updated);
 
-  const allDecided = hypotheses.every(h => h.status !== 'pending');
+  const allDecided = updated.every(hyp => hyp.status !== 'pending');
   if (!allDecided) {
     renderByView();
     return;
@@ -1090,8 +1086,8 @@ function refineSection(section) {
         focus
       });
       if (resp?.success && resp.refined) {
-        if (section.content) section.content = resp.refined;
-        else if (section.body) section.body = resp.refined;
+        if ('content' in section) section.content = resp.refined;
+        else if ('body' in section) section.body = resp.refined;
         renderByView();
         toast('Section refined.', 'success');
       } else {
@@ -1157,10 +1153,12 @@ async function triggerUpdateForArticle(article) {
 function overrideDecision(newAction) {
   const result = getState('case.result');
   if (!result) return;
-  const structured = result.structured || result;
-  structured.action = newAction;
-  structured.summary = `User override: ${newAction === 'CREATE_NEW' ? 'Creating new article.' : 'Suggesting updates.'}`;
-  setState('case.result', { ...result, structured });
+  const newStructured = {
+    ...(result.structured || {}),
+    action: newAction,
+    summary: `User override: ${newAction === 'CREATE_NEW' ? 'Creating new article.' : 'Suggesting updates.'}`
+  };
+  setState('case.result', { ...result, structured: newStructured });
   toast(`Switched to ${newAction === 'CREATE_NEW' ? 'Create New' : 'Update Existing'} mode. Re-analyze to generate content.`, 'info');
   renderByView();
 }
