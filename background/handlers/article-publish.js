@@ -1,5 +1,5 @@
 import { detectSession } from '../../shared/auth.js';
-import { sfGet, sfPost, sanitizeId, escapeSoql } from '../../shared/api.js';
+import { sfGet, sfPost, sanitizeId } from '../../shared/api.js';
 import { SF_API_VERSION } from '../../shared/config.js';
 
 const KNOWLEDGE_ARTICLE_RT_ID = '012Hx00000002oEIAQ';

@@ -6,7 +6,10 @@ import { resolveTargetPts } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { WRITING_GUIDE } from '../../data/writing_guide.js';
 
-const WRITING_GUIDE_EXCERPT = WRITING_GUIDE.slice(0, 3000);
+// Smart slices of writing guide for different prompt contexts
+const GUIDE_GENERATION = WRITING_GUIDE.slice(0, WRITING_GUIDE.indexOf('Technical Details')).trim();
+const GUIDE_SCORING = `KEY AGF STANDARDS: Titles must be product-specific. Use H2/H3 headers (not bold) for chunking. Summaries 2-4 sentences. Description must state the problem+WHY. Resolution must start with what steps accomplish, then numbered steps. Explain acronyms. After code blocks add plain-text explanation. Tables use text not visual indicators. Give real-life examples. Each FAQ item must be very specific in intent and solution.`;
+const GUIDE_DECISION = WRITING_GUIDE.slice(0, WRITING_GUIDE.indexOf('Content Best Practices')).trim().slice(0, 1200);
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];
@@ -100,9 +103,6 @@ export async function handleAnalyze(port, msg) {
   let topArticles;
   const aiScoringPrompt = {
     system: `You are assessing KB article relevance to a support case. Read the FULL content of each article (Title, Summary, Description, Resolution) carefully.
-
-AGENTFORCE WRITING GUIDE (articles optimized for this standard are higher quality):
-${WRITING_GUIDE_EXCERPT.slice(0, 1200)}
 
 Score EACH article 0-100 for relevance. Scoring criteria:
 - 80-100: Article directly addresses the SAME error, symptom, or exact scenario in the case
@@ -260,9 +260,6 @@ async function extractIntents(caseRecord, comments) {
   const resp = await callClaudeFast({
     system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
 
-WRITING GUIDE CONTEXT (use for query formulation):
-${WRITING_GUIDE_EXCERPT.slice(0, 800)}
-
 Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}`,
     messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
     maxTokens: 800,
@@ -312,47 +309,43 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
     queries.map(q => q.replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, ' ').replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= 10)
   )].slice(0, MAX_SOSL_QUERIES);
 
-  // Build P&T WHERE clause from routing
   let ptFilter = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
   if (ptPatterns.length && ptPatterns.length <= 5) {
     const ptClauses = ptPatterns.map(p => `Product_And_Topic__r.Name = '${p.replace(/'/g, "\\'")}'`);
     ptFilter = `(${ptClauses.join(' OR ')})`;
   }
 
-  for (const q of uniqueQueries) {
-    if (results.length >= 20) break;
+  const addRecords = (records) => {
+    for (const r of records) {
+      if (!seen.has(r.Id)) {
+        seen.add(r.Id);
+        results.push({ ...r, topicName: r.Product_And_Topic__r?.Name || '' });
+      }
+    }
+  };
+
+  // Run SOSL queries concurrently (3 at a time)
+  await mapWithConcurrency(uniqueQueries, 3, async (q) => {
+    if (results.length >= 20) return;
     try {
       const records = await sfSearch(apiBase, sid,
         `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`
       );
-      for (const r of records) {
-        if (!seen.has(r.Id)) {
-          seen.add(r.Id);
-          results.push({
-            ...r,
-            topicName: r.Product_And_Topic__r?.Name || ''
-          });
-        }
-      }
+      addRecords(records);
     } catch {}
-  }
+  });
 
-  // If P&T-scoped search returned too few, broaden to all Industry/Revenue
+  // Broaden if too few results
   if (results.length < 5 && ptPatterns.length) {
-    for (const q of uniqueQueries.slice(0, 3)) {
-      if (results.length >= 15) break;
+    await mapWithConcurrency(uniqueQueries.slice(0, 3), 3, async (q) => {
+      if (results.length >= 15) return;
       try {
         const records = await sfSearch(apiBase, sid,
           `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
         );
-        for (const r of records) {
-          if (!seen.has(r.Id)) {
-            seen.add(r.Id);
-            results.push({ ...r, topicName: r.Product_And_Topic__r?.Name || '' });
-          }
-        }
+        addRecords(records);
       } catch {}
-    }
+    });
   }
 
   return results;
@@ -499,7 +492,7 @@ async function scoreArticleForCaseScan(article) {
   const resp = await callClaudeFast({
     system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
 
-KEY AGF STANDARDS: Titles must be product-specific. Use H2/H3 headers (not bold) for chunking. Summaries 2-4 sentences. Description must state the problem+WHY. Resolution must start with what steps accomplish, then numbered steps. Explain acronyms. After code blocks add plain-text explanation. Tables use text not visual indicators. Give real-life examples.
+${GUIDE_SCORING}
 
 Score this article. Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
 ${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
@@ -542,7 +535,7 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
         system: `You are an expert KB editor. Given an existing article and a support case, produce a FULL REWRITTEN version of the article that incorporates learnings from the case.
 
 AGENTFORCE WRITING GUIDE (follow strictly):
-${WRITING_GUIDE_EXCERPT}
+${GUIDE_GENERATION}
 
 KEY RULES:
 - Title: product-specific, describes exact issue
@@ -591,8 +584,7 @@ async function makeDecision(caseRecord, abstract, topArticles) {
   const resp = await callClaudeFast({
     system: `You decide the KB action for a support case given existing related articles.
 
-AGENTFORCE WRITING GUIDE CONTEXT (use to assess whether existing articles meet the standard):
-${WRITING_GUIDE_EXCERPT.slice(0, 1000)}
+${GUIDE_DECISION}
 
 Choose ONE action:
 
@@ -629,7 +621,7 @@ async function generateNewArticleStreaming(caseRecord, comments, abstract, inten
     system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption.
 
 AGENTFORCE WRITING GUIDE (follow strictly):
-${WRITING_GUIDE_EXCERPT}
+${GUIDE_GENERATION}
 
 KEY RULES:
 - TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario.

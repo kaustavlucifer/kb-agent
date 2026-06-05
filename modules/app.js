@@ -12,6 +12,7 @@ const TABS = [
 
 let _activeModule = null;
 let _tabContent = null;
+let _tabGen = 0;
 
 async function init() {
   const hashTab = location.hash.replace('#', '');
@@ -92,23 +93,24 @@ function activateTab(tabId) {
 
   if (_activeModule && _activeModule.unmount) {
     _activeModule.unmount();
+    _activeModule = null;
   }
   _tabContent.textContent = '';
 
-  switch (tabId) {
-    case 'case-analysis':
-      import('./case-analysis.js').then(m => { _activeModule = m; m.mount(_tabContent); });
-      break;
-    case 'kb-articles':
-      import('./kb-scorer.js').then(m => { _activeModule = m; m.mount(_tabContent); });
-      break;
-    case 'coverage':
-      import('./coverage.js').then(m => { _activeModule = m; m.mount(_tabContent); });
-      break;
-    case 'dedup':
-      import('./dedup.js').then(m => { _activeModule = m; m.mount(_tabContent); });
-      break;
-  }
+  const gen = ++_tabGen;
+  const moduleMap = {
+    'case-analysis': './case-analysis.js',
+    'kb-articles': './kb-scorer.js',
+    'coverage': './coverage.js',
+    'dedup': './dedup.js'
+  };
+  const path = moduleMap[tabId];
+  if (!path) return;
+  import(path).then(m => {
+    if (gen !== _tabGen) return;
+    _activeModule = m;
+    m.mount(_tabContent);
+  });
 }
 
 async function checkConnections() {

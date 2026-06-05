@@ -223,7 +223,8 @@ export function resolveTargetPts(caseProduct, caseSubject, caseDescription) {
     }
 
     if (score > 0) {
-      scores.push({ verticalId, score, ptPatterns: config.ptPatterns });
+      const normalized = (score / config.keywords.length) * 10;
+      scores.push({ verticalId, score: normalized, ptPatterns: config.ptPatterns });
     }
   }
 

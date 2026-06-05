@@ -79,6 +79,8 @@ export async function callClaudeFast(opts) {
   return callClaude({ ...opts, model: opts.model || FAST_MODEL });
 }
 
+const STREAM_IDLE_TIMEOUT_MS = 30_000;
+
 export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError }) {
   await acquireSlot();
   const t = token || await getToken();
@@ -93,10 +95,12 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   if (system) body.system = system;
   if (temperature != null) body.temperature = temperature;
 
+  const controller = new AbortController();
   const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
     method: 'POST',
     headers: buildHeaders(t),
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: controller.signal
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
@@ -110,26 +114,34 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let idleTimer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
 
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const payload = line.slice(6).trim();
-      if (payload === '[DONE]') continue;
-      try {
-        const event = JSON.parse(payload);
-        if (event.type === 'content_block_delta' && event.delta?.text) {
-          fullText += event.delta.text;
-          if (onDelta) onDelta(event.delta.text, fullText);
-        }
-      } catch {}
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          const event = JSON.parse(payload);
+          if (event.type === 'content_block_delta' && event.delta?.text) {
+            fullText += event.delta.text;
+            if (onDelta) onDelta(event.delta.text, fullText);
+          }
+        } catch {}
+      }
     }
+  } finally {
+    clearTimeout(idleTimer);
   }
 
   if (onDone) onDone(fullText);

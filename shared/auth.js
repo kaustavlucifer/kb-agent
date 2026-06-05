@@ -175,6 +175,7 @@ export function isCaseAnalysisAllowed(caseRecord) {
 }
 
 const _memoCache = new Map();
+const _MEMO_MAX_SIZE = 20;
 
 function memoize(key, scope, ttl, fn) {
   const fullKey = `${key}:${scope}`;
@@ -182,7 +183,14 @@ function memoize(key, scope, ttl, fn) {
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
   const promise = fn().then(v => {
     _memoCache.set(fullKey, { value: Promise.resolve(v), ts: Date.now() });
+    if (_memoCache.size > _MEMO_MAX_SIZE) {
+      const oldest = _memoCache.keys().next().value;
+      _memoCache.delete(oldest);
+    }
     return v;
+  }).catch(e => {
+    _memoCache.delete(fullKey);
+    throw e;
   });
   _memoCache.set(fullKey, { value: promise, ts: Date.now() });
   return promise;

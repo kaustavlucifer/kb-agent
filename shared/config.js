@@ -21,8 +21,6 @@ export const MAX_BODY_CHARS = 4000;
 export const DEDUP_BATCH_SIZE = 20;
 export const DEDUP_CONCURRENCY = 5;
 
-export const BROADEN_CYCLE_CAP = 3;
-export const RELEVANCE_CUTOFF = 0.55;
 
 export const SCORE_HIGH_THRESHOLD = 80;
 export const SCORE_MID_THRESHOLD = 60;

@@ -11,6 +11,8 @@ let _streamThrottle = null;
 let _editingSections = new Set();
 
 export function mount(container) {
+  _unsubs.forEach(u => u());
+  _unsubs = [];
   _container = container;
   if (!getState('case.view')) setState('case.view', 'idle');
 
@@ -762,8 +764,8 @@ async function handleHypothesis(index, status) {
   const hypotheses = getState('case.hypotheses') || [];
   if (index < 0 || index >= hypotheses.length) return;
 
-  hypotheses[index].status = status;
-  setState('case.hypotheses', [...hypotheses]);
+  const updated = hypotheses.map((hyp, i) => i === index ? { ...hyp, status } : hyp);
+  setState('case.hypotheses', updated);
 
   const allDecided = hypotheses.every(h => h.status !== 'pending');
   if (!allDecided) {
@@ -1128,17 +1130,19 @@ async function triggerUpdateForArticle(article) {
       caseAbstract: result.caseAbstract
     });
     if (resp?.success && resp.rewrite) {
-      const structured = result.structured || {};
-      if (!structured.suggestions) structured.suggestions = [];
-      structured.suggestions.push({
+      const newSuggestion = {
         ...resp.rewrite,
         articleId: article.id,
         articleNumber: article.articleNumber,
         articleTitle: article.title,
         isFullRewrite: true,
         changesSummary: 'Manual update triggered from sidebar'
-      });
-      setState('case.result', { ...result, structured });
+      };
+      const newStructured = {
+        ...(result.structured || {}),
+        suggestions: [...(result.structured?.suggestions || []), newSuggestion]
+      };
+      setState('case.result', { ...result, structured: newStructured });
       toast('Rewrite generated.', 'success');
     } else {
       toast(resp?.error || 'Generation failed.', 'error');
@@ -1161,10 +1165,7 @@ function overrideDecision(newAction) {
   renderByView();
 }
 
-function openArticle(article) {
-  const url = article.url || `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${article.id}/view`;
-  chrome.tabs.create({ url });
-}
+
 
 function groupByArticle(suggestions) {
   const groups = {};
@@ -1335,16 +1336,14 @@ function onPortMessage(msg) {
     case 'suggestion-ready': {
       const existing = getState('case.suggestions') || [];
       setState('case.suggestions', [...existing, ...msg.suggestions]);
-      const deltas = getState('case.suggestionDeltas') || {};
-      delete deltas[msg.articleId];
-      setState('case.suggestionDeltas', { ...deltas });
+      const { [msg.articleId]: _ready, ...restReady } = getState('case.suggestionDeltas') || {};
+      setState('case.suggestionDeltas', restReady);
       if (getState('case.view') === 'streaming') renderStreaming();
       break;
     }
     case 'suggestion-error': {
-      const deltas = getState('case.suggestionDeltas') || {};
-      delete deltas[msg.articleId];
-      setState('case.suggestionDeltas', { ...deltas });
+      const { [msg.articleId]: _err, ...restErr } = getState('case.suggestionDeltas') || {};
+      setState('case.suggestionDeltas', restErr);
       if (getState('case.view') === 'streaming') renderStreaming();
       break;
     }
@@ -1362,7 +1361,6 @@ function onPortMessage(msg) {
         setState('case.result', msg);
         setState('case.view', 'result');
         saveRecentCase(msg);
-        setTimeout(() => { if (_container) renderByView(); }, 60);
       }
       break;
     case 'error':

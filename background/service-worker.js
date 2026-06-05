@@ -2,7 +2,7 @@ import { detectSession } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql } from '../shared/api.js';
-import { STORAGE_KEYS } from '../shared/config.js';
+import { STORAGE_KEYS, CACHE_TTL_MS } from '../shared/config.js';
 import { WRITING_GUIDE } from '../data/writing_guide.js';
 
 import { handleAnalyze, handleThemeVolume, handleBroaden } from './handlers/case-analysis.js';
@@ -295,18 +295,27 @@ function mapArticleRecord(r) {
 
 (async () => {
   try {
+    // Skip if data is still fresh (avoids re-fetching on every SW restart)
+    const cached = await localGet([STORAGE_KEYS.ALL_ARTICLES_AT]);
+    const cachedAt = cached[STORAGE_KEYS.ALL_ARTICLES_AT] || 0;
+    if (Date.now() - cachedAt < CACHE_TTL_MS) {
+      console.log('[KB-Agent] Preloaded articles still fresh, skipping fetch.');
+      return;
+    }
+
     const session = await detectSession();
     if (!session.sid) return;
 
     const META_FIELDS = 'Id, KnowledgeArticleId, ArticleNumber, Title, Summary, UrlName, PublishStatus, ValidationStatus, LastPublishedDate, LastModifiedDate, Contains_Image__c, Contains_Video__c, Article_Length__c, ArticleTotalViewCount, ArticleCaseAttachCount, Product_And_Topic__r.Name';
 
-    const tier1Records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
-    );
-
-    const tier2Records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
-    );
+    const [tier1Records, tier2Records] = await Promise.all([
+      sfQueryAll(session.apiBase, session.sid,
+        `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+      ),
+      sfQueryAll(session.apiBase, session.sid,
+        `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+      )
+    ]);
 
     const tier1 = tier1Records.map(mapArticleRecord);
     const tier1Ids = new Set(tier1.map(a => a.id));
