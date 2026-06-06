@@ -1,10 +1,10 @@
 export const KI_CLOUD_MAPPING = {
   'health-cloud': {
-    cloud: 'Health Cloud',
+    cloud: 'Healthcare & Life Sciences',
     ptPatterns: ['Industry-Health Cloud', 'Industry-Health & Insurance', 'Industry-Life Sciences']
   },
   'life-sciences': {
-    cloud: 'Health Cloud',
+    cloud: 'Healthcare & Life Sciences',
     ptPatterns: ['Industry-Life Sciences']
   },
   'financial-services': {
@@ -16,27 +16,27 @@ export const KI_CLOUD_MAPPING = {
     ptPatterns: ['Industry-Communication Cloud']
   },
   'omnistudio': {
-    cloud: 'Platform',
+    cloud: 'Industries',
     ptPatterns: ['Industry-OmniStudio', 'Revenue Cloud (Core)-OmniStudio']
   },
   'revenue-cloud-core': {
-    cloud: 'Revenue Cloud',
+    cloud: 'Revenue',
     ptPatterns: ['Revenue Cloud (Core)']
   },
   'revenue-lifecycle': {
-    cloud: 'Revenue Cloud',
+    cloud: 'Revenue',
     ptPatterns: ['Revenue Lifecycle Management']
   },
   'salesforce-cpq': {
-    cloud: 'Revenue Cloud',
+    cloud: 'Revenue',
     ptPatterns: ['Revenue-Salesforce CPQ', 'Revenue-CPQ Developer Support']
   },
   'salesforce-billing': {
-    cloud: 'Revenue Cloud',
+    cloud: 'Revenue',
     ptPatterns: ['Revenue-Salesforce Billing', 'Revenue-Salesforce Subscription Management']
   },
   'document-generation': {
-    cloud: 'Platform',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Document Generation', 'Revenue-Document Generation']
   },
   'rcg': {
@@ -48,27 +48,27 @@ export const KI_CLOUD_MAPPING = {
     ptPatterns: ['Industry-Retail and Consumer Goods']
   },
   'energy-utilities': {
-    cloud: 'Energy & Utilities',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Energy & Utilities Cloud']
   },
   'media-cloud': {
-    cloud: 'Media',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Media Cloud']
   },
   'education-cloud': {
-    cloud: 'Education',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Education Cloud', 'Industry-Education Data Architecture (EDA)']
   },
   'loyalty': {
-    cloud: 'Platform',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Loyalty Management']
   },
   'manufacturing': {
-    cloud: 'Manufacturing',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Manufacturing Cloud']
   },
   'public-sector': {
-    cloud: 'Public Sector',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Public Sector Solutions']
   },
   'nonprofit': {
@@ -76,7 +76,7 @@ export const KI_CLOUD_MAPPING = {
     ptPatterns: ['Industry-Nonprofit Cloud', 'Industry-Nonprofit Packages (Other SFDO)']
   },
   'bre': {
-    cloud: 'Platform',
+    cloud: 'Industries',
     ptPatterns: ['Industry-Business Rules Engine (BRE)', 'Revenue Cloud (Core)-Business Rules Engine']
   },
   'cpq-order-management': {

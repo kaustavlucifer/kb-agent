@@ -1262,7 +1262,7 @@ function renderFullRewriteCard(rewrite) {
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
       h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${(rewrite.sections || []).length} sections`),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineSection(rewrite) }, 'Refine'),
+      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
     )
   );
@@ -1396,6 +1396,71 @@ function toggleEdit(elementId, sectionData) {
   } else {
     _editingSections.add(elementId);
     renderByView();
+  }
+}
+
+function refineRewrite(rewrite) {
+  const sectionsText = (rewrite.sections || []).map(s => `## ${s.heading}\n${s.body}`).join('\n\n');
+  const fullContent = `Title: ${rewrite.title || ''}\nSummary: ${rewrite.summary || ''}\n\n${sectionsText}`;
+
+  const inputEl = h('input', { type: 'text', class: 'input', placeholder: 'Focus on… (e.g. "make more generic", "add steps", "simplify resolution")', style: { width: '100%', marginBottom: '12px' } });
+  const bodyEl = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' } }, `Refining entire article: ${rewrite.title || rewrite.articleTitle || ''}`),
+    h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '12px' } }, `${(rewrite.sections || []).length} sections will be re-generated with your focus applied.`),
+    inputEl,
+    h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
+      h('button', { class: 'btn btn--primary btn--sm', onClick: doRefine }, 'Refine Article')
+    )
+  );
+  const { close } = modal('Refine Article', bodyEl);
+  inputEl.focus();
+  inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doRefine(); });
+
+  async function doRefine() {
+    const focus = inputEl.value.trim();
+    close();
+    toast('Refining article…', 'info');
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        action: 'REFINE_SECTION',
+        content: fullContent,
+        title: rewrite.title || rewrite.articleTitle || '',
+        focus
+      });
+      if (resp?.success && resp.refined) {
+        const lines = resp.refined.split('\n');
+        let newTitle = rewrite.title;
+        let newSummary = rewrite.summary;
+        const newSections = [];
+        let currentHeading = null;
+        let currentBody = [];
+
+        for (const line of lines) {
+          if (line.startsWith('## ')) {
+            if (currentHeading) newSections.push({ heading: currentHeading, body: currentBody.join('\n').trim() });
+            currentHeading = line.slice(3).trim();
+            currentBody = [];
+          } else if (line.startsWith('Title: ') && !currentHeading) {
+            newTitle = line.slice(7).trim();
+          } else if (line.startsWith('Summary: ') && !currentHeading) {
+            newSummary = line.slice(9).trim();
+          } else {
+            currentBody.push(line);
+          }
+        }
+        if (currentHeading) newSections.push({ heading: currentHeading, body: currentBody.join('\n').trim() });
+
+        rewrite.title = newTitle || rewrite.title;
+        rewrite.summary = newSummary || rewrite.summary;
+        if (newSections.length) rewrite.sections = newSections;
+        renderByView();
+        toast('Article refined.', 'success');
+      } else {
+        toast(resp?.error || 'Refine failed.', 'error');
+      }
+    } catch (e) {
+      toast('Refine error: ' + e.message, 'error');
+    }
   }
 }
 

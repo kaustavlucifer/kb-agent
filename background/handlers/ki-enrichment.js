@@ -5,7 +5,7 @@ import { SF_API_VERSION } from '../../shared/config.js';
 import { KI_CLOUD_MAPPING } from '../../data/ki_mapping.js';
 
 const KI_FIELDS = 'Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Category__r.Name, Workaround__c, Work_ID__c, Reporting_User_Count__c';
-const KI_ACTIVE_STATUSES = ['New', 'Under Investigation', 'Solution in Progress', 'Solution Scheduled', 'Monitoring'];
+const KI_ACTIVE_STATUSES = ['In Review', 'Solution in Progress', 'Solution Scheduled', 'Solution Deploying'];
 
 export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubject) {
   const kiSession = await detectKiSession();
@@ -43,8 +43,9 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
     await mapWithConcurrency(searchTerms.slice(0, 2), 2, async (term) => {
       if (candidates.length >= 10) return;
       try {
+        const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
         const records = await sfSearch(apiBase, sid,
-          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN ('New','Under Investigation','Solution in Progress','Solution Scheduled','Monitoring')) LIMIT 5`
+          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter})) LIMIT 5`
         );
         for (const r of records) {
           if (!candidates.some(c => c.Id === r.Id)) {
