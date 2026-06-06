@@ -43,6 +43,7 @@ export async function pingGateway(token) {
 }
 
 export async function callClaude({ system, messages, maxTokens, model, token, temperature, signal }) {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
@@ -83,6 +84,7 @@ export async function callClaudeFast(opts) {
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
 export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError, signal }) {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');

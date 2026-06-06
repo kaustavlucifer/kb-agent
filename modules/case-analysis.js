@@ -297,13 +297,10 @@ function renderStreaming() {
   } else {
     const sidebar = _container.querySelector('#case-stream-sidebar');
     if (sidebar) {
-      const existingCount = sidebar.querySelectorAll('[data-article-id]').length;
-      if (existingCount !== topArticles.length || !existingCount) {
-        sidebar.textContent = '';
-        sidebar.appendChild(renderSidebarArticles(topArticles));
-        const ki = getState('case.knownIssues') || [];
-        if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
-      }
+      sidebar.textContent = '';
+      sidebar.appendChild(renderSidebarArticles(topArticles));
+      const ki = getState('case.knownIssues') || [];
+      if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
     }
   }
 
@@ -1558,7 +1555,7 @@ function startAnalysis(caseId) {
     if (gen !== _analysisGen) return;
     _port = null;
     const view = getState('case.view');
-    if (view === 'analyzing' || view === 'streaming') {
+    if (view === 'analyzing' || view === 'progressive' || view === 'streaming') {
       const suggestions = getState('case.suggestions') || [];
       if (suggestions.length) {
         setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Connection lost. Showing partial results.', suggestions }, caseNumber: getState('case.progress')?.caseNumber, subject: '' });

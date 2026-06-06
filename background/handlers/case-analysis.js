@@ -15,12 +15,6 @@ function getGuardRailExtraFields(guardRailFields) {
 }
 
 export async function handleAnalyze(port, msg) {
-  const session = await detectSession();
-  if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
-
-  const send = (data) => { try { port.postMessage(data); } catch {} };
-  const caseId = sanitizeId(msg.caseId);
-
   const abortController = new AbortController();
   const signal = abortController.signal;
   let stopped = false;
@@ -36,6 +30,12 @@ export async function handleAnalyze(port, msg) {
     stopped = true;
     abortController.abort();
   });
+
+  const session = await detectSession();
+  if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
+
+  const send = (data) => { try { port.postMessage(data); } catch {} };
+  const caseId = sanitizeId(msg.caseId);
 
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
 
