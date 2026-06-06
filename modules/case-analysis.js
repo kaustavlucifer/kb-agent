@@ -473,64 +473,76 @@ function renderStreaming() {
 function renderStreamingSuggestion(text, container) {
   const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
 
-  const titleMatch = cleaned.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  const changesMatch = cleaned.match(/"changesSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-
-  const completeSections = [];
-  const completeRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  let m;
-  while ((m = completeRegex.exec(cleaned)) !== null) {
-    completeSections.push({ label: m[1], body: m[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true });
-  }
-
-  let inProgressSection = null;
-  const partialMatch = cleaned.match(/\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)$/);
-  if (partialMatch && !completeSections.some(s => s.label === partialMatch[1])) {
-    inProgressSection = { label: partialMatch[1], body: partialMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') };
-  }
-
-  if (!titleMatch && cleaned.length < 30) {
+  if (cleaned.length < 20) {
     container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, spinner('sm'), h('span', null, 'Generating…')));
     return;
   }
 
-  const expectedSections = ['Title', 'Summary', 'Description', 'Resolution'];
-  for (const name of expectedSections) {
+  function extractField(fieldName) {
+    const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
+    const cm = cleaned.match(completeRe);
+    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
+    const partialRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
+    const pm = cleaned.match(partialRe);
+    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
+    return null;
+  }
+
+  function extractSectionBody(heading) {
+    const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const completeRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
+    const cm = cleaned.match(completeRe);
+    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
+    const partialRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
+    const pm = cleaned.match(partialRe);
+    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
+    return null;
+  }
+
+  const title = extractField('title');
+  const summary = extractField('summary');
+  const changes = extractField('changesSummary');
+  const description = extractSectionBody('Description');
+  const resolution = extractSectionBody('Resolution');
+
+  const sections = [
+    { name: 'Title', data: title },
+    { name: 'Summary', data: summary },
+    { name: 'Description', data: description },
+    { name: 'Resolution', data: resolution }
+  ];
+
+  for (const { name, data } of sections) {
     const sec = h('div', { style: { marginBottom: '8px', padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)' } });
     sec.appendChild(h('div', { style: { fontSize: '10px', fontWeight: '600', color: 'var(--primary)', marginBottom: '3px', textTransform: 'uppercase' } }, name));
 
-    if (name === 'Title' && titleMatch) {
-      sec.appendChild(h('div', { style: { fontSize: '12px', fontWeight: '600' } }, titleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ')));
-    } else if (name === 'Summary' && summaryMatch) {
-      sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', fontStyle: 'italic' } }, summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').slice(0, 200)));
-    } else {
-      const complete = completeSections.find(f => f.label === name);
-      const partial = (inProgressSection && inProgressSection.label === name) ? inProgressSection : null;
-      const content = complete || partial;
-      if (content && content.body) {
-        const lines = content.body.split('\n').slice(0, 8);
+    if (data && data.value) {
+      const text = data.value;
+      if (name === 'Title') {
+        sec.appendChild(h('div', { style: { fontSize: '12px', fontWeight: '600' } }, text.replace(/\n/g, ' ')));
+      } else {
+        const lines = text.split('\n').slice(0, 10);
         lines.forEach(line => {
           if (line.startsWith('- ')) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, '• ' + line.slice(2)));
           else if (/^\d+\.\s/.test(line)) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, line));
           else if (line.trim()) sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, line));
         });
-        if (!complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px', marginTop: '2px' } }, spinner('sm'), h('span', null, 'streaming…')));
+        if (text.split('\n').length > 10) sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '…'));
+      }
+      if (!data.complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', fontSize: '10px', marginTop: '3px' } }, spinner('sm'), h('span', null, 'streaming…')));
+    } else {
+      const isWriting = (name === 'Summary' && title?.complete) || (name === 'Description' && summary?.complete) || (name === 'Resolution' && description);
+      if (isWriting) {
+        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
       } else {
-        const hasPrior = (name === 'Resolution' && (completeSections.some(f => f.label === 'Description') || inProgressSection?.label === 'Description'));
-        const isNext = (name === 'Description' && summaryMatch && !completeSections.length && !inProgressSection);
-        if (hasPrior || isNext) {
-          sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
-        } else if (titleMatch) {
-          sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Pending…'));
-        }
+        sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Pending…'));
       }
     }
     container.appendChild(sec);
   }
 
-  if (changesMatch) {
-    container.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', borderTop: '1px solid var(--border)', paddingTop: '4px' } }, 'Changes: ' + changesMatch[1].replace(/\\"/g, '"')));
+  if (changes?.value) {
+    container.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', borderTop: '1px solid var(--border)', paddingTop: '4px' } }, 'Changes: ' + changes.value));
   }
 }
 
