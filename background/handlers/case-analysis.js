@@ -151,7 +151,7 @@ Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason", "
 Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nPriority: ${caseRecord.Priority || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
     maxTokens: 1200,
-    temperature: 0.1
+    temperature: 0
   };
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -269,7 +269,7 @@ async function extractIntents(caseRecord, comments, signal) {
 Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}`,
     messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
     maxTokens: 800,
-    temperature: 0.1,
+    temperature: 0,
     signal
   });
   const parsed = extractJson(extractText(resp));
@@ -284,7 +284,7 @@ async function extractAbstract(caseRecord, comments, signal) {
       system: 'Extract a problem signature from this case. Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"..."}',
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentsText.slice(0, 2000)}` }],
       maxTokens: 500,
-      temperature: 0.1,
+      temperature: 0,
       signal
     });
     return extractJson(extractText(resp)) || null;
@@ -301,7 +301,7 @@ async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
       system: `Summarize this support case as a bulleted list (use - for bullets). Each bullet should start with a bold label like **Issue:** or **Product:** followed by the detail. Cover: the issue, the affected product/feature, current status/impact, and any related engineering work. Be concise and specific.`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
       maxTokens: 400,
-      temperature: 0.1,
+      temperature: 0,
       signal,
       onDelta: (chunk) => { send({ type: 'summary-delta', chunk }); }
     });
@@ -404,7 +404,7 @@ IMPORTANT: Be CONSERVATIVE. Default to DOCS_SUFFICIENT unless there is a clear, 
 Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs]}`,
       messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
       maxTokens: 200,
-      temperature: 0.1,
+      temperature: 0,
       signal
     });
     return extractJson(extractText(resp)) || null;
@@ -512,7 +512,7 @@ CRITERIA: title(max ${m.title}), summary(max ${m.summary}), headers(max ${m.head
 Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`,
     messages: [{ role: 'user', content: `Title: ${article.title}\nArticle#: ${article.articleNumber}\nP&T: ${article.topicName || '(none)'}\nSUMMARY: ${article.summary || '(empty)'}\nDESCRIPTION (${descText.length} chars): ${descText || '(empty)'}\nRESOLUTION (${resText.length} chars): ${resText || '(empty)'}${stepsText ? '\nSTEPS: ' + stepsText : ''}` }],
     maxTokens: 2200,
-    temperature: 0.1,
+    temperature: 0,
     model: 'claude-sonnet-4-6',
     signal
   });
@@ -624,7 +624,7 @@ BOTH — Choose when:
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence explaining the decision","coveringArticles":[indices of articles that already cover this case, if NO_ACTION]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (scored for relevance to this case):\n${articleList}` }],
     maxTokens: 250,
-    temperature: 0.1,
+    temperature: 0,
     signal
   });
   const parsed = extractJson(extractText(resp));
@@ -731,7 +731,7 @@ Return JSON: {"scores": [{"index": 0, "overall": 72}, {"index": 1, "overall": 65
 Include ALL articles.`,
       messages: [{ role: 'user', content: `Score these ${articlesForScoring.length} articles:\n\n${articlesText}` }],
       maxTokens: 400,
-      temperature: 0.1,
+      temperature: 0,
       signal
     });
     const parsed = extractJson(extractText(resp));
@@ -784,7 +784,7 @@ Return JSON: {"scores": [{"index": 0, "overall": 82, "criteria": [{"id": "title"
 Include ALL articles. Only include active criteria (skip media/code/tables if not applicable).`,
       messages: [{ role: 'user', content: `Score these ${draftsToScore.length} generated article drafts:\n\n${articlesText}` }],
       maxTokens: 800,
-      temperature: 0.1,
+      temperature: 0,
       signal
     });
     const parsed = extractJson(extractText(resp));

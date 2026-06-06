@@ -96,7 +96,7 @@ async function rankKiRelevance(candidates, caseAbstract, caseSubject) {
       system: `You rank Known Issues by relevance to a support case. Score each 0-100. Return JSON: {"ranked": [{"index": 0, "score": 85, "reason": "short reason"}, ...]}. Include only items scoring above 30. Be strict.`,
       messages: [{ role: 'user', content: `CASE:\nSubject: ${caseSubject || ''}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nError: ${caseAbstract?.errorSignature || ''}\n\nKNOWN ISSUES:\n${kiList}` }],
       maxTokens: 600,
-      temperature: 0.1
+      temperature: 0
     });
     const parsed = extractJson(extractText(resp));
     if (parsed?.ranked?.length) {

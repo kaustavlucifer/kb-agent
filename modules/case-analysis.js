@@ -485,7 +485,7 @@ function renderStreamingSuggestion(text, container) {
   }
 
   let inProgressSection = null;
-  const partialMatch = cleaned.match(/\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*?)$/);
+  const partialMatch = cleaned.match(/\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)$/);
   if (partialMatch && !completeSections.some(s => s.label === partialMatch[1])) {
     inProgressSection = { label: partialMatch[1], body: partialMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') };
   }
