@@ -8,6 +8,7 @@ let _port = null;
 let _unsubs = [];
 let _collapsedSections = {};
 let _streamThrottle = null;
+let _streamPending = false;
 let _editingSections = new Set();
 
 export function mount(container) {
@@ -51,8 +52,15 @@ export function mount(container) {
   }));
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
     if (!_container || getState('case.view') !== 'streaming') return;
-    if (_streamThrottle) return;
-    _streamThrottle = setTimeout(() => { _streamThrottle = null; if (_container) renderStreaming(); }, STREAM_RENDER_THROTTLE_MS);
+    if (_streamThrottle) { _streamPending = true; return; }
+    _streamThrottle = setTimeout(() => {
+      _streamThrottle = null;
+      if (_container && getState('case.view') === 'streaming') renderStreaming();
+      if (_streamPending) {
+        _streamPending = false;
+        _streamThrottle = setTimeout(() => { _streamThrottle = null; if (_container && getState('case.view') === 'streaming') renderStreaming(); }, STREAM_RENDER_THROTTLE_MS);
+      }
+    }, STREAM_RENDER_THROTTLE_MS);
   }));
 
   const pending = getState('case.pendingUrl');
@@ -307,6 +315,8 @@ function renderStreaming() {
     sidebar.appendChild(renderSidebarArticles(topArticles));
     const knownIssues = getState('case.knownIssues') || [];
     if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
+    const productDocs = getState('case.productDocs') || [];
+    if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
     mainEl = grid.querySelector('[data-role="main"]');
     mainEl.id = 'case-stream-main';
 
@@ -335,10 +345,11 @@ function renderStreaming() {
       sidebar.appendChild(renderSidebarArticles(topArticles));
       const ki = getState('case.knownIssues') || [];
       if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
+      const productDocs = getState('case.productDocs') || [];
+      if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
     }
   }
 
-  // Render completed suggestion cards
   if (suggestions.length) {
     const existingCards = mainEl.querySelectorAll('.sug-card-done');
     const grouped = groupByArticle(suggestions);
@@ -347,10 +358,10 @@ function renderStreaming() {
     if (groupKeys.length > existingCards.length) {
       for (let i = existingCards.length; i < groupKeys.length; i++) {
         const key = groupKeys[i];
-        // Remove any in-progress card for this article
         const inProgress = mainEl.querySelector(`#sug-progress-${key}`);
         if (inProgress) inProgress.remove();
-        const card = renderArticleSuggestionCard(grouped[key]);
+        const sugs = grouped[key];
+        const card = (sugs[0]?.isFullRewrite) ? renderFullRewriteCard(sugs[0]) : renderArticleSuggestionCard(sugs);
         card.classList.add('sug-card-done');
         card.style.animation = 'fadeIn 0.3s ease-in';
         const loadingEl = mainEl.querySelector('#stream-loading');
@@ -382,8 +393,9 @@ function renderStreaming() {
     }
     const contentEl = progressCard.querySelector('.sug-progress-content');
     if (contentEl) {
-      contentEl.textContent = '';
-      renderStreamingSuggestion(deltaText, contentEl);
+      const fragment = document.createDocumentFragment();
+      renderStreamingSuggestion(deltaText, fragment);
+      contentEl.replaceChildren(fragment);
       contentEl.scrollTop = contentEl.scrollHeight;
     }
   }
@@ -440,10 +452,15 @@ function renderStreamingSuggestion(text, container) {
   const changesMatch = cleaned.match(/"changesSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
 
   if (!titleMatch) {
-    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } },
-      spinner('sm'),
-      h('span', null, 'Generating rewrite…')
-    ));
+    if (cleaned.length > 30) {
+      const preview = cleaned.replace(/[{}"\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      container.appendChild(h('div', { style: { fontSize: '11px', lineHeight: '1.5', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' } }, preview || 'Generating…'));
+    } else {
+      container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } },
+        spinner('sm'),
+        h('span', null, 'Generating rewrite…')
+      ));
+    }
     return;
   }
 
@@ -490,9 +507,9 @@ function renderStreamingSuggestion(text, container) {
 
 function renderStreamingDraft(text, container) {
   const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
-  const titleMatch = cleaned.match(/"title"\s*:\s*"([^"]+)"/);
+  const titleMatch = cleaned.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (titleMatch) {
-    container.appendChild(h('div', { style: { fontSize: '15px', fontWeight: '700', marginBottom: '12px', color: 'var(--text-primary)' } }, titleMatch[1]));
+    container.appendChild(h('div', { style: { fontSize: '15px', fontWeight: '700', marginBottom: '12px', color: 'var(--text-primary)' } }, titleMatch[1].replace(/\\"/g, '"')));
   }
 
   const sectionRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
@@ -1618,10 +1635,21 @@ function onPortMessage(msg) {
     case 'progress':
       setState('case.progress', { ...getState('case.progress'), step: msg.step ?? 0, label: msg.label || '', caseNumber: msg.caseNumber || getState('case.progress')?.caseNumber });
       break;
-    case 'stopped':
-      setState('case.view', 'result');
-      toast('Processing stopped. Showing partial results.', 'info');
+    case 'stopped': {
+      const hasSuggestions = (getState('case.suggestions') || []).length > 0;
+      const hasResult = !!getState('case.result');
+      if (hasSuggestions || hasResult) {
+        if (!hasResult) {
+          setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Stopped early. Showing partial results.', suggestions: getState('case.suggestions') || [] }, caseNumber: getState('case.caseRecord')?.caseNumber || '', subject: getState('case.caseRecord')?.subject || '' });
+        }
+        setState('case.view', 'result');
+        toast('Processing stopped. Showing partial results.', 'info');
+      } else {
+        setState('case.view', 'idle');
+        toast('Processing stopped. No results generated yet.', 'info');
+      }
       break;
+    }
     case 'meta': {
       if (msg.caseRecord) {
         setState('case.caseRecord', msg.caseRecord);
