@@ -745,10 +745,13 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
   for (const { key, article } of draftsToScore) {
     if (signal?.aborted) return;
     try {
-      const descBody = (article.sections || []).find(s => /description/i.test(s.heading))?.body || '';
-      const resBody = (article.sections || []).find(s => /resolution/i.test(s.heading))?.body || '';
+      const allSections = article.sections || [];
+      const descBody = allSections.find(s => /description/i.test(s.heading))?.body || allSections[0]?.body || '';
+      const resBody = allSections.find(s => /resolution/i.test(s.heading))?.body || allSections[1]?.body || '';
+      const content = descBody + resBody;
+      if (content.length < 20) continue;
       const scoreResult = await scoreArticleForCaseScan({
-        title: article.title || '',
+        title: article.title || article.articleTitle || '',
         summary: article.summary || '',
         description: descBody,
         resolution: resBody,

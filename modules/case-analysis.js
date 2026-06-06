@@ -34,7 +34,15 @@ export function mount(container) {
   _unsubs.push(subscribe('case.view', () => { if (_container) renderByView(); }));
   _unsubs.push(subscribe('case.progress', () => { if (_container) { const v = getState('case.view'); if (v === 'analyzing') renderByView(); else if (v === 'progressive') scheduleRender(); } }));
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
-  _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.streamText', () => {
+    if (!_container || getState('case.view') !== 'streaming') return;
+    if (_streamThrottle) { _streamPending = true; return; }
+    renderStreaming();
+    _streamThrottle = setTimeout(() => {
+      _streamThrottle = null;
+      if (_streamPending) { _streamPending = false; if (_container && getState('case.view') === 'streaming') renderStreaming(); }
+    }, STREAM_RENDER_THROTTLE_MS);
+  }));
   _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
   _unsubs.push(subscribe('case.caseSummary', () => {
     if (!_container) return;
@@ -55,12 +63,12 @@ export function mount(container) {
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
     if (!_container || getState('case.view') !== 'streaming') return;
     if (_streamThrottle) { _streamPending = true; return; }
+    renderStreaming();
     _streamThrottle = setTimeout(() => {
       _streamThrottle = null;
-      if (_container && getState('case.view') === 'streaming') renderStreaming();
       if (_streamPending) {
         _streamPending = false;
-        _streamThrottle = setTimeout(() => { _streamThrottle = null; if (_container && getState('case.view') === 'streaming') renderStreaming(); }, STREAM_RENDER_THROTTLE_MS);
+        if (_container && getState('case.view') === 'streaming') renderStreaming();
       }
     }, STREAM_RENDER_THROTTLE_MS);
   }));
@@ -316,6 +324,10 @@ function renderStreaming() {
   let mainEl = _container.querySelector('#case-stream-main');
   if (!mainEl) {
     _container.textContent = '';
+    _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+      buildInlineSearch(),
+      h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0' }, onClick: stopProcessing }, 'Stop')
+    ));
     const grid = buildResizableGrid();
     const sidebar = grid.querySelector('[data-role="sidebar"]');
     sidebar.id = 'case-stream-sidebar';
