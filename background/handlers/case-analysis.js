@@ -281,6 +281,8 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   const prodDocGap = await prodDocGapPromise;
 
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
+
+  if (!stopped) autoScoreGeneratedArticles(structured, send, signal);
 }
 
 
@@ -719,4 +721,42 @@ function computeCompleteness(caseRecord, comments) {
 
   const label = score >= 65 ? 'Sufficient' : score >= 35 ? 'Partial' : 'Insufficient';
   return { score: Math.min(100, score), label, details };
+}
+
+async function autoScoreGeneratedArticles(structured, send, signal) {
+  if (!structured) return;
+  const draftsToScore = [];
+
+  if (structured.newArticleDraft) {
+    draftsToScore.push({ key: 'new-draft', article: structured.newArticleDraft });
+  }
+  if (structured.suggestions?.length) {
+    for (const sug of structured.suggestions) {
+      if (sug.isFullRewrite) {
+        draftsToScore.push({ key: `rewrite-${sug.articleId}`, article: sug });
+      }
+    }
+  }
+
+  if (!draftsToScore.length) return;
+
+  for (const { key, article } of draftsToScore) {
+    if (signal?.aborted) return;
+    try {
+      const descBody = (article.sections || []).find(s => /description/i.test(s.heading))?.body || '';
+      const resBody = (article.sections || []).find(s => /resolution/i.test(s.heading))?.body || '';
+      const scoreResult = await scoreArticleForCaseScan({
+        title: article.title || '',
+        summary: article.summary || '',
+        description: descBody,
+        resolution: resBody,
+        steps: '',
+        articleNumber: article.articleNumber || 'DRAFT',
+        topicName: ''
+      }, signal);
+      if (scoreResult.overall != null) {
+        send({ type: 'meta', draftScore: { key, score: scoreResult } });
+      }
+    } catch {}
+  }
 }

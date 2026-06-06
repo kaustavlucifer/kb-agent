@@ -703,9 +703,10 @@ function renderResult() {
         h('span', { class: 'pill pill--info', style: { fontSize: '10px' } }, 'NEW'),
         h('span', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' } }, draft.title || 'New Article Draft')
       ),
-      h('div', { style: { display: 'flex', gap: '6px' }, onClick: (e) => e.stopPropagation() },
+      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
+        (() => { const ds = (getState('case.draftScores') || {})['new-draft']; return ds ? h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`) : h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Score'),
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Re-score'),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyDraft(draft) }, 'Copy'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
       )
@@ -964,17 +965,26 @@ function renderSidebarQuality(structured) {
   const isCollapsed = _collapsedSections['quality'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
 
-  // Calculate AFG readiness score (0-100)
+  const draftScores = getState('case.draftScores') || {};
+  const hasDraftScores = Object.keys(draftScores).length > 0;
+
   const topArticles = getState('case.topArticles') || [];
   const articlesWithKbScore = topArticles.filter(a => a.kbScore != null);
   const avgKbScore = articlesWithKbScore.length
     ? Math.round(articlesWithKbScore.reduce((s, a) => s + a.kbScore, 0) / articlesWithKbScore.length)
     : null;
-  const confidenceScore = structured.confidence === 'HIGH' ? 90 : structured.confidence === 'MEDIUM' ? 60 : 30;
-  const actionScore = structured.action === 'NO_ACTION' ? 95 : structured.action === 'UPDATE_EXISTING' ? 70 : structured.action === 'CREATE_NEW' ? 40 : 55;
-  const readinessScore = avgKbScore != null
-    ? Math.round((avgKbScore * 0.4) + (confidenceScore * 0.3) + (actionScore * 0.3))
-    : Math.round((confidenceScore * 0.5) + (actionScore * 0.5));
+
+  let readinessScore;
+  if (hasDraftScores) {
+    const draftVals = Object.values(draftScores).map(s => s.overall).filter(v => v != null);
+    readinessScore = draftVals.length ? Math.round(draftVals.reduce((a, b) => a + b, 0) / draftVals.length) : 0;
+  } else {
+    const confidenceScore = structured.confidence === 'HIGH' ? 90 : structured.confidence === 'MEDIUM' ? 60 : 30;
+    const actionScore = structured.action === 'NO_ACTION' ? 95 : structured.action === 'UPDATE_EXISTING' ? 70 : structured.action === 'CREATE_NEW' ? 40 : 55;
+    readinessScore = avgKbScore != null
+      ? Math.round((avgKbScore * 0.4) + (confidenceScore * 0.3) + (actionScore * 0.3))
+      : Math.round((confidenceScore * 0.5) + (actionScore * 0.5));
+  }
   const scoreColor = readinessScore >= 75 ? 'var(--success)' : readinessScore >= 50 ? 'var(--warning)' : 'var(--error)';
   const scoreLabel = readinessScore >= 75 ? 'AGF Ready' : readinessScore >= 50 ? 'Needs Work' : 'Not Ready';
 
@@ -999,27 +1009,31 @@ function renderSidebarQuality(structured) {
       h('span', { style: { color: 'var(--text-muted)' } }, `${readinessScore}/100`)
     ));
 
-    const items = [
-      ['Action', formatAction(structured.action)],
-      ['Confidence', structured.confidence || 'N/A'],
-      ['Articles Found', String(topArticles.length)],
-      ['Avg KB Score', avgKbScore != null ? String(avgKbScore) : '…']
-    ];
+    const items = [];
 
-    const draftScores = getState('case.draftScores') || {};
-    if (Object.keys(draftScores).length) {
-      items.push(['', '']);
+    if (hasDraftScores) {
+      items.push(['— Generated Content —', '']);
       for (const [key, scoreData] of Object.entries(draftScores)) {
-        const label = key === 'new-draft' ? 'New Draft' : `Rewrite ${key.replace('rewrite-', '#').slice(0, 12)}`;
+        const label = key === 'new-draft' ? 'New Article' : `Rewrite`;
         items.push([label, `${scoreData.overall}/100`]);
       }
+      items.push(['', '']);
+      items.push(['— Existing Coverage —', '']);
     }
 
-    if (structured.suggestions?.length) items.push(['Rewrites', String(structured.suggestions.length)]);
-    if (structured.newArticleDraft) items.push(['New Draft', 'Yes']);
+    items.push(['Action', formatAction(structured.action)]);
+    items.push(['Confidence', structured.confidence || 'N/A']);
+    if (avgKbScore != null) items.push(['Existing Avg', `${avgKbScore}/100`]);
+    if (!hasDraftScores) {
+      items.push(['Articles Found', String(topArticles.length)]);
+    }
 
     items.forEach(([label, value]) => {
       if (!label && !value) { body.appendChild(h('div', { style: { height: '6px' } })); return; }
+      if (label.startsWith('—')) {
+        body.appendChild(h('div', { style: { fontSize: '9px', fontWeight: '600', color: 'var(--text-muted)', textTransform: 'uppercase', padding: '4px 0 2px', letterSpacing: '0.3px' } }, label.replace(/—/g, '').trim()));
+        return;
+      }
       const valueColor = label === 'Confidence' ? (value === 'HIGH' ? 'var(--success)' : value === 'MEDIUM' ? 'var(--warning)' : 'var(--error)') : 'var(--text-primary)';
       body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' } },
         h('span', { style: { color: 'var(--text-muted)' } }, label),
@@ -1027,7 +1041,7 @@ function renderSidebarQuality(structured) {
       ));
     });
 
-    if (Object.keys(draftScores).length) {
+    if (hasDraftScores) {
       body.appendChild(h('div', { style: { marginTop: '8px' } },
         h('button', { class: 'btn btn--ghost btn--sm', style: { width: '100%', fontSize: '10px' }, onClick: () => showScoreInsights(draftScores) }, 'View Insights')
       ));
@@ -1306,8 +1320,9 @@ function renderFullRewriteCard(rewrite) {
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, rewrite.title || rewrite.articleTitle)
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
+      (() => { const ds = (getState('case.draftScores') || {})[`rewrite-${rewrite.articleId}`]; return ds ? h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`) : h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Score'),
+      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Re-score'),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
     )
@@ -1830,6 +1845,11 @@ function onPortMessage(msg) {
       if (msg.hypotheses) setState('case.hypotheses', msg.hypotheses);
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
+      if (msg.draftScore) {
+        const scores = getState('case.draftScores') || {};
+        setState('case.draftScores', { ...scores, [msg.draftScore.key]: msg.draftScore.score });
+        if (getState('case.view') === 'result') { _sidebarOnly = true; renderByView(); }
+      }
       if (msg.topArticles) {
         const currentView = getState('case.view');
         if (currentView === 'analyzing' || currentView === 'progressive') setState('case.view', 'streaming');
