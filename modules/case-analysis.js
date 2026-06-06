@@ -883,6 +883,7 @@ function renderSidebarArticles(articles) {
             statusBadge,
             updateBtn
           ),
+          a.topicName ? h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.topicName) : null,
           statusBadge && a.publishStatus !== 'Online' ? h('div', { style: { fontSize: '10px', color: 'var(--warning)', marginTop: '2px', fontStyle: 'italic' } }, 'Internal/unpublished — could be published with changes') : null,
           h('div', { style: { display: 'flex', gap: '6px', marginTop: '3px', alignItems: 'center' } },
             h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, `#${a.articleNumber || ''}`),

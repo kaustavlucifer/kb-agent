@@ -190,6 +190,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     id: a.Id, title: a.Title, articleNumber: a.ArticleNumber,
     score: a._relevanceScore != null ? a._relevanceScore : null,
     reason: a._relevanceReason || '',
+    topicName: a.topicName || a.Product_And_Topic__r?.Name || '',
     publishStatus: a.publishStatus || a.PublishStatus || 'Online',
     validationStatus: a.validationStatus || a.ValidationStatus || '',
     url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view`
