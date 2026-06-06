@@ -694,11 +694,29 @@ Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description"
 function computeCompleteness(caseRecord, comments) {
   let score = 0;
   const details = [];
-  if ((caseRecord.Description || '').length > 50) { score += 25; details.push('description'); }
-  if (comments.length > 1) { score += 25; details.push('comments'); }
-  if ((caseRecord.Description || '').match(/error|exception|fail|issue|unable/i)) { score += 20; details.push('error-signals'); }
-  if ((caseRecord.Subject || '').length > 10) { score += 15; details.push('subject'); }
-  if (comments.some(c => /W-\d{4,}/.test(c.CommentBody || ''))) { score += 15; details.push('gus-refs'); }
-  const label = score >= 70 ? 'Sufficient' : score >= 40 ? 'Partial' : 'Insufficient';
+  const desc = caseRecord.Description || '';
+  const commentTexts = comments.map(c => c.CommentBody || '').filter(Boolean);
+
+  if (desc.length > 200) { score += 15; details.push('detailed-description'); }
+  else if (desc.length > 50) { score += 8; details.push('basic-description'); }
+
+  if (commentTexts.length >= 3) { score += 15; details.push('multiple-comments'); }
+  else if (commentTexts.length >= 1) { score += 8; details.push('has-comments'); }
+
+  if (/\b(error|exception|stacktrace|FATAL|NullPointer|timeout|500|403|404)\b/i.test(desc)) { score += 15; details.push('error-signature'); }
+  else if (/\b(fail|unable|cannot|does not work|broken)\b/i.test(desc)) { score += 8; details.push('symptom-keywords'); }
+
+  const hasSteps = /\b(steps to reproduce|repro|STR|how to reproduce)\b/i.test(desc + commentTexts.join(' '));
+  if (hasSteps) { score += 15; details.push('repro-steps'); }
+
+  const hasConfig = /\b(org id|instance|version|release|sandbox|production|config)\b/i.test(desc + commentTexts.join(' '));
+  if (hasConfig) { score += 10; details.push('environment-context'); }
+
+  if (commentTexts.some(c => /W-\d{4,}/.test(c))) { score += 10; details.push('gus-refs'); }
+
+  const hasResolution = commentTexts.some(c => /\b(workaround|fix|resolved|solution|root cause)\b/i.test(c));
+  if (hasResolution) { score += 20; details.push('resolution-context'); }
+
+  const label = score >= 65 ? 'Sufficient' : score >= 35 ? 'Partial' : 'Insufficient';
   return { score: Math.min(100, score), label, details };
 }
