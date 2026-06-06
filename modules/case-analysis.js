@@ -477,15 +477,17 @@ function renderStreamingSuggestion(text, container) {
   const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   const changesMatch = cleaned.match(/"changesSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
 
-  const sectionFields = [
-    { label: 'Title', match: titleMatch },
-    { label: 'Summary', match: summaryMatch }
-  ];
-
-  const sectionRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  const completeSections = [];
+  const completeRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
   let m;
-  while ((m = sectionRegex.exec(cleaned)) !== null) {
-    sectionFields.push({ label: m[1], body: m[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') });
+  while ((m = completeRegex.exec(cleaned)) !== null) {
+    completeSections.push({ label: m[1], body: m[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true });
+  }
+
+  let inProgressSection = null;
+  const partialMatch = cleaned.match(/\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*?)$/);
+  if (partialMatch && !completeSections.some(s => s.label === partialMatch[1])) {
+    inProgressSection = { label: partialMatch[1], body: partialMatch[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') };
   }
 
   if (!titleMatch && cleaned.length < 30) {
@@ -503,19 +505,25 @@ function renderStreamingSuggestion(text, container) {
     } else if (name === 'Summary' && summaryMatch) {
       sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', fontStyle: 'italic' } }, summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').slice(0, 200)));
     } else {
-      const found = sectionFields.find(f => f.label === name && f.body);
-      if (found) {
-        const lines = found.body.split('\n').slice(0, 5);
+      const complete = completeSections.find(f => f.label === name);
+      const partial = (inProgressSection && inProgressSection.label === name) ? inProgressSection : null;
+      const content = complete || partial;
+      if (content && content.body) {
+        const lines = content.body.split('\n').slice(0, 8);
         lines.forEach(line => {
           if (line.startsWith('- ')) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, '• ' + line.slice(2)));
           else if (/^\d+\.\s/.test(line)) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, line));
           else if (line.trim()) sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, line));
         });
-        if (found.body.split('\n').length > 5) sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '…'));
-      } else if (!titleMatch || (name === 'Description' && !sectionFields.some(f => f.label === 'Description'))) {
-        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
+        if (!complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px', marginTop: '2px' } }, spinner('sm'), h('span', null, 'streaming…')));
       } else {
-        sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Waiting…'));
+        const hasPrior = (name === 'Resolution' && (completeSections.some(f => f.label === 'Description') || inProgressSection?.label === 'Description'));
+        const isNext = (name === 'Description' && summaryMatch && !completeSections.length && !inProgressSection);
+        if (hasPrior || isNext) {
+          sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
+        } else if (titleMatch) {
+          sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Pending…'));
+        }
       }
     }
     container.appendChild(sec);
@@ -1054,8 +1062,15 @@ function renderSidebarQuality(structured) {
 
     if (hasDraftScores) {
       items.push(['— Generated Content —', '']);
+      const result = getState('case.result');
+      const suggestions = result?.structured?.suggestions || [];
       for (const [key, scoreData] of Object.entries(draftScores)) {
-        const label = key === 'new-draft' ? 'New Article' : `Rewrite #${key.replace('rewrite-', '').slice(0, 15)}`;
+        let label = 'New Article';
+        if (key !== 'new-draft') {
+          const artId = key.replace('rewrite-', '');
+          const sug = suggestions.find(s => s.articleId === artId);
+          label = `Rewrite #${sug?.articleNumber || artId.slice(0, 8)}`;
+        }
         items.push([label, `${scoreData.overall}/100`]);
       }
       items.push(['', '']);
