@@ -12,6 +12,7 @@ let _streamPending = false;
 let _editingSections = new Set();
 let _sidebarOnly = false;
 let _renderRaf = null;
+let _refinedKeys = new Set();
 
 export function mount(container) {
   _unsubs.forEach(u => u());
@@ -476,57 +477,52 @@ function renderStreamingSuggestion(text, container) {
   const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   const changesMatch = cleaned.match(/"changesSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
 
-  if (!titleMatch) {
-    if (cleaned.length > 30) {
-      const preview = cleaned.replace(/[{}"\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
-      container.appendChild(h('div', { style: { fontSize: '11px', lineHeight: '1.5', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' } }, preview || 'Generating…'));
-    } else {
-      container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } },
-        spinner('sm'),
-        h('span', null, 'Generating rewrite…')
-      ));
-    }
+  const sectionFields = [
+    { label: 'Title', match: titleMatch },
+    { label: 'Summary', match: summaryMatch }
+  ];
+
+  const sectionRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  let m;
+  while ((m = sectionRegex.exec(cleaned)) !== null) {
+    sectionFields.push({ label: m[1], body: m[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\') });
+  }
+
+  if (!titleMatch && cleaned.length < 30) {
+    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, spinner('sm'), h('span', null, 'Generating…')));
     return;
   }
 
-  const title = titleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ');
-  container.appendChild(h('div', { style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-primary)', marginBottom: '6px' } }, title));
+  const expectedSections = ['Title', 'Summary', 'Description', 'Resolution'];
+  for (const name of expectedSections) {
+    const sec = h('div', { style: { marginBottom: '8px', padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)' } });
+    sec.appendChild(h('div', { style: { fontSize: '10px', fontWeight: '600', color: 'var(--primary)', marginBottom: '3px', textTransform: 'uppercase' } }, name));
 
-  if (summaryMatch) {
-    const summary = summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ');
-    container.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '8px', fontStyle: 'italic' } }, summary));
-  }
-
-  const sectionRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  let match;
-  let hasSections = false;
-  while ((match = sectionRegex.exec(cleaned)) !== null) {
-    hasSections = true;
-    const heading = match[1];
-    const body = match[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-    const sectionEl = h('div', { style: { marginBottom: '8px' } },
-      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '3px' } }, heading)
-    );
-    const lines = body.split('\n').slice(0, 6);
-    lines.forEach(line => {
-      if (line.startsWith('## ') || line.startsWith('### ')) sectionEl.appendChild(h('div', { style: { fontWeight: '600', fontSize: '11px', marginTop: '4px' } }, line.replace(/^#+\s*/, '')));
-      else if (line.startsWith('- ')) sectionEl.appendChild(h('div', { style: { paddingLeft: '8px', fontSize: '11px' } }, '• ' + line.slice(2)));
-      else if (/^\d+\.\s/.test(line)) sectionEl.appendChild(h('div', { style: { paddingLeft: '8px', fontSize: '11px' } }, line));
-      else if (line.trim()) sectionEl.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, line));
-    });
-    if (body.split('\n').length > 6) sectionEl.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', fontStyle: 'italic' } }, '…'));
-    container.appendChild(sectionEl);
-  }
-
-  if (!hasSections && !changesMatch) {
-    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '11px' } },
-      spinner('sm'),
-      h('span', null, 'Writing sections…')
-    ));
+    if (name === 'Title' && titleMatch) {
+      sec.appendChild(h('div', { style: { fontSize: '12px', fontWeight: '600' } }, titleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ')));
+    } else if (name === 'Summary' && summaryMatch) {
+      sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', fontStyle: 'italic' } }, summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').slice(0, 200)));
+    } else {
+      const found = sectionFields.find(f => f.label === name && f.body);
+      if (found) {
+        const lines = found.body.split('\n').slice(0, 5);
+        lines.forEach(line => {
+          if (line.startsWith('- ')) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, '• ' + line.slice(2)));
+          else if (/^\d+\.\s/.test(line)) sec.appendChild(h('div', { style: { paddingLeft: '6px', fontSize: '11px' } }, line));
+          else if (line.trim()) sec.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, line));
+        });
+        if (found.body.split('\n').length > 5) sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '…'));
+      } else if (!titleMatch || (name === 'Description' && !sectionFields.some(f => f.label === 'Description'))) {
+        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
+      } else {
+        sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Waiting…'));
+      }
+    }
+    container.appendChild(sec);
   }
 
   if (changesMatch) {
-    container.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px', borderTop: '1px solid var(--border)', paddingTop: '4px' } }, 'Changes: ' + changesMatch[1].replace(/\\"/g, '"')));
+    container.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', borderTop: '1px solid var(--border)', paddingTop: '4px' } }, 'Changes: ' + changesMatch[1].replace(/\\"/g, '"')));
   }
 }
 
@@ -730,7 +726,7 @@ function renderResult() {
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
         (() => { const ds = (getState('case.draftScores') || {})['new-draft']; return ds ? h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`) : h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Re-score'),
+        (_refinedKeys.has('new-draft') || _refinedKeys.has('any')) ? h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Re-score') : null,
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyDraft(draft) }, 'Copy'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
       )
@@ -1059,7 +1055,7 @@ function renderSidebarQuality(structured) {
     if (hasDraftScores) {
       items.push(['— Generated Content —', '']);
       for (const [key, scoreData] of Object.entries(draftScores)) {
-        const label = key === 'new-draft' ? 'New Article' : `Rewrite`;
+        const label = key === 'new-draft' ? 'New Article' : `Rewrite #${key.replace('rewrite-', '').slice(0, 15)}`;
         items.push([label, `${scoreData.overall}/100`]);
       }
       items.push(['', '']);
@@ -1367,7 +1363,7 @@ function renderFullRewriteCard(rewrite) {
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
       (() => { const ds = (getState('case.draftScores') || {})[`rewrite-${rewrite.articleId}`]; return ds ? h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`) : h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Re-score'),
+      (_refinedKeys.has(`rewrite-${rewrite.articleId}`) || _refinedKeys.has('any')) ? h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Re-score') : null,
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
     )
@@ -1557,6 +1553,8 @@ function refineRewrite(rewrite) {
         rewrite.title = newTitle || rewrite.title;
         rewrite.summary = newSummary || rewrite.summary;
         if (newSections.length) rewrite.sections = newSections;
+        const refKey = rewrite.articleId ? `rewrite-${rewrite.articleId}` : 'new-draft';
+        _refinedKeys.add(refKey);
         renderByView();
         toast('Article refined.', 'success');
       } else {
@@ -1655,6 +1653,7 @@ function refineSection(section) {
       if (resp?.success && resp.refined) {
         if ('content' in section) section.content = resp.refined;
         else if ('body' in section) section.body = resp.refined;
+        _refinedKeys.add('any');
         renderByView();
         toast('Section refined.', 'success');
       } else {
@@ -1817,6 +1816,7 @@ function startAnalysis(caseId) {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
   _sidebarOnly = false;
   _editingSections.clear();
+  _refinedKeys.clear();
   const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: 'Connecting…' });

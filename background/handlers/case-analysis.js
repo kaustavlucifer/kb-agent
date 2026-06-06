@@ -203,36 +203,9 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
   const kbScoredArticles = [...scoredArticles];
 
-  // Fire-and-forget scoring — sends progressive updates to UI
-  mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
-    if (stopped) return;
-    try {
-      const body = candidateBodies.get(sa.id) || {};
-      const candidate = candidates.find(c => c.Id === sa.id) || {};
-      const article = {
-        ...sa,
-        title: sa.title || body.title || candidate.Title || '',
-        description: body.description || '',
-        resolution: body.resolution || '',
-        steps: body.steps || '',
-        summary: body.summary || candidate.Summary || '',
-        topicName: body.topicName || candidate.topicName || ''
-      };
-      let kbScore = await scoreArticleForCaseScan(article, signal);
-      if (kbScore.overall == null && !stopped) {
-        await new Promise(r => setTimeout(r, 1500));
-        kbScore = await scoreArticleForCaseScan(article, signal);
-      }
-      kbScoredArticles[idx] = kbScore.overall != null
-        ? { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria }
-        : { ...sa, kbScore: null, kbScoreError: true };
-      if (!stopped) send({ type: 'meta', topArticles: [...kbScoredArticles] });
-    } catch (e) {
-      if (stopped) return;
-      kbScoredArticles[idx] = { ...sa, kbScore: null, kbScoreError: true };
-      send({ type: 'meta', topArticles: [...kbScoredArticles] });
-    }
-  }).catch(() => {});
+  if (!stopped) {
+    batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal);
+  }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
@@ -725,6 +698,54 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
+async function batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal) {
+  if (!scoredArticles.length) return;
+  const articlesForScoring = scoredArticles.map((sa, idx) => {
+    const body = candidateBodies.get(sa.id) || {};
+    const candidate = candidates.find(c => c.Id === sa.id) || {};
+    return {
+      idx,
+      title: sa.title || body.title || candidate.Title || '',
+      summary: body.summary || candidate.Summary || '',
+      description: stripHtml(body.description || '').slice(0, 2000),
+      resolution: stripHtml(body.resolution || '').slice(0, 2000),
+      articleNumber: sa.articleNumber || '',
+      topicName: body.topicName || candidate.topicName || ''
+    };
+  });
+
+  const articlesText = articlesForScoring.map((a, i) =>
+    `[${i}] #${a.articleNumber} "${a.title}"\nSummary: ${(a.summary || '').slice(0, 200)}\nDescription: ${a.description.slice(0, 800)}\nResolution: ${a.resolution.slice(0, 800)}`
+  ).join('\n\n');
+
+  try {
+    const resp = await callClaudeFast({
+      system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
+
+${GUIDE_SCORING}
+
+Score EACH article 0-100 for overall KB quality. Be STRICT. Most articles score 55-75.
+Consider: title specificity, summary quality, header structure, content completeness, scannability, taxonomy context.
+
+Return JSON: {"scores": [{"index": 0, "overall": 72}, {"index": 1, "overall": 65}, ...]}
+Include ALL articles.`,
+      messages: [{ role: 'user', content: `Score these ${articlesForScoring.length} articles:\n\n${articlesText}` }],
+      maxTokens: 400,
+      temperature: 0.1,
+      signal
+    });
+    const parsed = extractJson(extractText(resp));
+    if (parsed?.scores?.length) {
+      for (const s of parsed.scores) {
+        if (s.index >= 0 && s.index < scoredArticles.length && s.overall != null) {
+          kbScoredArticles[s.index] = { ...scoredArticles[s.index], kbScore: Math.round(s.overall) };
+        }
+      }
+      send({ type: 'meta', topArticles: [...kbScoredArticles] });
+    }
+  } catch {}
+}
+
 async function autoScoreGeneratedArticles(structured, send, signal) {
   if (!structured) return;
   const draftsToScore = [];
@@ -741,27 +762,39 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
   }
 
   if (!draftsToScore.length) return;
+  if (signal?.aborted) return;
 
-  for (const { key, article } of draftsToScore) {
-    if (signal?.aborted) return;
-    try {
-      const allSections = article.sections || [];
-      const descBody = allSections.find(s => /description/i.test(s.heading))?.body || allSections[0]?.body || '';
-      const resBody = allSections.find(s => /resolution/i.test(s.heading))?.body || allSections[1]?.body || '';
-      const content = descBody + resBody;
-      if (content.length < 20) continue;
-      const scoreResult = await scoreArticleForCaseScan({
-        title: article.title || article.articleTitle || '',
-        summary: article.summary || '',
-        description: descBody,
-        resolution: resBody,
-        steps: '',
-        articleNumber: article.articleNumber || 'DRAFT',
-        topicName: ''
-      }, signal);
-      if (scoreResult.overall != null) {
-        send({ type: 'meta', draftScore: { key, score: scoreResult } });
+  const articlesText = draftsToScore.map((d, i) => {
+    const allSections = d.article.sections || [];
+    const desc = allSections.find(s => /description/i.test(s.heading))?.body || allSections[0]?.body || '';
+    const res = allSections.find(s => /resolution/i.test(s.heading))?.body || allSections[1]?.body || '';
+    return `[${i}] "${d.article.title || d.article.articleTitle || ''}"\nSummary: ${(d.article.summary || '').slice(0, 200)}\nDescription: ${desc.slice(0, 1000)}\nResolution: ${res.slice(0, 1000)}`;
+  }).join('\n\n');
+
+  try {
+    const resp = await callClaudeFast({
+      system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
+
+${GUIDE_SCORING}
+
+Score EACH article 0-100 for overall KB quality. Be STRICT. Most articles score 55-75. These are AI-generated drafts so they should score higher than average (70-90) if well-structured.
+Consider: title specificity, summary quality, header structure, content completeness, scannability, taxonomy context.
+
+Return JSON: {"scores": [{"index": 0, "overall": 82, "criteria": [{"id": "title", "score": 10, "max": 12}, {"id": "summary", "score": 8, "max": 10}, {"id": "headers", "score": 9, "max": 10}, {"id": "content", "score": 16, "max": 18}, {"id": "scannability", "score": 9, "max": 10}, {"id": "taxonomy", "score": 7, "max": 8}]}, ...]}
+Include ALL articles. Only include active criteria (skip media/code/tables if not applicable).`,
+      messages: [{ role: 'user', content: `Score these ${draftsToScore.length} generated article drafts:\n\n${articlesText}` }],
+      maxTokens: 800,
+      temperature: 0.1,
+      signal
+    });
+    const parsed = extractJson(extractText(resp));
+    if (parsed?.scores?.length) {
+      for (const s of parsed.scores) {
+        if (s.index >= 0 && s.index < draftsToScore.length && s.overall != null) {
+          const d = draftsToScore[s.index];
+          send({ type: 'meta', draftScore: { key: d.key, score: { overall: Math.round(s.overall), criteria: s.criteria || [] } } });
+        }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 }
