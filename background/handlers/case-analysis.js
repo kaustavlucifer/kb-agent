@@ -102,7 +102,11 @@ export async function handleAnalyze(port, msg) {
     kiPromise
   ]);
 
-  if (kiData.items?.length) send({ type: 'meta', knownIssues: kiData.items });
+  if (kiData.items?.length) {
+    send({ type: 'meta', knownIssues: kiData.items });
+  } else if (kiData.error) {
+    send({ type: 'meta', knownIssues: [], kiError: kiData.error });
+  }
 
   const prodDocGapPromise = (productDocs.length && !stopped)
     ? assessProductDocGap(caseRecord, caseAbstract, productDocs, signal).then(gap => { if (gap) send({ type: 'meta', prodDocGap: gap }); return gap; }).catch(() => null)
@@ -214,7 +218,11 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
         topicName: body.topicName || candidate.topicName || ''
       };
       const kbScore = await scoreArticleForCaseScan(article, signal);
-      kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
+      if (kbScore.overall != null) {
+        kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
+      } else {
+        kbScoredArticles[idx] = { ...sa, kbScore: null, kbScoreError: true };
+      }
       if (!stopped) send({ type: 'meta', topArticles: [...kbScoredArticles] });
     } catch (e) {
       if (stopped) return;
@@ -312,7 +320,7 @@ async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
 
   try {
     const fullText = await streamClaude({
-      system: `Summarize this support case in 3-5 sentences. Use markdown formatting (bold for labels). Cover: what the issue is, what product/feature is affected, current status/impact, and any related engineering work. Be concise and specific.`,
+      system: `Summarize this support case as a bulleted list (use - for bullets). Each bullet should start with a bold label like **Issue:** or **Product:** followed by the detail. Cover: the issue, the affected product/feature, current status/impact, and any related engineering work. Be concise and specific.`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
       maxTokens: 400,
       temperature: 0.1,
@@ -407,15 +415,15 @@ async function assessProductDocGap(caseRecord, caseAbstract, productDocs, signal
   const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}" — ${(d.summary || '').slice(0, 100)}`).join('\n');
   try {
     const resp = await callClaudeFast({
-      system: `You assess whether a support case situation could have been better handled via existing product documentation. Consider:
-- Could the customer have found the answer in these product docs before raising a case?
-- Is there a gap in the product documentation that would have prevented this case?
-- Should the product docs be updated to better address this scenario?
+      system: `You assess whether existing product documentation adequately covers a support case scenario.
 
-Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs]}
-- DOCS_SUFFICIENT: Product docs already cover this well; case could have been self-served
-- DOCS_NEED_UPDATE: Product docs exist but don't adequately address this specific scenario
-- DOCS_MISSING: No product documentation covers this topic at all`,
+IMPORTANT: Be CONSERVATIVE. Default to DOCS_SUFFICIENT unless there is a clear, systemic documentation gap.
+- Most support cases involve customer-specific configurations, edge cases, or misunderstandings that product docs CANNOT reasonably cover. These are NOT documentation gaps.
+- Only recommend DOCS_NEED_UPDATE when the case reveals a common, repeatable scenario that MANY customers would encounter and the docs clearly fail to address.
+- Only recommend DOCS_MISSING when an entire product feature or workflow has ZERO documentation.
+- Bugs, data issues, org-specific configs, and one-off errors are NOT documentation gaps.
+
+Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs]}`,
       messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
       maxTokens: 200,
       temperature: 0.1,

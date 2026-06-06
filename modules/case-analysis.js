@@ -33,7 +33,12 @@ export function mount(container) {
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
   _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
   _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
-  _unsubs.push(subscribe('case.caseSummary', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'streaming') renderByView(); } }));
+  _unsubs.push(subscribe('case.caseSummary', () => {
+    if (!_container) return;
+    const v = getState('case.view');
+    if (v === 'progressive') updateProgressiveSummary();
+    else if (v === 'streaming') updateStreamingSummary();
+  }));
   _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
   _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
   _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'result') renderByView(); } }));
@@ -225,29 +230,24 @@ function renderProgressive() {
     main.appendChild(renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract));
   }
 
-  if (caseSummary) {
-    const summaryContent = renderMarkdown(caseSummary);
-    const summaryCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px 16px', borderLeft: '3px solid var(--primary)', animation: 'fadeIn 0.3s ease-in' } },
-      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '6px' } }, 'Case Summary'),
-      summaryContent
-    );
-    const gusItems = getState('case.gusItems') || [];
-    if (gusItems.length) {
-      summaryCard.appendChild(h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
-        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '4px' } }, 'Related GUS Work'),
-        ...gusItems.slice(0, 3).map(g =>
-          h('div', { style: { fontSize: '11px', padding: '2px 0', display: 'flex', gap: '6px' } },
-            h('span', { style: { fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontWeight: '500' } }, g.name),
-            h('span', { style: { color: 'var(--text-secondary)', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, g.subject || ''),
-            h('span', { class: 'pill pill--neutral', style: { fontSize: '9px' } }, g.status || '')
-          )
+  const summaryCard = h('div', { id: 'progressive-summary', class: 'card', style: { marginBottom: '12px', padding: '12px 16px', borderLeft: '3px solid var(--primary)' } },
+    h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '6px' } }, 'Case Summary'),
+    h('div', { class: 'summary-content' }, caseSummary ? renderMarkdown(caseSummary) : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, spinner('sm'), h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Generating summary…')))
+  );
+  const gusItems = getState('case.gusItems') || [];
+  if (gusItems.length) {
+    summaryCard.appendChild(h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '4px' } }, 'Related GUS Work'),
+      ...gusItems.slice(0, 3).map(g =>
+        h('div', { style: { fontSize: '11px', padding: '2px 0', display: 'flex', gap: '6px' } },
+          h('span', { style: { fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontWeight: '500' } }, g.name),
+          h('span', { style: { color: 'var(--text-secondary)', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, g.subject || ''),
+          h('span', { class: 'pill pill--neutral', style: { fontSize: '9px' } }, g.status || '')
         )
-      ));
-    }
-    main.appendChild(summaryCard);
-  } else {
-    main.appendChild(h('div', { class: 'skeleton', style: { height: '80px', marginBottom: '12px' } }));
+      )
+    ));
   }
+  main.appendChild(summaryCard);
 
   if (prodDocGap && prodDocGap.hasGap) {
     main.appendChild(renderProductDocGapCard(prodDocGap));
@@ -263,6 +263,31 @@ function renderProgressive() {
   main.appendChild(progressCard);
 
   _container.appendChild(grid);
+}
+
+function updateProgressiveSummary() {
+  const summaryEl = _container?.querySelector('#progressive-summary');
+  const caseSummary = getState('case.caseSummary') || '';
+  if (!summaryEl) {
+    if (caseSummary) renderByView();
+    return;
+  }
+  const contentEl = summaryEl.querySelector('.summary-content');
+  if (contentEl) {
+    contentEl.textContent = '';
+    contentEl.appendChild(renderMarkdown(caseSummary));
+  }
+}
+
+function updateStreamingSummary() {
+  const summaryEl = _container?.querySelector('#streaming-summary');
+  const caseSummary = getState('case.caseSummary') || '';
+  if (!summaryEl) return;
+  const contentEl = summaryEl.querySelector('.summary-content');
+  if (contentEl) {
+    contentEl.textContent = '';
+    contentEl.appendChild(renderMarkdown(caseSummary));
+  }
 }
 
 function renderStreaming() {
@@ -285,13 +310,22 @@ function renderStreaming() {
     mainEl = grid.querySelector('[data-role="main"]');
     mainEl.id = 'case-stream-main';
 
-    const caseSummary = getState('case.caseSummary');
-    if (caseSummary) {
-      mainEl.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 14px', borderLeft: '3px solid var(--primary)' } },
-        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '4px' } }, 'Case Summary'),
-        renderMarkdown(caseSummary)
-      ));
+    const caseRecord = getState('case.caseRecord');
+    if (caseRecord) {
+      const completeness = getState('case.caseCompleteness');
+      const detectedPts = getState('case.detectedPts') || [];
+      const caseAbstract = getState('case.caseAbstract');
+      mainEl.appendChild(renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract));
     }
+
+    const caseSummary = getState('case.caseSummary');
+    mainEl.appendChild(h('div', { id: 'streaming-summary', class: 'card', style: { marginBottom: '12px', padding: '10px 14px', borderLeft: '3px solid var(--primary)' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '4px' } }, 'Case Summary'),
+      h('div', { class: 'summary-content' }, caseSummary ? renderMarkdown(caseSummary) : h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Loading…'))
+    ));
+
+    const prodDocGap = getState('case.prodDocGap');
+    if (prodDocGap && prodDocGap.hasGap) mainEl.appendChild(renderProductDocGapCard(prodDocGap));
 
     _container.appendChild(grid);
   } else {
@@ -401,64 +435,57 @@ function renderStreaming() {
 function renderStreamingSuggestion(text, container) {
   const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
 
-  // Extract suggestion titles progressively
-  const titleRegex = /"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  const contentRegex = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  const locationRegex = /"location"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  const impactRegex = /"impact"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  const titleMatch = cleaned.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const changesMatch = cleaned.match(/"changesSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
 
-  const titles = [];
-  let m;
-  while ((m = titleRegex.exec(cleaned)) !== null) titles.push(m[1]);
-  const contents = [];
-  while ((m = contentRegex.exec(cleaned)) !== null) contents.push(m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'));
-  const locations = [];
-  while ((m = locationRegex.exec(cleaned)) !== null) locations.push(m[1]);
-  const impacts = [];
-  while ((m = impactRegex.exec(cleaned)) !== null) impacts.push(m[1]);
-
-  if (titles.length === 0) {
+  if (!titleMatch) {
     container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } },
       spinner('sm'),
-      h('span', null, 'Analyzing article…')
+      h('span', null, 'Generating rewrite…')
     ));
     return;
   }
 
-  titles.forEach((title, i) => {
-    const sugEl = h('div', { style: { marginBottom: '12px', paddingBottom: i < titles.length - 1 ? '12px' : '0', borderBottom: i < titles.length - 1 ? '1px solid var(--border)' : 'none' } });
+  const title = titleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ');
+  container.appendChild(h('div', { style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-primary)', marginBottom: '6px' } }, title));
 
-    sugEl.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' } },
-      impacts[i] ? h('span', { class: `pill pill--${impactColor(impacts[i])}`, style: { fontSize: '10px' } }, impacts[i]) : null,
-      h('span', { style: { fontWeight: '600', fontSize: '12px', color: 'var(--text-primary)' } }, title)
+  if (summaryMatch) {
+    const summary = summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ');
+    container.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '8px', fontStyle: 'italic' } }, summary));
+  }
+
+  const sectionRegex = /\{"heading"\s*:\s*"([^"]+)"\s*,\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  let match;
+  let hasSections = false;
+  while ((match = sectionRegex.exec(cleaned)) !== null) {
+    hasSections = true;
+    const heading = match[1];
+    const body = match[2].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    const sectionEl = h('div', { style: { marginBottom: '8px' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '3px' } }, heading)
+    );
+    const lines = body.split('\n').slice(0, 6);
+    lines.forEach(line => {
+      if (line.startsWith('## ') || line.startsWith('### ')) sectionEl.appendChild(h('div', { style: { fontWeight: '600', fontSize: '11px', marginTop: '4px' } }, line.replace(/^#+\s*/, '')));
+      else if (line.startsWith('- ')) sectionEl.appendChild(h('div', { style: { paddingLeft: '8px', fontSize: '11px' } }, '• ' + line.slice(2)));
+      else if (/^\d+\.\s/.test(line)) sectionEl.appendChild(h('div', { style: { paddingLeft: '8px', fontSize: '11px' } }, line));
+      else if (line.trim()) sectionEl.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, line));
+    });
+    if (body.split('\n').length > 6) sectionEl.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', fontStyle: 'italic' } }, '…'));
+    container.appendChild(sectionEl);
+  }
+
+  if (!hasSections && !changesMatch) {
+    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '11px' } },
+      spinner('sm'),
+      h('span', null, 'Writing sections…')
     ));
+  }
 
-    if (locations[i]) {
-      sugEl.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' } }, `Section: ${locations[i]}`));
-    }
-
-    if (contents[i]) {
-      const contentDiv = h('div', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', paddingLeft: '8px', borderLeft: '2px solid var(--primary-soft)' } });
-      const lines = contents[i].split('\n').slice(0, 8);
-      lines.forEach(line => {
-        if (line.startsWith('## ')) contentDiv.appendChild(h('div', { style: { fontWeight: '600', marginTop: '4px' } }, line.slice(3)));
-        else if (line.startsWith('- ')) contentDiv.appendChild(h('div', { style: { paddingLeft: '8px' } }, '• ' + line.slice(2)));
-        else if (line.trim()) contentDiv.appendChild(h('div', null, line));
-      });
-      if (contents[i].split('\n').length > 8) {
-        contentDiv.appendChild(h('div', { style: { color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '4px' } }, '…'));
-      }
-      sugEl.appendChild(contentDiv);
-    } else {
-      sugEl.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '11px' } },
-        spinner('sm'),
-        h('span', null, 'Writing suggestion content…')
-      ));
-    }
-
-    container.appendChild(sugEl);
-  });
-
+  if (changesMatch) {
+    container.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px', borderTop: '1px solid var(--border)', paddingTop: '4px' } }, 'Changes: ' + changesMatch[1].replace(/\\"/g, '"')));
+  }
 }
 
 function renderStreamingDraft(text, container) {
@@ -1067,6 +1094,24 @@ function renderSidebarProductDocs(docs) {
   return section;
 }
 
+function renderInlineFormatting(text) {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+  if (parts.length === 1) return document.createTextNode(text);
+  const span = h('span', null);
+  for (const part of parts) {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      span.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
+    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+      span.appendChild(h('em', null, part.slice(1, -1)));
+    } else if (part.startsWith('`') && part.endsWith('`')) {
+      span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, part.slice(1, -1)));
+    } else if (part) {
+      span.appendChild(document.createTextNode(part));
+    }
+  }
+  return span;
+}
+
 function renderMarkdown(text) {
   if (!text) return h('span', null, '');
   const lines = text.split('\n');
@@ -1101,9 +1146,9 @@ function renderMarkdown(text) {
     if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, line.slice(4)));
     else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
     else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
-    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, h('span', null, '• ' + line.slice(2))));
-    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, line));
-    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, line));
+    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting('• ' + line.slice(2))));
+    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting(line)));
+    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, renderInlineFormatting(line)));
   }
 
   if (inCodeBlock && codeLines.length) {

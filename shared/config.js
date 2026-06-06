@@ -28,7 +28,7 @@ export const PT_HIGH_VOLUME_CONVS = 200;
 export const PT_MID_VOLUME_CONVS = 100;
 export const PT_LOW_COVERAGE_ARTICLES = 3;
 
-export const STREAM_RENDER_THROTTLE_MS = 600;
+export const STREAM_RENDER_THROTTLE_MS = 150;
 
 export const CACHE_TTL_MS = 30 * 60 * 1000;
 
