@@ -74,9 +74,9 @@ export function modal(title, contentEl, opts = {}) {
   return { close, backdrop, box };
 }
 
-export function progressBar(pct, variant = 'default') {
+export function progressBar(pct, variant = 'default', animated = false) {
   return h('div', { class: 'progress' },
-    h('div', { class: `progress__fill progress__fill--${variant}`, style: { width: `${pct}%` } }),
+    h('div', { class: `progress__fill progress__fill--${variant}${animated ? ' progress__fill--animated' : ''}`, style: { width: `${pct}%` } }),
     h('span', { class: 'progress__label' }, `${Math.round(pct)}%`)
   );
 }

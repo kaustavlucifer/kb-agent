@@ -56,7 +56,7 @@ REWRITE RULES:
 4. RESOLUTION: Begin with a brief context paragraph. Use numbered steps. Each step is a complete actionable instruction. Include expected outcomes. Add real-life examples with Salesforce-format data (random UUIDs, realistic field values — never "xxxxx").
 5. HEADERS: Use ## for sections (translates to <h2>). Make headers descriptive with intent keywords. Keep content under each header ≤512 tokens (~2048 chars). If longer, split with sub-headers (###).
 6. STRUCTURE: Short paragraphs (3-5 sentences). Use bullet lists. Each section self-contained and readable in isolation (it may be retrieved as a standalone chunk).
-7. NO: visual indicators in tables, screenshot-only solutions, unexplained code blocks, internal URLs, speculative statements, PII/credentials.
+7. NO: visual indicators in tables, screenshot-only solutions, unexplained code blocks, internal URLs, speculative statements, PII/credentials, "contact Salesforce support" as a resolution step.
 
 Output format:
 ## TITLE

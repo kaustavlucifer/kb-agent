@@ -45,5 +45,6 @@ export const STORAGE_KEYS = {
   DEDUP_RESULTS: 'kba_dedup_results',
   DEDUP_AT: 'kba_dedup_at',
   RECENT_CASES: 'recentCases',
-  BYPASS_GUARD_RAILS: 'bypassGuardRails'
+  BYPASS_GUARD_RAILS: 'bypassGuardRails',
+  AUTH_CACHE: 'authCache'
 };

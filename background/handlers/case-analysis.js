@@ -469,6 +469,7 @@ KEY RULES:
 - Use H2/H3 headers for structure (used in chunking for Agentforce)
 - Description: state problem, symptoms, context, and WHY
 - Resolution: brief summary of what steps accomplish, then numbered steps
+- NEVER include "contact Salesforce support" or "reach out to support" or "open a case" as a resolution step. Only provide the technical solution.
 - Explain acronyms. Use present tense. Be specific about product + feature.
 - After code blocks, add plain-text explanation
 - Tables should use text, not visual indicators
@@ -559,6 +560,7 @@ KEY RULES:
 - HEADERS: Use H2/H3 headers to break content into logical sections. Headers are used in chunking for Agentforce.
 - DESCRIPTION: State the problem, symptoms, and context. Explain WHY this happens. Include product name with feature terms.
 - RESOLUTION: Begin with a brief statement of what the steps accomplish, then provide numbered steps.
+- NEVER include "contact Salesforce support" or "reach out to support" or "open a case" as a resolution step. The article IS the support resource — only provide the technical solution.
 - Explain acronyms and abbreviations. Use simple present tense.
 - Code blocks should be described succinctly in text.
 - Tables should use text, not visual indicators.
@@ -675,6 +677,8 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
 
   if (!draftsToScore.length) return;
   if (signal?.aborted) return;
+
+  send({ type: 'meta', scoringInProgress: draftsToScore.map(d => d.key) });
 
   const articlesText = draftsToScore.map((d, i) => {
     const allSections = d.article.sections || [];

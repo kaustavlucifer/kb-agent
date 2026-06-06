@@ -123,7 +123,7 @@ function render() {
         h('span', null, running.ptName ? `P&T: ${running.ptName}` : 'Preparing…'),
         h('span', null, `${pct}%`)
       ),
-      progressBar(pct, 'default')
+      progressBar(pct, 'default', true)
     ));
   }
 

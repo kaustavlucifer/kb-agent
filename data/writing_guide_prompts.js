@@ -44,6 +44,7 @@ export const GUIDE_STYLE = `CRITICAL KB STYLE RULES — apply to ALL generated a
 - NEVER include actual customer Org IDs, Record IDs, Instance IDs, or case-specific identifiers. Instead use realistic but GENERIC example data (e.g. '001XXXXXXXXXXXX' for Account IDs, 'NA999' for instances, '00D000000000001' for Org IDs).
 - When referencing SOQL queries or code examples, use sample data patterns — never the actual values from the source case.
 - Keep resolution ACTIONABLE and ACCURATE: Steps must be technically correct and specific enough to follow, but not tied to one customer's configuration.
+- NEVER include "contact Salesforce support", "reach out to support", "open a case", or any variation as a resolution step. The article IS the support resource — only provide the technical solution.
 - The article should read as if written by a product documentation team, not extracted from a support interaction.`;
 
 export const GUIDE_DECISION = `AGENTFORCE KB COVERAGE ASSESSMENT — use these standards to judge whether existing articles adequately cover a case:

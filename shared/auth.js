@@ -130,7 +130,7 @@ export async function pingGusSession() {
     return { status: _gusPingCache.status, apiBase: session.apiBase };
   }
   try {
-    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/chatter/users/me`, {
+    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
       headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
     });
     const status = r.ok ? 'active' : 'expired';
@@ -151,7 +151,7 @@ export async function pingKiSession() {
     return { status: _kiPingCache.status, apiBase: session.apiBase };
   }
   try {
-    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/chatter/users/me`, {
+    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
       headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
     });
     const status = r.ok ? 'active' : 'expired';
@@ -161,6 +161,11 @@ export async function pingKiSession() {
     _kiPingCache = { sid: session.sid, status: 'error', ts: Date.now() };
     return { status: 'error', apiBase: session.apiBase };
   }
+}
+
+export function clearAuthCache() {
+  _gusPingCache = null;
+  _kiPingCache = null;
 }
 
 export function isCaseAnalysisAllowed(caseRecord) {

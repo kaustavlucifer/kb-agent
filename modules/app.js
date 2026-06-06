@@ -19,6 +19,12 @@ async function init() {
   const validTab = TABS.find(t => t.id === hashTab);
   setState('app.activeTab', validTab ? hashTab : 'case-analysis');
   setState('app.connections', { sf: null, ai: null });
+
+  const cached = await localGet([STORAGE_KEYS.AUTH_CACHE]);
+  if (cached[STORAGE_KEYS.AUTH_CACHE]) {
+    setState('app.connections', cached[STORAGE_KEYS.AUTH_CACHE]);
+  }
+
   render();
   checkConnections();
 
@@ -123,7 +129,15 @@ async function checkConnections() {
     chrome.runtime.sendMessage({ action: 'CHECK_GUS_CONNECTION' }).catch(() => ({ connected: false })),
     chrome.runtime.sendMessage({ action: 'CHECK_KI_CONNECTION' }).catch(() => ({ connected: false }))
   ]);
-  setState('app.connections', { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp });
+  const connections = { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp };
+  setState('app.connections', connections);
+  localSet({ [STORAGE_KEYS.AUTH_CACHE]: connections });
+}
+
+async function refreshConnections() {
+  await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => {});
+  await checkConnections();
+  toast('Auth status refreshed.', 'info');
 }
 
 function updateConnectionChips() {
@@ -173,22 +187,13 @@ function updateConnectionChips() {
     onClick: () => chrome.tabs.create({ url: 'https://known-issues-prd1.lightning.force.com' })
   }));
 
-  const clearBtn = h('button', {
+  const refreshBtn = h('button', {
     class: 'btn btn--ghost btn--sm',
-    style: { fontSize: '11px', padding: '2px 6px', marginLeft: '4px' },
-    title: 'Clear all cached data (articles, scores, dedup, coverage)',
-    onClick: async () => {
-      await chrome.storage.local.remove([
-        STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT,
-        STORAGE_KEYS.ARTICLE_SCORES, STORAGE_KEYS.DEDUP_RESULTS,
-        STORAGE_KEYS.DEDUP_AT, 'coverageCache'
-      ]);
-      setState('kb.articles', []);
-      setState('kb.scores', {});
-      toast('Cache cleared.', 'success');
-    }
-  }, 'Clear Cache');
-  container.appendChild(clearBtn);
+    style: { fontSize: '13px', padding: '2px 6px', marginLeft: '4px', lineHeight: '1' },
+    title: 'Refresh auth status (clears auth cache and re-checks all connections)',
+    onClick: refreshConnections
+  }, '↻');
+  container.appendChild(refreshBtn);
 
 }
 

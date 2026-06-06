@@ -1,4 +1,4 @@
-import { detectSession, pingKiSession } from '../shared/auth.js';
+import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfGet, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
@@ -29,7 +29,16 @@ async function handleMessage(msg) {
   switch (msg.action) {
     case 'CHECK_CONNECTION': {
       const session = await detectSession();
-      return { connected: !!session.sid, orgKey: session.key || null, lightningHost: session.lightningHost };
+      if (!session.sid) return { connected: false, orgKey: null, lightningHost: null };
+      try {
+        const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
+          headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
+        });
+        if (!r.ok) return { connected: false, orgKey: session.key || null, lightningHost: session.lightningHost, reason: 'session_expired' };
+      } catch {
+        return { connected: false, orgKey: session.key || null, lightningHost: session.lightningHost, reason: 'network_error' };
+      }
+      return { connected: true, orgKey: session.key || null, lightningHost: session.lightningHost };
     }
     case 'VERIFY_AI_TOKEN': {
       const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN]);
@@ -54,6 +63,7 @@ async function handleMessage(msg) {
     case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
     case 'CHECK_KI_CONNECTION': return checkKiConnection();
+    case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
     case 'SCORE_DRAFT_ARTICLE': return scoreDraftArticle(msg.article);
     default: return { error: `Unknown action: ${msg.action}` };
   }

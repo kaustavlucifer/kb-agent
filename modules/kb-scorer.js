@@ -242,7 +242,7 @@ function render() {
         h('span', null, `Scoring: ${scoring.done} / ${scoring.total}`),
         h('span', null, `${pct}%`)
       ),
-      progressBar(pct, 'default')
+      progressBar(pct, 'default', true)
     ));
   }
 
@@ -255,7 +255,7 @@ function render() {
           h('span', null, `Fetching articles: ${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()}`),
           h('span', null, `${pct}%`)
         ),
-        progressBar(pct, 'default')
+        progressBar(pct, 'default', true)
       ));
     } else {
       scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
