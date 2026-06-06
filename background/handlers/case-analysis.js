@@ -218,12 +218,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
         summary: body.summary || candidate.Summary || '',
         topicName: body.topicName || candidate.topicName || ''
       };
-      const kbScore = await scoreArticleForCaseScan(article, signal);
-      if (kbScore.overall != null) {
-        kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
-      } else {
-        kbScoredArticles[idx] = { ...sa, kbScore: null, kbScoreError: true };
+      let kbScore = await scoreArticleForCaseScan(article, signal);
+      if (kbScore.overall == null && !stopped) {
+        await new Promise(r => setTimeout(r, 1500));
+        kbScore = await scoreArticleForCaseScan(article, signal);
       }
+      kbScoredArticles[idx] = kbScore.overall != null
+        ? { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria }
+        : { ...sa, kbScore: null, kbScoreError: true };
       if (!stopped) send({ type: 'meta', topArticles: [...kbScoredArticles] });
     } catch (e) {
       if (stopped) return;

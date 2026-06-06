@@ -313,6 +313,9 @@ function renderStreaming() {
     const grid = buildResizableGrid();
     const sidebar = grid.querySelector('[data-role="sidebar"]');
     sidebar.id = 'case-stream-sidebar';
+    const result = getState('case.result');
+    const structured = result?.structured || { action: 'UPDATE_EXISTING', confidence: 'MEDIUM' };
+    sidebar.appendChild(renderSidebarQuality(structured));
     sidebar.appendChild(renderSidebarArticles(topArticles));
     const knownIssues = getState('case.knownIssues') || [];
     if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
@@ -343,6 +346,9 @@ function renderStreaming() {
     const sidebar = _container.querySelector('#case-stream-sidebar');
     if (sidebar) {
       sidebar.textContent = '';
+      const result = getState('case.result');
+      const structured = result?.structured || { action: 'UPDATE_EXISTING', confidence: 'MEDIUM' };
+      sidebar.appendChild(renderSidebarQuality(structured));
       sidebar.appendChild(renderSidebarArticles(topArticles));
       const ki = getState('case.knownIssues') || [];
       if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
@@ -937,19 +943,33 @@ async function showArticlePreview(article) {
     const body = h('div', null,
       h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' } }, `#${data.articleNumber || article.articleNumber || ''}`),
       data.summary ? h('div', { style: { marginBottom: '12px', padding: '8px 12px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '12px', lineHeight: '1.5' } }, data.summary) : null,
-      data.description ? h('div', { style: { marginBottom: '12px' } },
-        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Description'),
-        renderMarkdown(data.description.slice(0, 2000))
-      ) : null,
-      data.resolution ? h('div', { style: { marginBottom: '12px' } },
-        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Resolution'),
-        renderMarkdown(data.resolution.slice(0, 2000))
-      ) : null
+      data.descriptionHtml ? renderRichTextSection('Description', data.descriptionHtml) : (data.description ? h('div', { style: { marginBottom: '12px' } }, h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Description'), renderMarkdown(data.description.slice(0, 2000))) : null),
+      data.resolutionHtml ? renderRichTextSection('Resolution', data.resolutionHtml) : (data.resolution ? h('div', { style: { marginBottom: '12px' } }, h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Resolution'), renderMarkdown(data.resolution.slice(0, 2000))) : null)
     );
     modal(data.title || article.title || 'Article Preview', body, { wide: true });
   } catch (e) {
     toast('Preview failed: ' + e.message, 'error');
   }
+}
+
+function renderRichTextSection(heading, html) {
+  const section = h('div', { style: { marginBottom: '12px' } });
+  section.appendChild(h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, heading));
+  const content = h('div', { style: { fontSize: '12px', lineHeight: '1.6', maxHeight: '400px', overflowY: 'auto', padding: '8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)' } });
+  content.innerHTML = sanitizeHtml(html);
+  section.appendChild(content);
+  return section;
+}
+
+function sanitizeHtml(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  div.querySelectorAll('script,iframe,object,embed,form,input').forEach(el => el.remove());
+  div.querySelectorAll('a').forEach(a => { a.setAttribute('target', '_blank'); a.setAttribute('rel', 'noopener'); });
+  div.querySelectorAll('[onclick],[onload],[onerror]').forEach(el => {
+    el.removeAttribute('onclick'); el.removeAttribute('onload'); el.removeAttribute('onerror');
+  });
+  return div.innerHTML;
 }
 
 function formatAction(action) {
@@ -1848,7 +1868,7 @@ function onPortMessage(msg) {
       if (msg.draftScore) {
         const scores = getState('case.draftScores') || {};
         setState('case.draftScores', { ...scores, [msg.draftScore.key]: msg.draftScore.score });
-        if (getState('case.view') === 'result') { _sidebarOnly = true; renderByView(); }
+        if (getState('case.view') === 'result') renderByView();
       }
       if (msg.topArticles) {
         const currentView = getState('case.view');

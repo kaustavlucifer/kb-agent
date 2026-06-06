@@ -143,6 +143,8 @@ async function fetchArticlePreview(articleId) {
         title: r.Title || '',
         summary: r.Summary || '',
         articleNumber: r.ArticleNumber || '',
+        descriptionHtml: r.Description__c || '',
+        resolutionHtml: r.Resolution__c || '',
         description: stripHtml(r.Description__c || ''),
         resolution: stripHtml(r.Resolution__c || '')
       }
