@@ -88,6 +88,7 @@ export function unmount() {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
   if (_streamThrottle) { clearTimeout(_streamThrottle); _streamThrottle = null; }
   if (_typeaheadTimer) { clearTimeout(_typeaheadTimer); _typeaheadTimer = null; }
+  if (_renderRaf) { cancelAnimationFrame(_renderRaf); _renderRaf = null; }
   _container = null;
   _collapsedSections = {};
   _editingSections.clear();
