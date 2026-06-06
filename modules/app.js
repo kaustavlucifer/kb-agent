@@ -135,7 +135,7 @@ function updateConnectionChips() {
 
   container.appendChild(chip(
     conn.sf?.connected ? 'connected' : 'disconnected',
-    conn.sf?.connected ? (conn.sf.orgKey || 'OrgCS') : 'SF Offline',
+    conn.sf?.connected ? 'OrgCS' : 'OrgCS Offline',
     {
       title: conn.sf?.connected ? 'Connected to Salesforce — click to open' : 'Not connected — click to log into OrgCS',
       onClick: () => {

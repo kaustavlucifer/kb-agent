@@ -10,6 +10,7 @@ let _collapsedSections = {};
 let _streamThrottle = null;
 let _streamPending = false;
 let _editingSections = new Set();
+let _sidebarOnly = false;
 
 export function mount(container) {
   _unsubs.forEach(u => u());
@@ -539,6 +540,27 @@ function renderStreamingDraft(text, container) {
 
 function renderResult() {
   if (!_container) return;
+
+  if (_sidebarOnly) {
+    _sidebarOnly = false;
+    const sidebar = _container.querySelector('[data-role="sidebar"]');
+    if (sidebar) {
+      sidebar.textContent = '';
+      const result = getState('case.result');
+      const structured = result?.structured || result || {};
+      const topArticles = getState('case.topArticles') || [];
+      sidebar.appendChild(renderSidebarQuality(structured));
+      const hypotheses = getState('case.hypotheses') || [];
+      if (hypotheses.length) sidebar.appendChild(renderSidebarHypotheses(hypotheses));
+      sidebar.appendChild(renderSidebarArticles(topArticles));
+      const knownIssues = getState('case.knownIssues') || [];
+      if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
+      const productDocs = getState('case.productDocs') || [];
+      if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
+    }
+    return;
+  }
+
   _container.textContent = '';
   _container.appendChild(buildInlineSearch());
 
@@ -647,6 +669,14 @@ function renderResult() {
   const prodDocGap = getState('case.prodDocGap') || result.prodDocGap;
   if (prodDocGap && prodDocGap.hasGap) {
     main.appendChild(renderProductDocGapCard(prodDocGap));
+  } else {
+    main.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 16px', border: '1px solid var(--success)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--success) 6%, transparent)' } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--success)' } }, 'Product Documentation'),
+        h('span', { class: 'pill pill--success', style: { fontSize: '10px' } }, 'Not a Candidate')
+      ),
+      h('p', { style: { fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0 0' } }, 'No product documentation update needed for this case scenario.')
+    ));
   }
 
   if (structured.suggestions?.length) {
@@ -674,7 +704,8 @@ function renderResult() {
         h('span', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' } }, draft.title || 'New Article Draft')
       ),
       h('div', { style: { display: 'flex', gap: '6px' }, onClick: (e) => e.stopPropagation() },
-        h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${(draft.sections || []).length} sections`),
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
+        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Score'),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyDraft(draft) }, 'Copy'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
       )
@@ -684,16 +715,14 @@ function renderResult() {
     if (!draftCollapsed) {
       const draftBody = h('div', { style: { padding: '14px 16px' } });
       draftBody.appendChild(renderEditableSection({ heading: 'Title', body: draft.title || 'Untitled' }, 0, 'draft'));
-      const summaryText = draft.summary || (draft.sections || []).find(s => /summary/i.test(s.heading))?.body || '';
-      draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: summaryText || '(No summary generated — add a 2-4 sentence overview)' }, 1, 'draft'));
+      draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: draft.summary || '(No summary generated)' }, 1, 'draft'));
       const contentSections = (draft.sections || []).filter(s => !/summary/i.test(s.heading));
-      const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading)) || contentSections[0];
-      const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading)) || contentSections[1];
-      if (descSection) draftBody.appendChild(renderEditableSection({ heading: 'Description', body: descSection.body }, 2, 'draft'));
-      if (resSection && resSection !== descSection) draftBody.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection.body }, 3, 'draft'));
-      if (!descSection && !resSection) {
-        contentSections.forEach((sec, idx) => draftBody.appendChild(renderEditableSection(sec, idx + 2, 'draft')));
-      }
+      const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading));
+      const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
+      draftBody.appendChild(renderEditableSection({ heading: 'Description', body: descSection?.body || '(No description)' }, 2, 'draft'));
+      draftBody.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection?.body || '(No resolution)' }, 3, 'draft'));
+      const otherSections = contentSections.filter(s => s !== descSection && s !== resSection);
+      otherSections.forEach((sec, idx) => draftBody.appendChild(renderEditableSection(sec, idx + 4, 'draft')));
       draftCard.appendChild(draftBody);
     }
     main.appendChild(draftCard);
@@ -799,7 +828,7 @@ function renderProductDocGapCard(prodDocGap) {
 function renderSidebarKnownIssues(kiItems) {
   const isCollapsed = _collapsedSections['known-issues'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['known-issues'] = !_collapsedSections['known-issues']; renderByView(); } },
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['known-issues'] = !_collapsedSections['known-issues']; _sidebarOnly = true; renderByView(); } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Known Issues (${kiItems.length})`),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
@@ -835,7 +864,7 @@ function stopProcessing() {
 function renderSidebarArticles(articles) {
   const isCollapsed = _collapsedSections['articles'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['articles'] = !_collapsedSections['articles']; renderByView(); } },
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['articles'] = !_collapsedSections['articles']; _sidebarOnly = true; renderByView(); } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Similar Articles (${articles.length})`),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
@@ -949,7 +978,7 @@ function renderSidebarQuality(structured) {
   const scoreColor = readinessScore >= 75 ? 'var(--success)' : readinessScore >= 50 ? 'var(--warning)' : 'var(--error)';
   const scoreLabel = readinessScore >= 75 ? 'AGF Ready' : readinessScore >= 50 ? 'Needs Work' : 'Not Ready';
 
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['quality'] = !_collapsedSections['quality']; renderByView(); } },
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['quality'] = !_collapsedSections['quality']; _sidebarOnly = true; renderByView(); } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
       h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AF Readiness'),
       h('span', { style: { fontSize: '14px', fontWeight: '700', color: scoreColor } }, `${readinessScore}`)
@@ -977,16 +1006,32 @@ function renderSidebarQuality(structured) {
       ['Avg KB Score', avgKbScore != null ? String(avgKbScore) : '…']
     ];
 
+    const draftScores = getState('case.draftScores') || {};
+    if (Object.keys(draftScores).length) {
+      items.push(['', '']);
+      for (const [key, scoreData] of Object.entries(draftScores)) {
+        const label = key === 'new-draft' ? 'New Draft' : `Rewrite ${key.replace('rewrite-', '#').slice(0, 12)}`;
+        items.push([label, `${scoreData.overall}/100`]);
+      }
+    }
+
     if (structured.suggestions?.length) items.push(['Rewrites', String(structured.suggestions.length)]);
     if (structured.newArticleDraft) items.push(['New Draft', 'Yes']);
 
     items.forEach(([label, value]) => {
+      if (!label && !value) { body.appendChild(h('div', { style: { height: '6px' } })); return; }
       const valueColor = label === 'Confidence' ? (value === 'HIGH' ? 'var(--success)' : value === 'MEDIUM' ? 'var(--warning)' : 'var(--error)') : 'var(--text-primary)';
       body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid var(--border)' } },
         h('span', { style: { color: 'var(--text-muted)' } }, label),
         h('span', { style: { fontWeight: '500', color: valueColor } }, value)
       ));
     });
+
+    if (Object.keys(draftScores).length) {
+      body.appendChild(h('div', { style: { marginTop: '8px' } },
+        h('button', { class: 'btn btn--ghost btn--sm', style: { width: '100%', fontSize: '10px' }, onClick: () => showScoreInsights(draftScores) }, 'View Insights')
+      ));
+    }
 
     section.appendChild(body);
   }
@@ -999,7 +1044,7 @@ function renderSidebarHypotheses(hypotheses) {
   const section = h('div', { style: { marginBottom: '16px' } });
   const pendingCount = hypotheses.filter(hyp => hyp.status === 'pending').length;
   const headerLabel = _hypothesisRefining ? 'Refining…' : `Hypotheses (${pendingCount} pending)`;
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['hypotheses'] = !_collapsedSections['hypotheses']; renderByView(); } },
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['hypotheses'] = !_collapsedSections['hypotheses']; _sidebarOnly = true; renderByView(); } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: _hypothesisRefining ? 'var(--primary)' : 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' } }, _hypothesisRefining ? spinner('sm') : null, headerLabel),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
@@ -1088,7 +1133,7 @@ async function handleHypothesis(index, status) {
 function renderSidebarProductDocs(docs) {
   const isCollapsed = _collapsedSections['product-docs'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['product-docs'] = !_collapsedSections['product-docs']; renderByView(); } },
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['product-docs'] = !_collapsedSections['product-docs']; _sidebarOnly = true; renderByView(); } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Product Docs'),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
@@ -1261,9 +1306,9 @@ function renderFullRewriteCard(rewrite) {
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, rewrite.title || rewrite.articleTitle)
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
-      h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${(rewrite.sections || []).length} sections`),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
+      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Score'),
+      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
     )
   );
@@ -1279,16 +1324,14 @@ function renderFullRewriteCard(rewrite) {
     const body = h('div', { style: { padding: '14px 16px' } });
     const prefix = `rewrite-${rewrite.articleId}`;
     body.appendChild(renderEditableSection({ heading: 'Title', body: rewrite.title || rewrite.articleTitle || 'Untitled' }, 0, prefix));
-    const summaryText = rewrite.summary || (rewrite.sections || []).find(s => /summary/i.test(s.heading))?.body || '';
-    body.appendChild(renderEditableSection({ heading: 'Summary', body: summaryText || '(No summary — add overview)' }, 1, prefix));
+    body.appendChild(renderEditableSection({ heading: 'Summary', body: rewrite.summary || '(No summary)' }, 1, prefix));
     const contentSections = (rewrite.sections || []).filter(s => !/summary/i.test(s.heading));
-    const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading)) || contentSections[0];
-    const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading)) || contentSections[1];
-    if (descSection) body.appendChild(renderEditableSection({ heading: 'Description', body: descSection.body }, 2, prefix));
-    if (resSection && resSection !== descSection) body.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection.body }, 3, prefix));
-    if (!descSection && !resSection) {
-      contentSections.forEach((sec, idx) => body.appendChild(renderEditableSection(sec, idx + 2, prefix)));
-    }
+    const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading));
+    const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
+    body.appendChild(renderEditableSection({ heading: 'Description', body: descSection?.body || '(No description)' }, 2, prefix));
+    body.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection?.body || '(No resolution)' }, 3, prefix));
+    const otherSections = contentSections.filter(s => s !== descSection && s !== resSection);
+    otherSections.forEach((sec, idx) => body.appendChild(renderEditableSection(sec, idx + 4, prefix)));
     card.appendChild(body);
   }
 
@@ -1462,6 +1505,62 @@ function refineRewrite(rewrite) {
     } catch (e) {
       toast('Refine error: ' + e.message, 'error');
     }
+  }
+}
+
+function showScoreInsights(draftScores) {
+  const content = h('div', null);
+  for (const [key, scoreData] of Object.entries(draftScores)) {
+    const label = key === 'new-draft' ? 'New Article Draft' : `Rewrite ${key.replace('rewrite-', '#')}`;
+    const scoreColor = scoreData.overall >= 75 ? 'var(--success)' : scoreData.overall >= 50 ? 'var(--warning)' : 'var(--error)';
+    const articleSection = h('div', { style: { marginBottom: '16px' } },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
+        h('span', { style: { fontWeight: '600', fontSize: '13px' } }, label),
+        h('span', { style: { fontWeight: '700', fontSize: '14px', color: scoreColor } }, `${scoreData.overall}/100`)
+      )
+    );
+    if (scoreData.criteria?.length) {
+      const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto', gap: '4px 12px', fontSize: '11px' } });
+      for (const c of scoreData.criteria) {
+        if (c.na) continue;
+        const cColor = c.score >= c.max * 0.8 ? 'var(--success)' : c.score >= c.max * 0.5 ? 'var(--warning)' : 'var(--error)';
+        grid.appendChild(h('span', { style: { color: 'var(--text-secondary)' } }, c.label || c.id));
+        grid.appendChild(h('span', { style: { fontWeight: '500', color: cColor, textAlign: 'right' } }, `${c.score}/${c.max}`));
+        if (c.issues?.length) {
+          grid.appendChild(h('div', { style: { gridColumn: '1 / -1', paddingLeft: '8px', color: 'var(--error)', fontSize: '10px', marginBottom: '2px' } }, c.issues.join('; ')));
+        }
+      }
+      articleSection.appendChild(grid);
+    }
+    content.appendChild(articleSection);
+  }
+  modal('AF Readiness Insights', content, { wide: true });
+}
+
+async function scoreArticleDraft(draft, draftKey) {
+  toast('Scoring article for AF readiness…', 'info');
+  try {
+    const sectionsText = (draft.sections || []).map(s => s.body || '').join('\n');
+    const resp = await chrome.runtime.sendMessage({
+      action: 'SCORE_DRAFT_ARTICLE',
+      article: {
+        title: draft.title || draft.articleTitle || '',
+        summary: draft.summary || '',
+        description: (draft.sections || []).find(s => /description/i.test(s.heading))?.body || sectionsText.slice(0, 3000),
+        resolution: (draft.sections || []).find(s => /resolution/i.test(s.heading))?.body || '',
+        articleNumber: draft.articleNumber || 'DRAFT',
+        topicName: ''
+      }
+    });
+    if (resp?.success && resp.score) {
+      setState('case.draftScores', { ...(getState('case.draftScores') || {}), [draftKey]: resp.score });
+      renderByView();
+      toast(`AF Score: ${resp.score.overall}/100`, resp.score.overall >= 75 ? 'success' : 'info');
+    } else {
+      toast(resp?.error || 'Scoring failed.', 'error');
+    }
+  } catch (e) {
+    toast('Score error: ' + e.message, 'error');
   }
 }
 
@@ -1675,6 +1774,7 @@ function startAnalysis(caseId) {
   setState('case.caseAbstract', null);
   setState('case.knownIssues', null);
   setState('case.publishedUrl', null);
+  setState('case.draftScores', null);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
