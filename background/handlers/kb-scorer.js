@@ -127,9 +127,6 @@ function computeDynamicMaxes(flags) {
     redistribution[id] = Math.round(remaining * (base / secondaryBase));
   }
 
-  const diff = freedPoints - Object.values(redistribution).reduce((a, b) => a + b, 0);
-  if (diff !== 0 && redistribution['headers'] != null) redistribution['headers'] += diff;
-
   const maxes = {};
   for (const c of CRITERIA) {
     if (naSet.has(c.id)) maxes[c.id] = 0;

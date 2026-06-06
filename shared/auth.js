@@ -163,42 +163,6 @@ export async function pingKiSession() {
   }
 }
 
-export function describeAuthError(session) {
-  if (!session || !session.sid) {
-    return 'No active Salesforce session found. Please log into OrgCS in this browser, then retry.';
-  }
-  if (!session.isOrgcs) {
-    const lk = String(session.key || '').toLowerCase();
-    if (/^org62/.test(lk)) {
-      return 'Detected an org62 session, but this extension reads OrgCS. Open OrgCS in another tab and retry.';
-    }
-    return `Detected session for "${session.key}", not OrgCS. Log into OrgCS and retry.`;
-  }
-  return null;
-}
-
-export async function findSid(lightningHost) {
-  const host = String(lightningHost || '').trim().toLowerCase();
-  if (!host.endsWith('.lightning.force.com')) {
-    throw new Error(`Invalid Lightning host: ${JSON.stringify(lightningHost)}`);
-  }
-  const apiHost = host.slice(0, -'.lightning.force.com'.length) + '.my.salesforce.com';
-  const apiBase = `https://${apiHost}`;
-  const domains = [apiHost, lightningHost];
-  const results = await Promise.all(
-    domains.map(d => chrome.cookies.getAll({ domain: d, name: 'sid' }))
-  );
-  for (const cookies of results) {
-    const fresh = cookies.reduce((best, c) => {
-      if (!best) return c;
-      return (c.expirationDate || 0) > (best.expirationDate || 0) ? c : best;
-    }, null);
-    if (fresh) return { sid: fresh.value, apiBase };
-  }
-  return { sid: null, apiBase };
-}
-
-
 export function isCaseAnalysisAllowed(caseRecord) {
   const supportLevel = (caseRecord?.__supportLevel || '').trim();
   const hyperforce = (caseRecord?.__hyperforce || '').trim();

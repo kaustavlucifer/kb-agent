@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, progressBar, chip, modal } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, progressBar, modal } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS } from '../shared/config.js';
@@ -11,6 +11,7 @@ let _streamThrottle = null;
 let _streamPending = false;
 let _editingSections = new Set();
 let _sidebarOnly = false;
+let _renderRaf = null;
 
 export function mount(container) {
   _unsubs.forEach(u => u());
@@ -31,20 +32,20 @@ export function mount(container) {
   loadRecentCases();
   renderByView();
   _unsubs.push(subscribe('case.view', () => { if (_container) renderByView(); }));
-  _unsubs.push(subscribe('case.progress', () => { if (_container) { const v = getState('case.view'); if (v === 'analyzing' || v === 'progressive') renderByView(); } }));
+  _unsubs.push(subscribe('case.progress', () => { if (_container) { const v = getState('case.view'); if (v === 'analyzing') renderByView(); else if (v === 'progressive') scheduleRender(); } }));
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
   _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
-  _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
+  _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
   _unsubs.push(subscribe('case.caseSummary', () => {
     if (!_container) return;
     const v = getState('case.view');
     if (v === 'progressive') updateProgressiveSummary();
     else if (v === 'streaming') updateStreamingSummary();
   }));
-  _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
-  _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
-  _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'result') renderByView(); } }));
-  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'streaming' || v === 'result') renderByView(); } }));
+  _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
+  _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
+  _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'result') renderByView(); } }));
+  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'streaming' || v === 'result') renderByView(); } }));
   _unsubs.push(subscribe('case.topArticles', () => {
     if (!_container) return;
     const view = getState('case.view');
@@ -103,6 +104,11 @@ function renderByView() {
   else if (view === 'progressive') renderProgressive();
   else if (view === 'streaming') renderStreaming();
   else if (view === 'result') renderResult();
+}
+
+function scheduleRender() {
+  if (_renderRaf) return;
+  _renderRaf = requestAnimationFrame(() => { _renderRaf = null; if (_container) renderByView(); });
 }
 
 function buildInlineSearch() {
@@ -962,12 +968,19 @@ function renderRichTextSection(heading, html) {
 }
 
 function sanitizeHtml(html) {
+  const SAFE_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'id', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
   const div = document.createElement('div');
   div.innerHTML = html;
-  div.querySelectorAll('script,iframe,object,embed,form,input').forEach(el => el.remove());
-  div.querySelectorAll('a').forEach(a => { a.setAttribute('target', '_blank'); a.setAttribute('rel', 'noopener'); });
-  div.querySelectorAll('[onclick],[onload],[onerror]').forEach(el => {
-    el.removeAttribute('onclick'); el.removeAttribute('onload'); el.removeAttribute('onerror');
+  div.querySelectorAll('script,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());
+  div.querySelectorAll('*').forEach(el => {
+    for (const attr of [...el.attributes]) {
+      if (!SAFE_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+    }
+    if (el.tagName === 'A') { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener'); }
+    if (el.hasAttribute('style')) {
+      const style = el.getAttribute('style');
+      if (/expression|javascript|url\s*\(/i.test(style)) el.removeAttribute('style');
+    }
   });
   return div.innerHTML;
 }
@@ -1790,6 +1803,8 @@ let _analysisGen = 0;
 
 function startAnalysis(caseId) {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
+  _sidebarOnly = false;
+  _editingSections.clear();
   const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: 'Connecting…' });

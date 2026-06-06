@@ -65,7 +65,7 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
 function resolveCloudValues(ptPatterns) {
   const clouds = new Set();
   for (const pt of ptPatterns) {
-    for (const [vertical, mapping] of Object.entries(KI_CLOUD_MAPPING)) {
+    for (const [, mapping] of Object.entries(KI_CLOUD_MAPPING)) {
       if (mapping.ptPatterns.some(p => pt.includes(p) || p.includes(pt))) {
         clouds.add(mapping.cloud);
       }
