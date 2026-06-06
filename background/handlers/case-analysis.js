@@ -1,10 +1,11 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../../shared/config.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, SCORE_CONCURRENCY } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
-import { GUIDE_GENERATION, GUIDE_SCORING, GUIDE_DECISION } from '../../data/writing_guide_prompts.js';
+import { fetchRelatedKnownIssues } from './ki-enrichment.js';
+import { GUIDE_GENERATION, GUIDE_SCORING, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];
@@ -19,6 +20,22 @@ export async function handleAnalyze(port, msg) {
 
   const send = (data) => { try { port.postMessage(data); } catch {} };
   const caseId = sanitizeId(msg.caseId);
+
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+  let stopped = false;
+
+  port.onMessage.addListener((m) => {
+    if (m.action === 'STOP') {
+      stopped = true;
+      abortController.abort();
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    stopped = true;
+    abortController.abort();
+  });
 
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
 
@@ -47,25 +64,27 @@ export async function handleAnalyze(port, msg) {
     }
   }
 
+  send({ type: 'meta', caseRecord: { id: caseRecord.Id, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, status: caseRecord.Status, priority: caseRecord.Priority, createdDate: caseRecord.CreatedDate, description: (caseRecord.Description || '').slice(0, 500) } });
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
   const comments = await sfQuery(session.apiBase, session.sid,
     `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
   );
 
-  // GUS enrichment + intent extraction + abstract + case summary — ALL in parallel
+  const completeness = computeCompleteness(caseRecord, comments);
+  send({ type: 'meta', caseCompleteness: completeness });
+
   const gusWorkNames = extractWorkItemNames(comments);
   const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames) : Promise.resolve({ items: [], feed: [], error: null });
 
   send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
   const [intentsResult, caseAbstract, gusData] = await Promise.all([
-    extractIntents(caseRecord, comments),
-    extractAbstract(caseRecord, comments),
+    extractIntents(caseRecord, comments, signal),
+    extractAbstract(caseRecord, comments, signal),
     gusPromise
   ]);
 
-  // Case summary streams to UI for better UX
-  const caseSummaryPromise = streamCaseSummary(caseRecord, comments, gusData, send);
+  const caseSummaryPromise = streamCaseSummary(caseRecord, comments, gusData, send, signal);
   send({ type: 'meta', gusItems: gusData.items });
 
   send({ type: 'progress', step: 3, label: 'Searching KB articles (SOSL)' });
@@ -73,11 +92,21 @@ export async function handleAnalyze(port, msg) {
   const allQueries = intentsResult.intents.flatMap(i => i.queries);
   const ptPatterns = resolveTargetPts(product, caseRecord.Subject, caseRecord.Description);
 
-  // SOSL-first: primary search with P&T-scoped SOSL queries
-  const [soslResults, productDocs] = await Promise.all([
+  send({ type: 'meta', detectedPts: ptPatterns, caseAbstract: { product, symptomClass: caseAbstract?.symptomClass || '', errorSignature: caseAbstract?.errorSignature || '' } });
+
+  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject).catch(() => ({ items: [], error: null }));
+
+  const [soslResults, productDocs, kiData] = await Promise.all([
     soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns),
-    searchProductDocs(session.apiBase, session.sid, allQueries)
+    searchProductDocs(session.apiBase, session.sid, allQueries),
+    kiPromise
   ]);
+
+  if (kiData.items?.length) send({ type: 'meta', knownIssues: kiData.items });
+
+  const prodDocGapPromise = (productDocs.length && !stopped)
+    ? assessProductDocGap(caseRecord, caseAbstract, productDocs, signal).then(gap => { if (gap) send({ type: 'meta', prodDocGap: gap }); return gap; }).catch(() => null)
+    : Promise.resolve(null);
 
   send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
   const candidates = soslResults.slice(0, 15);
@@ -123,7 +152,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const resp = await callClaudeFast(aiScoringPrompt);
+      const resp = await callClaudeFast({ ...aiScoringPrompt, signal });
       const parsed = extractJson(extractText(resp));
       if (parsed?.articles?.length) {
         const scored = parsed.articles
@@ -164,12 +193,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'meta', topArticles: scoredArticles, productDocs: productDocs || [] });
 
-  // KB scoring runs in background (non-blocking) — decision proceeds immediately
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+
   send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
   const kbScoredArticles = [...scoredArticles];
 
   // Fire-and-forget scoring — sends progressive updates to UI
-  mapWithConcurrency(scoredArticles, 5, async (sa, idx) => {
+  mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
+    if (stopped) return;
     try {
       const body = candidateBodies.get(sa.id) || {};
       const candidate = candidates.find(c => c.Id === sa.id) || {};
@@ -182,14 +213,21 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
         summary: body.summary || candidate.Summary || '',
         topicName: body.topicName || candidate.topicName || ''
       };
-      const kbScore = await scoreArticleForCaseScan(article);
+      const kbScore = await scoreArticleForCaseScan(article, signal);
       kbScoredArticles[idx] = { ...sa, kbScore: kbScore.overall, kbCriteria: kbScore.criteria };
+      if (!stopped) send({ type: 'meta', topArticles: [...kbScoredArticles] });
+    } catch (e) {
+      if (stopped) return;
+      kbScoredArticles[idx] = { ...sa, kbScore: null, kbScoreError: true };
       send({ type: 'meta', topArticles: [...kbScoredArticles] });
-    } catch {}
+    }
   }).catch(() => {});
 
-  // Decision proceeds immediately (doesn't wait for scoring)
-  const decision = await makeDecision(caseRecord, caseAbstract, topArticles);
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+
+  const decision = await makeDecision(caseRecord, caseAbstract, topArticles, signal);
+
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
   let structured;
@@ -206,7 +244,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       coveringArticles: coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    const suggestions = await generateFullRewrites(topArticles, candidateBodies, caseRecord, comments, caseAbstract, send);
+    const suggestions = await generateFullRewrites(topArticles, candidateBodies, caseRecord, comments, caseAbstract, send, signal);
     structured = {
       action,
       confidence: decision.confidence,
@@ -217,7 +255,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   }
 
   if (action === 'CREATE_NEW' || action === 'BOTH') {
-    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, send);
+    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, send, signal);
     if (structured && action === 'BOTH') {
       structured.newArticleDraft = draft;
     } else {
@@ -230,20 +268,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     }
   }
 
-  // Await case summary (started earlier in parallel) and assess product doc gap
   await caseSummaryPromise;
-
-  let prodDocGap = null;
-  if (productDocs.length) {
-    prodDocGap = await assessProductDocGap(caseRecord, caseAbstract, productDocs);
-    if (prodDocGap) send({ type: 'meta', prodDocGap });
-  }
+  const prodDocGap = await prodDocGapPromise;
 
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 }
 
 
-async function extractIntents(caseRecord, comments) {
+async function extractIntents(caseRecord, comments, signal) {
   const commentsText = comments.slice(0, 10).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   const resp = await callClaudeFast({
     system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
@@ -251,27 +283,29 @@ async function extractIntents(caseRecord, comments) {
 Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}`,
     messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
     maxTokens: 800,
-    temperature: 0.1
+    temperature: 0.1,
+    signal
   });
   const parsed = extractJson(extractText(resp));
   if (!parsed?.intents) return { theme: caseRecord.Subject, product: null, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
   return { theme: parsed.theme || '', product: parsed.product || null, intents: parsed.intents };
 }
 
-async function extractAbstract(caseRecord, comments) {
+async function extractAbstract(caseRecord, comments, signal) {
   const commentsText = comments.slice(0, 8).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   try {
     const resp = await callClaudeFast({
       system: 'Extract a problem signature from this case. Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"..."}',
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentsText.slice(0, 2000)}` }],
       maxTokens: 500,
-      temperature: 0.1
+      temperature: 0.1,
+      signal
     });
     return extractJson(extractText(resp)) || null;
   } catch { return null; }
 }
 
-async function streamCaseSummary(caseRecord, comments, gusData, send) {
+async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
   const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
   const gusContext = (gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n');
   const gusFeedText = (gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n');
@@ -282,6 +316,7 @@ async function streamCaseSummary(caseRecord, comments, gusData, send) {
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
       maxTokens: 400,
       temperature: 0.1,
+      signal,
       onDelta: (chunk) => { send({ type: 'summary-delta', chunk }); }
     });
     send({ type: 'meta', caseSummary: fullText });
@@ -367,7 +402,7 @@ async function fetchCandidateBodies(apiBase, sid, candidates) {
   return bodyMap;
 }
 
-async function assessProductDocGap(caseRecord, caseAbstract, productDocs) {
+async function assessProductDocGap(caseRecord, caseAbstract, productDocs, signal) {
   if (!productDocs.length) return null;
   const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}" — ${(d.summary || '').slice(0, 100)}`).join('\n');
   try {
@@ -383,7 +418,8 @@ Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendati
 - DOCS_MISSING: No product documentation covers this topic at all`,
       messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
       maxTokens: 200,
-      temperature: 0.1
+      temperature: 0.1,
+      signal
     });
     return extractJson(extractText(resp)) || null;
   } catch { return null; }
@@ -435,7 +471,7 @@ const SCORING_CRITERIA = [
   { id: 'taxonomy', label: 'Taxonomy & Product Context', baseMax: 8 }
 ];
 
-async function scoreArticleForCaseScan(article) {
+async function scoreArticleForCaseScan(article, signal) {
   const descRaw = article.description || '';
   const resRaw = article.resolution || '';
   const descText = stripHtml(descRaw).slice(0, MAX_BODY_CHARS);
@@ -491,7 +527,8 @@ Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":
     messages: [{ role: 'user', content: `Title: ${article.title}\nArticle#: ${article.articleNumber}\nP&T: ${article.topicName || '(none)'}\nSUMMARY: ${article.summary || '(empty)'}\nDESCRIPTION (${descText.length} chars): ${descText || '(empty)'}\nRESOLUTION (${resText.length} chars): ${resText || '(empty)'}${stepsText ? '\nSTEPS: ' + stepsText : ''}` }],
     maxTokens: 2200,
     temperature: 0.1,
-    model: 'claude-sonnet-4-6'
+    model: 'claude-sonnet-4-6',
+    signal
   });
 
   const text = extractText(resp);
@@ -509,7 +546,7 @@ Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":
   return { overall, criteria, error: null };
 }
 
-async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send) {
+async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
 
@@ -525,6 +562,8 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
 
 AGENTFORCE WRITING GUIDE (follow strictly):
 ${GUIDE_GENERATION}
+
+${GUIDE_STYLE}
 
 KEY RULES:
 - Title: product-specific, describes exact issue
@@ -542,6 +581,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
         messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 3000,
         temperature: 0.2,
+        signal,
         onDelta: (chunk) => {
           send({ type: 'suggestion-delta', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, chunk });
         }
@@ -567,7 +607,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   return allSuggestions;
 }
 
-async function makeDecision(caseRecord, abstract, topArticles) {
+async function makeDecision(caseRecord, abstract, topArticles, signal) {
   if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.' };
   const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" (relevance: ${a._relevanceScore || 'N/A'}) — ${(a.Summary || '').slice(0, 150)}`).join('\n');
   const resp = await callClaudeFast({
@@ -596,21 +636,24 @@ BOTH — Choose when:
 - Existing articles should be updated AND a distinctly different aspect needs a new article
 
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence explaining the decision","coveringArticles":[indices of articles that already cover this case, if NO_ACTION]}`,
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (scored for relevance to this case):\n${articleList}` }],
+    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (scored for relevance to this case):\n${articleList}` }],
     maxTokens: 250,
-    temperature: 0.1
+    temperature: 0.1,
+    signal
   });
   const parsed = extractJson(extractText(resp));
   return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.' };
 }
 
-async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send) {
+async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send, signal) {
   const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
   const fullText = await streamClaude({
     system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption.
 
 AGENTFORCE WRITING GUIDE (follow strictly):
 ${GUIDE_GENERATION}
+
+${GUIDE_STYLE}
 
 KEY RULES:
 - TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario.
@@ -628,7 +671,8 @@ IMPORTANT: Use EXACTLY these 4 fields — title, summary, and two sections: Desc
 Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["Description"|"Resolution"]}]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}` }],
     maxTokens: FINAL_MAX_TOKENS,
-    temperature: 0.3,
+    temperature: 0.2,
+    signal,
     onDelta: (chunk) => { send({ type: 'delta', chunk }); }
   });
   const parsed = extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
@@ -636,4 +680,16 @@ Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description"
     send({ type: 'meta', hypotheses: parsed.hypotheses.map((h, i) => ({ ...h, id: `h${i}`, status: 'pending' })) });
   }
   return parsed;
+}
+
+function computeCompleteness(caseRecord, comments) {
+  let score = 0;
+  const details = [];
+  if ((caseRecord.Description || '').length > 50) { score += 25; details.push('description'); }
+  if (comments.length > 1) { score += 25; details.push('comments'); }
+  if ((caseRecord.Description || '').match(/error|exception|fail|issue|unable/i)) { score += 20; details.push('error-signals'); }
+  if ((caseRecord.Subject || '').length > 10) { score += 15; details.push('subject'); }
+  if (comments.some(c => /W-\d{4,}/.test(c.CommentBody || ''))) { score += 15; details.push('gus-refs'); }
+  const label = score >= 70 ? 'Sufficient' : score >= 40 ? 'Partial' : 'Insufficient';
+  return { score: Math.min(100, score), label, details };
 }

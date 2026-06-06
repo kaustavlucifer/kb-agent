@@ -234,7 +234,3 @@ export function resolveTargetPts(caseProduct, caseSubject, caseDescription) {
   return ptPatterns;
 }
 
-export function matchPtPatterns(topicName, ptPatterns) {
-  if (!topicName || !ptPatterns.length) return false;
-  return ptPatterns.some(pattern => topicName === pattern || topicName.startsWith(pattern));
-}

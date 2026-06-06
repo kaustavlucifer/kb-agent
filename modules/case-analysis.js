@@ -29,14 +29,20 @@ export function mount(container) {
   loadRecentCases();
   renderByView();
   _unsubs.push(subscribe('case.view', () => { if (_container) renderByView(); }));
-  _unsubs.push(subscribe('case.progress', () => { if (_container && getState('case.view') === 'analyzing') renderByView(); }));
+  _unsubs.push(subscribe('case.progress', () => { if (_container) { const v = getState('case.view'); if (v === 'analyzing' || v === 'progressive') renderByView(); } }));
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
   _unsubs.push(subscribe('case.streamText', () => { if (_container && getState('case.view') === 'streaming') renderStreaming(); }));
+  _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
+  _unsubs.push(subscribe('case.caseSummary', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'streaming') renderByView(); } }));
+  _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
+  _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') renderByView(); }));
+  _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'result') renderByView(); } }));
+  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive' || v === 'streaming' || v === 'result') renderByView(); } }));
   _unsubs.push(subscribe('case.topArticles', () => {
     if (!_container) return;
     const view = getState('case.view');
     if (view === 'streaming') renderStreaming();
-    else if (view === 'result') renderByView();
+    else if (view === 'result' || view === 'progressive') renderByView();
   }));
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
     if (!_container || getState('case.view') !== 'streaming') return;
@@ -64,8 +70,9 @@ export function unmount() {
 }
 
 async function loadRecentCases() {
-  const data = await localGet(['recentCases']);
+  const data = await localGet(['recentCases', 'sidebarWidth']);
   if (data.recentCases) setState('case.recent', data.recentCases);
+  if (data.sidebarWidth) _sidebarWidth = Math.max(220, Math.min(500, data.sidebarWidth));
 }
 
 function extractCaseId(url) {
@@ -79,6 +86,7 @@ function renderByView() {
   const view = getState('case.view');
   if (view === 'idle') renderIdle();
   else if (view === 'analyzing') renderAnalyzing();
+  else if (view === 'progressive') renderProgressive();
   else if (view === 'streaming') renderStreaming();
   else if (view === 'result') renderResult();
 }
@@ -173,7 +181,10 @@ function renderAnalyzing() {
   const card = h('div', { class: 'card' },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '12px' } },
       h('span', { style: { fontWeight: '600', fontSize: '14px' } }, progress.caseNumber ? `Analyzing Case #${progress.caseNumber}` : 'Analyzing…'),
-      h('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, `${progress.step + 1} / ${steps.length}`)
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+        h('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, `${progress.step + 1} / ${steps.length}`),
+        h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', fontSize: '11px' }, onClick: stopProcessing }, 'Stop')
+      )
     ),
     progressBar(pct, 'default'),
     h('div', { style: { marginTop: '16px' } },
@@ -188,6 +199,72 @@ function renderAnalyzing() {
   _container.appendChild(card);
 }
 
+function renderProgressive() {
+  if (!_container) return;
+  _container.textContent = '';
+
+  const caseRecord = getState('case.caseRecord');
+  const caseSummary = getState('case.caseSummary');
+  const completeness = getState('case.caseCompleteness');
+  const detectedPts = getState('case.detectedPts') || [];
+  const caseAbstract = getState('case.caseAbstract');
+  const topArticles = getState('case.topArticles') || [];
+  const prodDocGap = getState('case.prodDocGap');
+  const knownIssues = getState('case.knownIssues') || [];
+  const progress = getState('case.progress') || { step: 0, label: 'Starting…' };
+
+  const grid = buildResizableGrid();
+  const sidebar = grid.querySelector('[data-role="sidebar"]');
+  const main = grid.querySelector('[data-role="main"]');
+
+  if (topArticles.length) sidebar.appendChild(renderSidebarArticles(topArticles));
+  else sidebar.appendChild(h('div', { class: 'skeleton', style: { height: '60px', marginBottom: '12px' } }));
+  if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
+
+  if (caseRecord) {
+    main.appendChild(renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract));
+  }
+
+  if (caseSummary) {
+    const summaryContent = renderMarkdown(caseSummary);
+    const summaryCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px 16px', borderLeft: '3px solid var(--primary)', animation: 'fadeIn 0.3s ease-in' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '6px' } }, 'Case Summary'),
+      summaryContent
+    );
+    const gusItems = getState('case.gusItems') || [];
+    if (gusItems.length) {
+      summaryCard.appendChild(h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '4px' } }, 'Related GUS Work'),
+        ...gusItems.slice(0, 3).map(g =>
+          h('div', { style: { fontSize: '11px', padding: '2px 0', display: 'flex', gap: '6px' } },
+            h('span', { style: { fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontWeight: '500' } }, g.name),
+            h('span', { style: { color: 'var(--text-secondary)', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, g.subject || ''),
+            h('span', { class: 'pill pill--neutral', style: { fontSize: '9px' } }, g.status || '')
+          )
+        )
+      ));
+    }
+    main.appendChild(summaryCard);
+  } else {
+    main.appendChild(h('div', { class: 'skeleton', style: { height: '80px', marginBottom: '12px' } }));
+  }
+
+  if (prodDocGap && prodDocGap.hasGap) {
+    main.appendChild(renderProductDocGapCard(prodDocGap));
+  }
+
+  const progressCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px 16px' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+      spinner('sm'),
+      h('span', { style: { fontSize: '12px', color: 'var(--primary)', fontWeight: '500' } }, progress.label || 'Processing…'),
+      h('button', { class: 'btn btn--ghost btn--sm', style: { marginLeft: 'auto', color: 'var(--error)' }, onClick: stopProcessing }, 'Stop')
+    )
+  );
+  main.appendChild(progressCard);
+
+  _container.appendChild(grid);
+}
+
 function renderStreaming() {
   if (!_container) return;
 
@@ -199,16 +276,35 @@ function renderStreaming() {
   let mainEl = _container.querySelector('#case-stream-main');
   if (!mainEl) {
     _container.textContent = '';
-    const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
-    const sidebar = h('div', { id: 'case-stream-sidebar', style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
+    const grid = buildResizableGrid();
+    const sidebar = grid.querySelector('[data-role="sidebar"]');
+    sidebar.id = 'case-stream-sidebar';
     sidebar.appendChild(renderSidebarArticles(topArticles));
-    grid.appendChild(sidebar);
-    mainEl = h('div', { id: 'case-stream-main', style: { flex: '1', overflow: 'auto' } });
-    grid.appendChild(mainEl);
+    const knownIssues = getState('case.knownIssues') || [];
+    if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
+    mainEl = grid.querySelector('[data-role="main"]');
+    mainEl.id = 'case-stream-main';
+
+    const caseSummary = getState('case.caseSummary');
+    if (caseSummary) {
+      mainEl.appendChild(h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 14px', borderLeft: '3px solid var(--primary)' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '4px' } }, 'Case Summary'),
+        renderMarkdown(caseSummary)
+      ));
+    }
+
     _container.appendChild(grid);
   } else {
     const sidebar = _container.querySelector('#case-stream-sidebar');
-    if (sidebar) { sidebar.textContent = ''; sidebar.appendChild(renderSidebarArticles(topArticles)); }
+    if (sidebar) {
+      const existingCount = sidebar.querySelectorAll('[data-article-id]').length;
+      if (existingCount !== topArticles.length || !existingCount) {
+        sidebar.textContent = '';
+        sidebar.appendChild(renderSidebarArticles(topArticles));
+        const ki = getState('case.knownIssues') || [];
+        if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
+      }
+    }
   }
 
   // Render completed suggestion cards
@@ -414,34 +510,49 @@ function renderResult() {
   const isBoth = structured.action === 'BOTH';
   const isNoAction = structured.action === 'NO_ACTION';
 
-  const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '280px 1fr', gap: '16px', minHeight: '400px' } });
+  const grid = buildResizableGrid();
+  const sidebar = grid.querySelector('[data-role="sidebar"]');
+  const main = grid.querySelector('[data-role="main"]');
 
-  const sidebar = h('div', { style: { borderRight: '1px solid var(--border)', paddingRight: '16px' } });
   sidebar.appendChild(renderSidebarQuality(structured));
   const hypotheses = getState('case.hypotheses') || [];
   if (hypotheses.length) sidebar.appendChild(renderSidebarHypotheses(hypotheses));
   sidebar.appendChild(renderSidebarArticles(topArticles));
+  const knownIssues = getState('case.knownIssues') || [];
+  if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
   const productDocs = getState('case.productDocs') || [];
   if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
-  grid.appendChild(sidebar);
 
-  const main = h('div', { style: { flex: '1', overflow: 'auto' } });
+  const caseRecord = getState('case.caseRecord');
+  const completeness = getState('case.caseCompleteness');
+  const detectedPts = getState('case.detectedPts') || [];
+  const caseAbstract = getState('case.caseAbstract');
 
-  const headerCard = h('div', { class: 'card', style: { marginBottom: '12px' } },
-    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' } },
-      h('div', null,
-        h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `Case #${result.caseNumber || ''}`),
-        h('div', { style: { fontSize: '14px', fontWeight: '600', marginTop: '2px' } }, result.subject || '')
+  if (caseRecord) {
+    main.appendChild(renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract));
+  } else {
+    const headerCard = h('div', { class: 'card', style: { marginBottom: '12px' } },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' } },
+        h('div', null,
+          h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `Case #${result.caseNumber || ''}`),
+          h('div', { style: { fontSize: '14px', fontWeight: '600', marginTop: '2px' } }, result.subject || '')
+        ),
+        h('div', { style: { display: 'flex', gap: '6px' } },
+          h('span', { class: `pill pill--${isNoAction ? 'success' : isCreate ? 'info' : isBoth ? 'warning' : 'neutral'}` }, isNoAction ? 'No Action Needed' : isCreate ? 'Create New' : isBoth ? 'Both' : 'Update Existing'),
+          structured.confidence ? h('span', { class: `pill pill--${structured.confidence === 'HIGH' ? 'success' : structured.confidence === 'MEDIUM' ? 'warning' : 'error'}` }, structured.confidence) : null
+        )
       ),
-      h('div', { style: { display: 'flex', gap: '6px' } },
-        h('span', { class: `pill pill--${isNoAction ? 'success' : isCreate ? 'info' : isBoth ? 'warning' : 'neutral'}` }, isNoAction ? 'No Action Needed' : isCreate ? 'Create New' : isBoth ? 'Both' : 'Update Existing'),
-        structured.confidence ? h('span', { class: `pill pill--${structured.confidence === 'HIGH' ? 'success' : structured.confidence === 'MEDIUM' ? 'warning' : 'error'}` }, structured.confidence) : null
-      )
-    ),
-    structured.summary ? h('p', { style: { fontSize: '13px', lineHeight: '1.5', color: 'var(--text-secondary)' } }, structured.summary) : null,
-    result.caseAbstract ? renderAbstractChips(result.caseAbstract) : null
+      structured.summary ? h('p', { style: { fontSize: '13px', lineHeight: '1.5', color: 'var(--text-secondary)' } }, structured.summary) : null
+    );
+    main.appendChild(headerCard);
+  }
+
+  const actionPill = h('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px' } },
+    h('span', { class: `pill pill--${isNoAction ? 'success' : isCreate ? 'info' : isBoth ? 'warning' : 'neutral'}` }, isNoAction ? 'No Action Needed' : isCreate ? 'Create New' : isBoth ? 'Both' : 'Update Existing'),
+    structured.confidence ? h('span', { class: `pill pill--${structured.confidence === 'HIGH' ? 'success' : structured.confidence === 'MEDIUM' ? 'warning' : 'error'}` }, structured.confidence) : null,
+    structured.summary ? h('span', { style: { fontSize: '12px', color: 'var(--text-secondary)', alignSelf: 'center' } }, structured.summary) : null
   );
-  main.appendChild(headerCard);
+  main.appendChild(actionPill);
 
   // AI Case Summary
   const caseSummary = getState('case.caseSummary');
@@ -492,26 +603,9 @@ function renderResult() {
     main.appendChild(noActionCard);
   }
 
-  // Product Documentation Gap callout
   const prodDocGap = getState('case.prodDocGap') || result.prodDocGap;
   if (prodDocGap && prodDocGap.hasGap) {
-    const recColors = { DOCS_SUFFICIENT: 'var(--success)', DOCS_NEED_UPDATE: 'var(--warning)', DOCS_MISSING: 'var(--error)' };
-    const recLabels = { DOCS_SUFFICIENT: 'Docs Cover This', DOCS_NEED_UPDATE: 'Docs Need Update', DOCS_MISSING: 'Docs Missing' };
-    const recColor = recColors[prodDocGap.recommendation] || 'var(--text-muted)';
-    const recLabel = recLabels[prodDocGap.recommendation] || prodDocGap.recommendation;
-
-    const gapCard = h('div', { class: 'card', style: { marginBottom: '12px', border: `1px solid ${recColor}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
-      h('div', { style: { padding: '12px 16px', background: `color-mix(in srgb, ${recColor} 6%, transparent)` } },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } },
-          h('span', { style: { fontSize: '13px' } }, '📄'),
-          h('span', { style: { fontSize: '12px', fontWeight: '600', color: recColor } }, 'Product Documentation Assessment'),
-          h('span', { class: `pill pill--${prodDocGap.recommendation === 'DOCS_SUFFICIENT' ? 'success' : prodDocGap.recommendation === 'DOCS_NEED_UPDATE' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, recLabel)
-        ),
-        h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || ''),
-        prodDocGap.recommendation !== 'DOCS_SUFFICIENT' ? h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px', fontStyle: 'italic' } }, 'This case could benefit from better product documentation coverage. Product Docs are not suggested for KB content updates.') : null
-      )
-    );
-    main.appendChild(gapCard);
+    main.appendChild(renderProductDocGapCard(prodDocGap));
   }
 
   if (structured.suggestions?.length) {
@@ -564,7 +658,6 @@ function renderResult() {
     main.appendChild(draftCard);
   }
 
-  // Show "Create New Article" button when no draft exists (only update suggestions shown)
   if (!structured.newArticleDraft && !isNoAction) {
     const createBtn = h('div', { style: { padding: '12px', textAlign: 'center', borderTop: '1px solid var(--border)', marginTop: '8px' } },
       h('button', { class: 'btn btn--primary', onClick: () => { overrideDecision('CREATE_NEW'); toast('Re-analyze the case to generate a new article draft.', 'info'); } }, '+ Create New Article Instead')
@@ -572,15 +665,137 @@ function renderResult() {
     main.appendChild(createBtn);
   }
 
-  grid.appendChild(main);
+  const publishedUrl = getState('case.publishedUrl');
+  if (publishedUrl) {
+    main.appendChild(h('div', { style: { padding: '12px', textAlign: 'center', marginTop: '8px', background: 'color-mix(in srgb, var(--success) 8%, transparent)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--success)' } },
+      h('button', { class: 'btn btn--primary', onClick: () => chrome.tabs.create({ url: publishedUrl }) }, 'View Article in ORGCS →')
+    ));
+  }
+
   _container.appendChild(grid);
+}
+
+let _sidebarWidth = 320;
+
+function buildResizableGrid() {
+  const grid = h('div', { style: { display: 'grid', gridTemplateColumns: `${_sidebarWidth}px 4px 1fr`, gap: '0', minHeight: '400px' } });
+  const sidebar = h('div', { 'data-role': 'sidebar', style: { borderRight: '1px solid var(--border)', paddingRight: '12px', overflow: 'auto' } });
+  const handle = h('div', { class: 'resize-handle', style: { width: '4px', cursor: 'col-resize', background: 'transparent', transition: 'background 0.15s' } });
+  handle.addEventListener('mouseenter', () => { handle.style.background = 'var(--primary-soft)'; });
+  handle.addEventListener('mouseleave', () => { handle.style.background = 'transparent'; });
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = _sidebarWidth;
+    const onMove = (ev) => {
+      const delta = ev.clientX - startX;
+      _sidebarWidth = Math.max(220, Math.min(500, startWidth + delta));
+      grid.style.gridTemplateColumns = `${_sidebarWidth}px 4px 1fr`;
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      handle.style.background = 'transparent';
+      localSet({ sidebarWidth: _sidebarWidth });
+    };
+    handle.style.background = 'var(--primary)';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  const main = h('div', { 'data-role': 'main', style: { paddingLeft: '12px', overflow: 'auto' } });
+  grid.appendChild(sidebar);
+  grid.appendChild(handle);
+  grid.appendChild(main);
+  return grid;
+}
+
+function renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract) {
+  const completenessPill = completeness
+    ? h('span', { class: `pill pill--${completeness.label === 'Sufficient' ? 'success' : completeness.label === 'Partial' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `${completeness.label} (${completeness.score}%)`)
+    : null;
+
+  const metaItems = [];
+  if (caseRecord.priority) metaItems.push(['Priority', caseRecord.priority]);
+  if (caseRecord.status) metaItems.push(['Status', caseRecord.status]);
+  if (caseAbstract?.product) metaItems.push(['Product', caseAbstract.product]);
+
+  const card = h('div', { class: 'card', style: { marginBottom: '12px', animation: 'fadeIn 0.3s ease-in' } },
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' } },
+      h('div', null,
+        h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `Case #${caseRecord.caseNumber || ''}`),
+        h('div', { style: { fontSize: '14px', fontWeight: '600', marginTop: '2px' } }, caseRecord.subject || '')
+      ),
+      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } }, completenessPill)
+    ),
+    metaItems.length ? h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' } },
+      ...metaItems.map(([label, val]) => h('span', { style: { fontSize: '10px', color: 'var(--text-secondary)', background: 'var(--surface-raised)', padding: '2px 6px', borderRadius: 'var(--radius-xs)' } }, `${label}: ${val}`))
+    ) : null,
+    detectedPts.length ? h('div', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
+      h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', marginRight: '4px' } }, 'P&T:'),
+      ...detectedPts.slice(0, 5).map(pt => h('span', { class: 'pill pill--info', style: { fontSize: '9px' } }, pt))
+    ) : null
+  );
+  return card;
+}
+
+function renderProductDocGapCard(prodDocGap) {
+  const recColors = { DOCS_SUFFICIENT: 'var(--success)', DOCS_NEED_UPDATE: 'var(--warning)', DOCS_MISSING: 'var(--error)' };
+  const recLabels = { DOCS_SUFFICIENT: 'Docs Cover This', DOCS_NEED_UPDATE: 'Docs Need Update', DOCS_MISSING: 'Docs Missing' };
+  const recColor = recColors[prodDocGap.recommendation] || 'var(--text-muted)';
+  const recLabel = recLabels[prodDocGap.recommendation] || prodDocGap.recommendation;
+
+  return h('div', { class: 'card', style: { marginBottom: '12px', border: `1px solid ${recColor}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden', animation: 'fadeIn 0.3s ease-in' } },
+    h('div', { style: { padding: '12px 16px', background: `color-mix(in srgb, ${recColor} 6%, transparent)` } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } },
+        h('span', { style: { fontSize: '12px', fontWeight: '600', color: recColor } }, 'Product Documentation Assessment'),
+        h('span', { class: `pill pill--${prodDocGap.recommendation === 'DOCS_SUFFICIENT' ? 'success' : prodDocGap.recommendation === 'DOCS_NEED_UPDATE' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, recLabel)
+      ),
+      h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || '')
+    )
+  );
+}
+
+function renderSidebarKnownIssues(kiItems) {
+  const isCollapsed = _collapsedSections['known-issues'] || false;
+  const section = h('div', { style: { marginBottom: '16px' } });
+  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['known-issues'] = !_collapsedSections['known-issues']; renderByView(); } },
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Known Issues (${kiItems.length})`),
+    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
+  );
+  section.appendChild(header);
+
+  if (!isCollapsed) {
+    const body = h('div', null);
+    kiItems.forEach(ki => {
+      const kiUrl = `https://known-issues-prd1.lightning.force.com/lightning/r/Known_Issue__c/${ki.id}/view`;
+      const statusColor = ki.status === 'Fixed' ? 'success' : ki.status === 'Solution in Progress' ? 'warning' : 'info';
+      body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+          h('a', { href: kiUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', textDecoration: 'none', lineHeight: '1.3', flex: '1' } }, ki.subject || ki.name),
+          h('span', { class: `pill pill--${statusColor}`, style: { fontSize: '9px', flexShrink: '0' } }, ki.status || 'Open')
+        ),
+        h('div', { style: { display: 'flex', gap: '4px', marginTop: '3px' } },
+          h('span', { style: { fontSize: '10px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' } }, ki.name || ''),
+          ki.cloud ? h('span', { class: 'pill pill--neutral', style: { fontSize: '9px' } }, ki.cloud) : null
+        )
+      ));
+    });
+    section.appendChild(body);
+  }
+  return section;
+}
+
+function stopProcessing() {
+  if (_port) {
+    try { _port.postMessage({ action: 'STOP' }); } catch {}
+  }
 }
 
 function renderSidebarArticles(articles) {
   const isCollapsed = _collapsedSections['articles'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
   const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['articles'] = !_collapsedSections['articles']; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'Similar Articles'),
+    h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Similar Articles (${articles.length})`),
     h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
   );
   section.appendChild(header);
@@ -592,13 +807,19 @@ function renderSidebarArticles(articles) {
     } else {
       articles.forEach(a => {
         const articleUrl = a.url || `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`;
-        const link = h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none' } }, a.title || 'Untitled');
+        const link = h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title || 'Untitled');
         link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
         link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
+
+        const previewBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 4px', flexShrink: '0' }, title: 'Preview article', onClick: (e) => { e.stopPropagation(); showArticlePreview(a); } }, '👁');
+        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '9px', padding: '1px 5px', flexShrink: '0' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
+
         const relText = a.score != null ? `Rel: ${a.score}` : 'Rel: —';
         const relColor = a.score != null ? (a.score >= 70 ? 'var(--success)' : a.score >= 50 ? 'var(--primary)' : 'var(--warning)') : 'var(--text-muted)';
-        const relevancePill = h('span', { style: { fontSize: '10px', color: relColor } }, relText);
-        const kbScoreText = a.kbScore != null ? `KB: ${a.kbScore}` : 'KB: …';
+        const relevancePill = h('span', { class: 'tooltip-wrap', style: { fontSize: '10px', color: relColor, cursor: 'default', position: 'relative' } }, relText);
+        if (a.reason) relevancePill.setAttribute('data-tooltip', a.reason);
+
+        const kbScoreText = a.kbScore != null ? `KB: ${a.kbScore}` : a.kbScoreError ? 'KB: err' : 'KB: …';
         const kbColor = a.kbScore != null ? (a.kbScore >= 80 ? 'var(--success)' : a.kbScore >= 60 ? 'var(--warning)' : 'var(--error)') : 'var(--text-muted)';
         const kbPill = h('span', { style: { fontSize: '10px', color: kbColor, cursor: 'pointer' } }, kbScoreText);
         kbPill.addEventListener('click', (e) => {
@@ -607,7 +828,6 @@ function renderSidebarArticles(articles) {
           setState('kb.focusArticle', a.id);
         });
 
-        // Status badges for unpublished/unvalidated articles
         let statusBadge = null;
         if (a.publishStatus && a.publishStatus !== 'Online') {
           statusBadge = h('span', { class: 'pill pill--neutral', style: { fontSize: '9px' } }, 'Unpublished');
@@ -615,16 +835,15 @@ function renderSidebarArticles(articles) {
           statusBadge = h('span', { class: 'pill pill--warning', style: { fontSize: '9px' } }, 'Not Validated');
         }
 
-        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '9px', padding: '1px 5px', marginLeft: 'auto' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
-        body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
+        body.appendChild(h('div', { 'data-article-id': a.id, style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
             link,
+            previewBtn,
             statusBadge,
             updateBtn
           ),
-          a.reason ? h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: '1.3' } }, a.reason) : null,
-          statusBadge && a.publishStatus !== 'Online' ? h('div', { style: { fontSize: '10px', color: 'var(--warning)', marginTop: '2px', fontStyle: 'italic' } }, 'Internal/unpublished article — could be published directly or with changes') : null,
-          h('div', { style: { display: 'flex', gap: '6px', marginTop: '3px' } },
+          statusBadge && a.publishStatus !== 'Online' ? h('div', { style: { fontSize: '10px', color: 'var(--warning)', marginTop: '2px', fontStyle: 'italic' } }, 'Internal/unpublished — could be published with changes') : null,
+          h('div', { style: { display: 'flex', gap: '6px', marginTop: '3px', alignItems: 'center' } },
             h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, `#${a.articleNumber || ''}`),
             relevancePill,
             kbPill
@@ -635,6 +854,30 @@ function renderSidebarArticles(articles) {
     section.appendChild(body);
   }
   return section;
+}
+
+async function showArticlePreview(article) {
+  toast('Loading preview…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId: article.id });
+    if (!resp?.success) { toast(resp?.error || 'Failed to load preview.', 'error'); return; }
+    const data = resp.article;
+    const body = h('div', null,
+      h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' } }, `#${data.articleNumber || article.articleNumber || ''}`),
+      data.summary ? h('div', { style: { marginBottom: '12px', padding: '8px 12px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '12px', lineHeight: '1.5' } }, data.summary) : null,
+      data.description ? h('div', { style: { marginBottom: '12px' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Description'),
+        renderMarkdown(data.description.slice(0, 2000))
+      ) : null,
+      data.resolution ? h('div', { style: { marginBottom: '12px' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Resolution'),
+        renderMarkdown(data.resolution.slice(0, 2000))
+      ) : null
+    );
+    modal(data.title || article.title || 'Article Preview', body, { wide: true });
+  } catch (e) {
+    toast('Preview failed: ' + e.message, 'error');
+  }
 }
 
 function formatAction(action) {
@@ -777,7 +1020,7 @@ async function handleHypothesis(index, status) {
     const result = getState('case.result');
     const resp = await chrome.runtime.sendMessage({
       action: 'REFINE_WITH_HYPOTHESES',
-      hypotheses,
+      hypotheses: updated,
       structured: result?.structured || null,
       caseAbstract: result?.caseAbstract || null
     });
@@ -831,13 +1074,47 @@ function renderMarkdown(text) {
   if (!text) return h('span', null, '');
   const lines = text.split('\n');
   const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
-  lines.forEach(line => {
-    if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
+  let inCodeBlock = false;
+  let codeLines = [];
+  let codeLang = '';
+
+  for (const line of lines) {
+    if (!inCodeBlock && /^```(\w*)/.test(line)) {
+      inCodeBlock = true;
+      codeLang = line.match(/^```(\w*)/)[1] || '';
+      codeLines = [];
+      continue;
+    }
+    if (inCodeBlock) {
+      if (line.startsWith('```')) {
+        const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
+        if (codeLang) {
+          pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, codeLang));
+        }
+        pre.appendChild(h('code', null, codeLines.join('\n')));
+        container.appendChild(pre);
+        inCodeBlock = false;
+        codeLines = [];
+        codeLang = '';
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, line.slice(4)));
+    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
     else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
     else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, h('span', null, '• ' + line.slice(2))));
     else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, line));
     else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, line));
-  });
+  }
+
+  if (inCodeBlock && codeLines.length) {
+    const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
+    pre.appendChild(h('code', null, codeLines.join('\n')));
+    container.appendChild(pre);
+  }
+
   return container;
 }
 
@@ -978,8 +1255,11 @@ async function publishArticle(draft, result) {
       }
     });
     if (resp?.success) {
-      toast('Article created! Opening…', 'success');
-      if (resp.url) chrome.tabs.create({ url: resp.url });
+      toast('Article created!', 'success');
+      if (resp.url) {
+        setState('case.publishedUrl', resp.url);
+        renderByView();
+      }
     } else {
       toast(resp?.error || 'Failed to create article.', 'error');
     }
@@ -1003,8 +1283,11 @@ async function publishUpdate(rewrite, result) {
       }
     });
     if (resp?.success) {
-      toast('Draft version created! Opening…', 'success');
-      if (resp.url) chrome.tabs.create({ url: resp.url });
+      toast('Draft version created!', 'success');
+      if (resp.url) {
+        setState('case.publishedUrl', resp.url);
+        renderByView();
+      }
     } else {
       toast(resp?.error || 'Failed to create draft.', 'error');
     }
@@ -1175,17 +1458,6 @@ function groupByArticle(suggestions) {
   return groups;
 }
 
-function renderAbstractChips(abs) {
-  const items = [
-    abs.product && ['Product', abs.product],
-    abs.symptomClass && ['Symptom', abs.symptomClass],
-    abs.errorSignature && ['Error', abs.errorSignature]
-  ].filter(Boolean);
-  if (!items.length) return null;
-  return h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' } },
-    ...items.map(([label, val]) => h('span', { class: 'pill pill--neutral', title: label, style: { fontSize: '11px' } }, val))
-  );
-}
 
 function impactColor(impact) {
   switch ((impact || '').toUpperCase()) {
@@ -1272,6 +1544,12 @@ function startAnalysis(caseId) {
   setState('case.productDocs', null);
   setState('case.hypotheses', null);
   setState('case.prodDocGap', null);
+  setState('case.caseRecord', null);
+  setState('case.caseCompleteness', null);
+  setState('case.detectedPts', null);
+  setState('case.caseAbstract', null);
+  setState('case.knownIssues', null);
+  setState('case.publishedUrl', null);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
@@ -1298,30 +1576,42 @@ function onPortMessage(msg) {
     case 'progress':
       setState('case.progress', { ...getState('case.progress'), step: msg.step ?? 0, label: msg.label || '', caseNumber: msg.caseNumber || getState('case.progress')?.caseNumber });
       break;
+    case 'stopped':
+      setState('case.view', 'result');
+      toast('Processing stopped. Showing partial results.', 'info');
+      break;
     case 'meta': {
+      if (msg.caseRecord) {
+        setState('case.caseRecord', msg.caseRecord);
+        if (getState('case.view') === 'analyzing') setState('case.view', 'progressive');
+      }
+      if (msg.caseCompleteness) setState('case.caseCompleteness', msg.caseCompleteness);
+      if (msg.detectedPts) setState('case.detectedPts', msg.detectedPts);
+      if (msg.caseAbstract) setState('case.caseAbstract', msg.caseAbstract);
       if (msg.caseSummary) setState('case.caseSummary', msg.caseSummary);
       if (msg.gusItems) setState('case.gusItems', msg.gusItems);
       if (msg.productDocs) setState('case.productDocs', msg.productDocs);
       if (msg.hypotheses) setState('case.hypotheses', msg.hypotheses);
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
-      if (msg.topArticles) setState('case.topArticles', msg.topArticles);
-      if (!msg.topArticles) break;
-      const kbScores = getState('kb.scores') || {};
-      const updated = { ...kbScores };
-      let hasNewScores = false;
-      (msg.topArticles || []).forEach(a => {
-        if (a.kbScore != null) {
-          updated[a.id] = { overall: a.kbScore, criteria: a.kbCriteria || [], error: null, source: 'case-analysis' };
-          hasNewScores = true;
-        } else if (a.score != null && !updated[a.id]) {
-          updated[a.id] = { overall: a.score, criteria: [], error: null, source: 'case-analysis-relevance' };
-        }
-      });
-      setState('kb.scores', updated);
-      if (hasNewScores) {
-        localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: updated });
+      if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
+      if (msg.topArticles) {
+        const currentView = getState('case.view');
+        if (currentView === 'analyzing' || currentView === 'progressive') setState('case.view', 'streaming');
+        setState('case.topArticles', msg.topArticles);
+        const kbScores = getState('kb.scores') || {};
+        const updated = { ...kbScores };
+        let hasNewScores = false;
+        msg.topArticles.forEach(a => {
+          if (a.kbScore != null) {
+            updated[a.id] = { overall: a.kbScore, criteria: a.kbCriteria || [], error: null, source: 'case-analysis' };
+            hasNewScores = true;
+          } else if (a.score != null && !updated[a.id]) {
+            updated[a.id] = { overall: a.score, criteria: [], error: null, source: 'case-analysis-relevance' };
+          }
+        });
+        setState('kb.scores', updated);
+        if (hasNewScores) localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: updated });
       }
-      if (getState('case.view') === 'analyzing') setState('case.view', 'streaming');
       break;
     }
     case 'suggestion-delta': {

@@ -117,12 +117,13 @@ function activateTab(tabId) {
 }
 
 async function checkConnections() {
-  const [sfResp, aiResp, gusResp] = await Promise.all([
+  const [sfResp, aiResp, gusResp, kiResp] = await Promise.all([
     chrome.runtime.sendMessage({ action: 'CHECK_CONNECTION' }).catch(() => ({ connected: false })),
     chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'CHECK_GUS_CONNECTION' }).catch(() => ({ connected: false }))
+    chrome.runtime.sendMessage({ action: 'CHECK_GUS_CONNECTION' }).catch(() => ({ connected: false })),
+    chrome.runtime.sendMessage({ action: 'CHECK_KI_CONNECTION' }).catch(() => ({ connected: false }))
   ]);
-  setState('app.connections', { sf: sfResp, ai: aiResp, gus: gusResp });
+  setState('app.connections', { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp });
 }
 
 function updateConnectionChips() {
@@ -163,6 +164,13 @@ function updateConnectionChips() {
   container.appendChild(chip(gusState, gusLabel, {
     title: conn.gus?.connected ? 'Connected to GUS' : 'Log into GUS for work item enrichment',
     onClick: () => chrome.tabs.create({ url: 'https://gus.lightning.force.com' })
+  }));
+
+  const kiState = conn.ki?.connected ? 'connected' : 'disconnected';
+  const kiLabel = conn.ki?.connected ? 'KI' : 'KI Offline';
+  container.appendChild(chip(kiState, kiLabel, {
+    title: conn.ki?.connected ? 'Connected to Known Issues org' : 'Log into Known Issues org for KI enrichment',
+    onClick: () => chrome.tabs.create({ url: 'https://known-issues-prd1.lightning.force.com' })
   }));
 
   const clearBtn = h('button', {

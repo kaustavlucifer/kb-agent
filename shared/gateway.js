@@ -42,7 +42,7 @@ export async function pingGateway(token) {
   }
 }
 
-export async function callClaude({ system, messages, maxTokens, model, token, temperature }) {
+export async function callClaude({ system, messages, maxTokens, model, token, temperature, signal }) {
   await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
@@ -57,6 +57,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+  if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
   try {
     const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
       method: 'POST',
@@ -81,7 +82,7 @@ export async function callClaudeFast(opts) {
 
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
-export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError }) {
+export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError, signal }) {
   await acquireSlot();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
@@ -96,6 +97,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   if (temperature != null) body.temperature = temperature;
 
   const controller = new AbortController();
+  if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
   const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
     method: 'POST',
     headers: buildHeaders(t),

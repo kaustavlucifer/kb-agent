@@ -1,9 +1,9 @@
-import { detectSession } from '../shared/auth.js';
+import { detectSession, pingKiSession } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfQuery, sfQueryAll, escapeSoql, sanitizeId } from '../shared/api.js';
-import { STORAGE_KEYS, CACHE_TTL_MS } from '../shared/config.js';
-import { GUIDE_GENERATION } from '../data/writing_guide_prompts.js';
+import { sfGet, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
+import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION } from '../shared/config.js';
+import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
@@ -52,6 +52,8 @@ async function handleMessage(msg) {
     case 'CHECK_GUS_CONNECTION': return checkGusConnection();
     case 'REFINE_WITH_HYPOTHESES': return refineWithHypotheses(msg);
     case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
+    case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
+    case 'CHECK_KI_CONNECTION': return checkKiConnection();
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }
@@ -79,6 +81,8 @@ async function generateArticleUpdate(msg) {
       system: `You are rewriting a Salesforce KB article to incorporate new case context. Follow Agentforce writing rules:
 ${GUIDE_GENERATION}
 
+${GUIDE_STYLE}
+
 Return the FULL rewritten article. Use EXACTLY these 4 fields.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
       messages: [{ role: 'user', content: `EXISTING ARTICLE:\n${articleBody}\n\nCASE CONTEXT:\nSubject: ${caseSubject || ''}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nError: ${caseAbstract?.errorSignature || ''}` }],
@@ -92,6 +96,37 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   } catch (e) {
     return { success: false, error: e.message };
   }
+}
+
+async function fetchArticlePreview(articleId) {
+  const safeId = sanitizeId(articleId);
+  if (!safeId) return { success: false, error: 'Invalid article ID' };
+  const session = await detectSession();
+  if (!session.sid) return { success: false, error: 'No SF session' };
+  try {
+    const soql = `SELECT Id, Title, Summary, ArticleNumber, Description__c, Resolution__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
+    const records = await sfQuery(session.apiBase, session.sid, soql);
+    if (!records.length) return { success: false, error: 'Article not found' };
+    const r = records[0];
+    return {
+      success: true,
+      article: {
+        id: r.Id,
+        title: r.Title || '',
+        summary: r.Summary || '',
+        articleNumber: r.ArticleNumber || '',
+        description: stripHtml(r.Description__c || ''),
+        resolution: stripHtml(r.Resolution__c || '')
+      }
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function checkKiConnection() {
+  const result = await pingKiSession();
+  return { connected: result.status === 'active' };
 }
 
 async function refineWithHypotheses(msg) {
@@ -138,22 +173,16 @@ async function refineSection(msg) {
   const { content, title, focus } = msg;
   if (!content) return { success: false, error: 'No content provided' };
   try {
-    const guideRules = GUIDE_GENERATION;
     const focusInstruction = focus ? `\n\nUSER FOCUS: "${focus}" — prioritize this aspect in your refinement.` : '';
     const resp = await callClaude({
-      system: `You are an expert KB editor for Salesforce Agentforce. Refine this section following the Agentforce writing guide rules:
-- Titles must be specific to product + exact issue (not generic)
-- Use H2/H3 headers for structure (not bold text) — headers are used for chunking
-- Be specific about product names + features to avoid ambiguity
-- Explain acronyms and abbreviations. Use simple present tense
-- For resolutions: brief summary of what steps accomplish, then numbered steps
-- After code blocks, add plain-text explanation of what the code does
-- Tables should use text, not visual indicators like checkmarks
-- Give real-life examples when information is complex
-- Keep content concise but complete${focusInstruction}
+      system: `You are an expert KB editor for Salesforce Agentforce. Refine this section following Agentforce writing guide rules:
+
+${GUIDE_GENERATION}
+
+${GUIDE_STYLE}${focusInstruction}
 
 Return ONLY the improved text, no JSON wrapping or explanation.`,
-      messages: [{ role: 'user', content: `WRITING GUIDE REFERENCE:\n${guideRules}\n\n---\nSection Title: ${title}\n\nContent to refine:\n${content}` }],
+      messages: [{ role: 'user', content: `Section Title: ${title}\n\nContent to refine:\n${content}` }],
       maxTokens: 2000,
       temperature: 0.2
     });
@@ -240,7 +269,10 @@ function handlePort(port) {
 
   switch (port.name) {
     case 'kba-analyze':
-      port.onMessage.addListener(wrap(handleAnalyze));
+      port.onMessage.addListener((msg) => {
+        if (msg.action !== 'ANALYZE_CASE') return;
+        wrap(handleAnalyze)(msg);
+      });
       break;
     case 'kbs-score-batch':
       port.onMessage.addListener(wrap(handleScoreBatch));

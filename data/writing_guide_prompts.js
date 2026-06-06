@@ -35,6 +35,17 @@ export const GUIDE_SCORING = `AGENTFORCE KB QUALITY STANDARDS — score articles
 - Content should be spread across sections with headers, not dumped in one block
 - FAQ items must be specific in intent — large generic FAQs score poorly`;
 
+export const GUIDE_STYLE = `CRITICAL KB STYLE RULES — apply to ALL generated and rewritten articles:
+
+- Write as a PRODUCT KNOWLEDGE ARTICLE, not a case note. The article must be useful to ANY customer experiencing this issue, not just the one who filed this case.
+- GENERALIZE: Replace customer-specific details (org names, user names, specific dates, account data, case numbers) with generic descriptions of the scenario.
+- BROADEN symptoms: Describe the general pattern of the issue, not just one customer's experience. Use "customers may experience", "this occurs when", "to resolve this issue".
+- NEVER use: "the customer reported", "in this case", "the case shows", "as described in case #".
+- NEVER include actual customer Org IDs, Record IDs, Instance IDs, or case-specific identifiers. Instead use realistic but GENERIC example data (e.g. '001XXXXXXXXXXXX' for Account IDs, 'NA999' for instances, '00D000000000001' for Org IDs).
+- When referencing SOQL queries or code examples, use sample data patterns — never the actual values from the source case.
+- Keep resolution ACTIONABLE and ACCURATE: Steps must be technically correct and specific enough to follow, but not tied to one customer's configuration.
+- The article should read as if written by a product documentation team, not extracted from a support interaction.`;
+
 export const GUIDE_DECISION = `AGENTFORCE KB COVERAGE ASSESSMENT — use these standards to judge whether existing articles adequately cover a case:
 - An article "covers" a case if: same product + feature, same error/symptom pattern, resolution would directly help
 - Articles that are generic to the product area but don't address the specific error/scenario do NOT constitute adequate coverage

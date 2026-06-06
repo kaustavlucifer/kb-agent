@@ -12,7 +12,6 @@ export const SOSL_PER_QUERY = 10;
 export const MAX_SOSL_QUERIES = 8;
 export const FINAL_MAX_TOKENS = 5000;
 export const CLAUDE_TIMEOUT_MS = 90_000;
-export const SIBLING_ARTICLE_LIMIT = 3;
 
 export const SCORE_CONCURRENCY = 8;
 export const BODY_FETCH_BATCH_SIZE = 50;
@@ -29,12 +28,9 @@ export const PT_HIGH_VOLUME_CONVS = 200;
 export const PT_MID_VOLUME_CONVS = 100;
 export const PT_LOW_COVERAGE_ARTICLES = 3;
 
-export const KB_DEFAULT_PAGE_SIZE = 50;
 export const STREAM_RENDER_THROTTLE_MS = 600;
 
 export const CACHE_TTL_MS = 30 * 60 * 1000;
-export const ANALYZE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-export const ANALYZE_CACHE_MAX = 20;
 
 export const CASE_GUARD_RAIL_EXCLUSIONS = [
   'EU Premier', 'US Premier', 'Gov', 'US Sig'
