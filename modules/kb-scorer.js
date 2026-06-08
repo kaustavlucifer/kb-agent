@@ -301,18 +301,20 @@ function render() {
 
   if (loading) {
     const progress = typeof loading === 'object' ? loading : null;
-    if (progress && progress.total > 0) {
-      const pct = Math.round((progress.loaded / progress.total) * 100);
-      scrollSection.appendChild(h('div', { style: { padding: '48px 24px', textAlign: 'center' } },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-          h('span', null, `Fetching articles: ${progress.loaded.toLocaleString()} / ${progress.total.toLocaleString()}`),
-          h('span', null, `${pct}%`)
-        ),
-        progressBar(pct, 'default', true)
-      ));
-    } else {
-      scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '48px' } }, spinner('lg')));
-    }
+    scrollSection.appendChild(h('div', { style: { padding: '48px 24px', maxWidth: '400px', margin: '0 auto' } },
+      h('div', { style: { textAlign: 'center', marginBottom: '16px' } },
+        spinner('lg'),
+        h('div', { style: { fontSize: '14px', fontWeight: '600', marginTop: '12px', color: 'var(--text-primary)' } }, 'Loading Knowledge Articles'),
+        h('div', { style: { fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' } }, progress ? 'Fetching from Salesforce…' : 'Connecting…')
+      ),
+      progress && progress.total > 0 ? h('div', null,
+        progressBar(Math.round((progress.loaded / progress.total) * 100), 'default', true),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' } },
+          h('span', null, `${progress.loaded.toLocaleString()} articles loaded`),
+          h('span', null, `${progress.total.toLocaleString()} total`)
+        )
+      ) : null
+    ));
     return;
   }
 
@@ -771,29 +773,48 @@ async function scoreOne(article) {
   }
 }
 
+let _rewriteCache = {};
+
 async function rewriteArticle(article) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
+
+  const cached = _rewriteCache[article.id];
+
+  const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } });
+  if (cached) {
+    streamEl.appendChild(renderMarkdown(cached));
+  } else {
+    streamEl.appendChild(spinner('md'));
+  }
+
+  const content = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+      h('span', null, `#${article.articleNumber} — ${article.title}`),
+      h('div', { style: { display: 'flex', gap: '6px' } },
+        h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', onClick: () => generateRewrite(article, session) }, cached ? 'Regenerate' : 'Generating…'),
+        h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create in ORGCS')
+      )
+    ),
+    streamEl
+  );
+
+  modal('Rewrite Article', content, { wide: true });
+
+  if (!cached) generateRewrite(article, session);
+}
+
+async function generateRewrite(article, session) {
+  const regenBtn = document.getElementById('rewrite-regenerate');
+  if (regenBtn) { regenBtn.disabled = true; regenBtn.textContent = 'Generating…'; }
+  const el = document.getElementById('rewrite-stream');
+  if (el) { el.textContent = ''; el.appendChild(spinner('md')); }
 
   const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
   const desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
   const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
   const steps = stripHtml(body.steps || '').slice(0, 1500);
-
-  const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
-  const content = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `#${article.articleNumber} — ${article.title}`),
-    streamEl
-  );
-
-  let _rewriteFullText = '';
-  modal('Rewrite Article', content, {
-    wide: true,
-    primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(_rewriteFullText).then(() => toast('Copied.', 'success'));
-    }}
-  });
 
   const system = `You are an expert technical writer improving Salesforce Knowledge Articles for Agentforce readiness.
 Apply these rules:
@@ -814,25 +835,66 @@ CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
-  let _rewriteThrottle = null;
+  let fullText = '';
+  let throttle = null;
   try {
     await streamClaude({
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
       onDelta: (chunk, full) => {
-        _rewriteFullText = full;
-        if (_rewriteThrottle) return;
-        _rewriteThrottle = setTimeout(() => { _rewriteThrottle = null; }, 150);
+        fullText = full;
+        if (throttle) return;
+        throttle = setTimeout(() => { throttle = null; }, 150);
         const el = document.getElementById('rewrite-stream');
         if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
     });
+    _rewriteCache[article.id] = fullText;
     const el = document.getElementById('rewrite-stream');
-    if (el) { el.textContent = ''; el.appendChild(renderMarkdown(_rewriteFullText)); }
+    if (el) { el.textContent = ''; el.appendChild(renderMarkdown(fullText)); }
   } catch (e) {
     const el = document.getElementById('rewrite-stream');
     if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
+  }
+  if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+}
+
+async function publishRewriteToOrgcs(article) {
+  const cached = _rewriteCache[article.id];
+  if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
+
+  const sections = [];
+  const titleMatch = cached.match(/##\s*TITLE\s*\n([^\n]+)/i);
+  const summaryMatch = cached.match(/##\s*SUMMARY\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+  const descMatch = cached.match(/##\s*DESCRIPTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+  const resMatch = cached.match(/##\s*RESOLUTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+
+  const title = titleMatch?.[1]?.trim() || article.title;
+  const summary = summaryMatch?.[1]?.trim() || '';
+  if (descMatch) sections.push({ heading: 'Description', body: descMatch[1].trim() });
+  if (resMatch) sections.push({ heading: 'Resolution', body: resMatch[1].trim() });
+
+  toast('Creating draft update in ORGCS…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      action: 'PUBLISH_UPDATE_DRAFT',
+      payload: {
+        existingArticleId: article.id,
+        title,
+        summary,
+        sections,
+        taxonomyName: article.topicName || null
+      }
+    });
+    if (resp?.success) {
+      toast('Draft version created!', 'success');
+      if (resp.url) chrome.tabs.create({ url: resp.url });
+    } else {
+      toast(resp?.error || 'Failed to create draft.', 'error');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
   }
 }
 

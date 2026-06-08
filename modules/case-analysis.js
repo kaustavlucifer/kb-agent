@@ -616,8 +616,6 @@ function renderResult() {
       const structured = result?.structured || result || {};
       const topArticles = getState('case.topArticles') || [];
       sidebar.appendChild(renderSidebarQuality(structured));
-      const hypotheses = getState('case.hypotheses') || [];
-      if (hypotheses.length) sidebar.appendChild(renderSidebarHypotheses(hypotheses));
       sidebar.appendChild(renderSidebarArticles(topArticles));
       const knownIssues = getState('case.knownIssues') || [];
       if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
@@ -664,8 +662,6 @@ function renderResult() {
   const main = grid.querySelector('[data-role="main"]');
 
   sidebar.appendChild(renderSidebarQuality(structured));
-  const hypotheses = getState('case.hypotheses') || [];
-  if (hypotheses.length) sidebar.appendChild(renderSidebarHypotheses(hypotheses));
   sidebar.appendChild(renderSidebarArticles(topArticles));
   const knownIssues = getState('case.knownIssues') || [];
   if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
@@ -765,11 +761,6 @@ function renderResult() {
     ));
   }
 
-  const gapEval = getState('case.gapEvaluation');
-  if (gapEval?.length) {
-    main.appendChild(renderGapEvaluationCard(gapEval));
-  }
-
   if (structured.suggestions?.length) {
     for (const sug of structured.suggestions) {
       if (sug.isFullRewrite) {
@@ -796,9 +787,8 @@ function renderResult() {
       ),
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
         (() => { const ds = (getState('case.draftScores') || {})['new-draft']; const scoring = (getState('case.scoringInProgress') || []).includes('new-draft'); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'), 'AF: scoring…'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
+        getState('case.gapEvaluation')?.length ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px' }, onClick: () => showGapEvaluationModal() }, 'Gaps') : null,
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
-        (_refinedKeys.has('new-draft') || _refinedKeys.has('any')) ? h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(draft, 'new-draft') }, 'Re-score') : null,
-        h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyDraft(draft) }, 'Copy'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
       )
     );
@@ -925,46 +915,98 @@ function renderProductDocGapCard(prodDocGap) {
   );
 }
 
-function renderGapEvaluationCard(gaps) {
+function showGapEvaluationModal() {
+  const gaps = getState('case.gapEvaluation') || [];
+  if (!gaps.length) { toast('No gap evaluation data available.', 'info'); return; }
+
   const statusIcons = { CONFIRMED_CORRECT: '✓', INCOMPLETE: '◐', MISSING: '✗', OUTDATED: '⟳' };
   const statusColors = { CONFIRMED_CORRECT: 'var(--success)', INCOMPLETE: 'var(--warning)', MISSING: 'var(--error)', OUTDATED: 'var(--error)' };
-  const isCollapsed = _collapsedSections['gap-eval'] || false;
-
-  const card = h('div', { class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
-
   const gapCount = gaps.filter(g => g.status === 'MISSING' || g.status === 'OUTDATED').length;
-  const incompleteCount = gaps.filter(g => g.status === 'INCOMPLETE').length;
+  const coveredCount = gaps.filter(g => g.status === 'CONFIRMED_CORRECT').length;
 
-  card.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections['gap-eval'] = !_collapsedSections['gap-eval']; renderByView(); } },
-    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-      h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
-      h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' } }, 'KB Gap Evaluation'),
-      gapCount > 0 ? h('span', { class: 'pill pill--error', style: { fontSize: '10px' } }, `${gapCount} missing`) : null,
-      incompleteCount > 0 ? h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, `${incompleteCount} incomplete`) : null
+  const body = h('div', null,
+    h('div', { style: { display: 'flex', gap: '12px', marginBottom: '16px', fontSize: '12px' } },
+      h('span', { style: { color: 'var(--success)', fontWeight: '600' } }, `${coveredCount} covered`),
+      h('span', { style: { color: 'var(--error)', fontWeight: '600' } }, `${gapCount} missing/outdated`),
+      h('span', { style: { color: 'var(--warning)', fontWeight: '600' } }, `${gaps.length - coveredCount - gapCount} incomplete`)
     )
-  ));
+  );
 
-  if (!isCollapsed) {
-    const body = h('div', { style: { padding: '10px 14px' } });
-    gaps.forEach(gap => {
-      const color = statusColors[gap.status] || 'var(--text-muted)';
-      const icon = statusIcons[gap.status] || '?';
-      const row = h('div', { style: { display: 'flex', gap: '8px', padding: '6px 0', borderBottom: '1px solid var(--border)', alignItems: 'flex-start' } },
-        h('span', { style: { color, fontWeight: '700', fontSize: '13px', minWidth: '16px' } }, icon),
-        h('div', { style: { flex: '1' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-            h('span', { style: { fontSize: '12px', fontWeight: '600', textTransform: 'capitalize' } }, (gap.dimension || '').replace(/_/g, ' ')),
-            h('span', { style: { fontSize: '10px', color } }, gap.status)
-          ),
-          gap.finding ? h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' } }, gap.finding) : null,
-          gap.suggestedEdit ? h('div', { style: { fontSize: '11px', color: 'var(--primary)', marginTop: '2px', fontStyle: 'italic' } }, 'Suggestion: ' + gap.suggestedEdit.slice(0, 150)) : null
+  gaps.forEach(gap => {
+    const color = statusColors[gap.status] || 'var(--text-muted)';
+    const icon = statusIcons[gap.status] || '?';
+    body.appendChild(h('div', { style: { display: 'flex', gap: '10px', padding: '10px 0', borderBottom: '1px solid var(--border)', alignItems: 'flex-start' } },
+      h('span', { style: { color, fontWeight: '700', fontSize: '14px', minWidth: '18px' } }, icon),
+      h('div', { style: { flex: '1' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' } },
+          h('span', { style: { fontSize: '13px', fontWeight: '600', textTransform: 'capitalize' } }, (gap.dimension || '').replace(/_/g, ' ')),
+          h('span', { class: `pill pill--${gap.status === 'CONFIRMED_CORRECT' ? 'success' : gap.status === 'INCOMPLETE' ? 'warning' : 'error'}`, style: { fontSize: '9px' } }, gap.status)
+        ),
+        gap.finding ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' } }, gap.finding) : null,
+        gap.suggestedEdit ? h('div', { style: { fontSize: '11px', color: 'var(--primary)', marginTop: '4px', padding: '6px 8px', background: 'var(--primary-soft)', borderRadius: 'var(--radius-xs)' } }, gap.suggestedEdit) : null
+      )
+    ));
+  });
+
+  modal('KB Gap Evaluation', body, { wide: true });
+}
+
+async function showComparisonModal(rewrite) {
+  toast('Loading original article…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId: rewrite.articleId });
+    if (!resp?.success) { toast(resp?.error || 'Failed to load original.', 'error'); return; }
+    const original = resp.article;
+
+    const rewriteSections = rewrite.sections || [];
+    const descSection = rewriteSections.find(s => /description/i.test(s.heading));
+    const resSection = rewriteSections.find(s => /resolution/i.test(s.heading));
+
+    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '600px', overflow: 'auto' } },
+      h('div', null,
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Title'),
+          h('div', { style: { fontSize: '13px', fontWeight: '600' } }, original.title || '(no title)')
+        ),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Summary'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5' } }, (original.summary || '(empty)').slice(0, 300))
+        ),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Description'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5', maxHeight: '200px', overflow: 'auto' } }, (original.description || '(empty)').slice(0, 800))
+        ),
+        h('div', null,
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Resolution'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5', maxHeight: '200px', overflow: 'auto' } }, (original.resolution || '(empty)').slice(0, 800))
         )
-      );
-      body.appendChild(row);
-    });
-    card.appendChild(body);
+      ),
+      h('div', null,
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Title'),
+          h('div', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--primary)' } }, rewrite.title || '(no title)')
+        ),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Summary'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5' } }, (rewrite.summary || '(empty)').slice(0, 300))
+        ),
+        h('div', { style: { marginBottom: '12px' } },
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Description'),
+          renderMarkdown((descSection?.body || '(empty)').slice(0, 800))
+        ),
+        h('div', null,
+          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Resolution'),
+          renderMarkdown((resSection?.body || '(empty)').slice(0, 800))
+        )
+      )
+    );
+
+    modal(`Compare: #${rewrite.articleNumber}`, body, { wide: true });
+  } catch (e) {
+    toast('Comparison failed: ' + e.message, 'error');
   }
-  return card;
 }
 
 function renderSidebarKnownIssues(kiItems) {
@@ -1222,96 +1264,6 @@ function renderSidebarQuality(structured) {
 }
 
 
-function renderSidebarHypotheses(hypotheses) {
-  const isCollapsed = _collapsedSections['hypotheses'] || false;
-  const section = h('div', { style: { marginBottom: '16px' } });
-  const pendingCount = hypotheses.filter(hyp => hyp.status === 'pending').length;
-  const headerLabel = _hypothesisRefining ? 'Refining…' : `Hypotheses (${pendingCount} pending)`;
-  const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', padding: '6px 0' }, onClick: () => { _collapsedSections['hypotheses'] = !_collapsedSections['hypotheses']; _sidebarOnly = true; renderByView(); } },
-    h('span', { style: { fontSize: '11px', fontWeight: '600', color: _hypothesisRefining ? 'var(--primary)' : 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: '6px' } }, _hypothesisRefining ? spinner('sm') : null, headerLabel),
-    h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼')
-  );
-  section.appendChild(header);
-
-  if (!isCollapsed) {
-    const body = h('div', null);
-    if (_hypothesisRefining) {
-      body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 0', fontSize: '12px', color: 'var(--primary)' } },
-        spinner('sm'),
-        h('span', null, 'AI is refining content based on your decisions…')
-      ));
-    }
-    body.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px' } }, pendingCount > 0 ? 'Accept or reject ALL claims to trigger AI refinement' : 'All decided — refinement applied'));
-    hypotheses.forEach((hyp, idx) => {
-      const confidencePct = Math.round((hyp.confidence || 0) * 100);
-      const statusColor = hyp.status === 'accepted' ? 'var(--success)' : hyp.status === 'rejected' ? 'var(--error)' : 'var(--warning)';
-      const item = h('div', { style: { padding: '8px', marginBottom: '6px', background: 'var(--surface)', borderRadius: 'var(--radius-xs)', borderLeft: `3px solid ${statusColor}` } },
-        h('div', { style: { fontSize: '11px', lineHeight: '1.4', color: 'var(--text-primary)', marginBottom: '4px' } }, hyp.claim),
-        h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', fontSize: '10px', color: 'var(--text-muted)' } },
-          h('span', null, `${confidencePct}% confidence`),
-          hyp.source ? h('span', null, ` · ${hyp.source}`) : null
-        )
-      );
-      if (hyp.status === 'pending') {
-        item.appendChild(h('div', { style: { display: 'flex', gap: '4px', marginTop: '6px' } },
-          h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '10px', color: 'var(--success)', border: '1px solid var(--success)', padding: '1px 6px' }, onClick: () => handleHypothesis(idx, 'accepted') }, '✓ Accept'),
-          h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '10px', color: 'var(--error)', border: '1px solid var(--error)', padding: '1px 6px' }, onClick: () => handleHypothesis(idx, 'rejected') }, '✗ Reject')
-        ));
-      } else {
-        item.appendChild(h('div', { style: { fontSize: '10px', fontWeight: '500', color: statusColor, marginTop: '4px' } }, hyp.status === 'accepted' ? '✓ Accepted' : '✗ Rejected'));
-      }
-      body.appendChild(item);
-    });
-    section.appendChild(body);
-  }
-  return section;
-}
-
-let _hypothesisRefining = false;
-
-async function handleHypothesis(index, status) {
-  const hypotheses = getState('case.hypotheses') || [];
-  if (index < 0 || index >= hypotheses.length) return;
-
-  const updated = hypotheses.map((hyp, i) => i === index ? { ...hyp, status } : hyp);
-  setState('case.hypotheses', updated);
-
-  const allDecided = updated.every(hyp => hyp.status !== 'pending');
-  if (!allDecided) {
-    renderByView();
-    return;
-  }
-
-  // All hypotheses decided — trigger refinement
-  _hypothesisRefining = true;
-  renderByView();
-
-  try {
-    const result = getState('case.result');
-    const resp = await chrome.runtime.sendMessage({
-      action: 'REFINE_WITH_HYPOTHESES',
-      hypotheses: updated,
-      structured: result?.structured || null,
-      caseAbstract: result?.caseAbstract || null
-    });
-    _hypothesisRefining = false;
-    if (resp?.success && resp.refined) {
-      const currentResult = getState('case.result');
-      if (currentResult?.structured) {
-        currentResult.structured = { ...currentResult.structured, ...resp.refined };
-        setState('case.result', { ...currentResult });
-      }
-      toast('Content refined based on hypothesis decisions.', 'success');
-    } else {
-      toast(resp?.error || 'Refinement returned no changes.', 'error');
-    }
-    renderByView();
-  } catch (e) {
-    _hypothesisRefining = false;
-    toast('Refinement failed: ' + e.message, 'error');
-    renderByView();
-  }
-}
 
 function renderSidebarProductDocs(docs) {
   const isCollapsed = _collapsedSections['product-docs'] || false;
@@ -1425,9 +1377,9 @@ function renderFullRewriteCard(rewrite) {
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
       (() => { const key = `rewrite-${rewrite.articleId}`; const ds = (getState('case.draftScores') || {})[key]; const scoring = (getState('case.scoringInProgress') || []).includes(key); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'), 'AF: scoring…'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
+      getState('case.gapEvaluation')?.length ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px' }, onClick: () => showGapEvaluationModal() }, 'Gaps') : null,
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
-      (_refinedKeys.has(`rewrite-${rewrite.articleId}`) || _refinedKeys.has('any')) ? h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreArticleDraft(rewrite, `rewrite-${rewrite.articleId}`) }, 'Re-score') : null,
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyRewrite(rewrite) }, 'Copy'),
+      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showComparisonModal(rewrite) }, 'Compare'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
     )
   );
@@ -1457,11 +1409,6 @@ function renderFullRewriteCard(rewrite) {
   return card;
 }
 
-function copyRewrite(rewrite) {
-  const text = `# ${rewrite.title || 'Rewritten Article'}\n\n**Summary:** ${rewrite.summary || ''}\n\n` +
-    (rewrite.sections || []).map(s => `## ${s.heading}\n${s.body}`).join('\n\n');
-  navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
-}
 
 async function publishArticle(draft, result) {
   toast('Creating article in ORGCS…', 'info');
@@ -1521,22 +1468,22 @@ async function publishUpdate(rewrite, result) {
 function renderEditableSection(sec, idx, prefix) {
   const id = `${prefix}-section-${idx}`;
   const isEditing = _editingSections.has(id);
-  const container = h('div', { style: { marginBottom: '16px', border: `1px solid ${isEditing ? 'var(--primary)' : 'var(--border)'}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
+  const container = h('div', { style: { marginBottom: '12px', borderBottom: '1px solid var(--border)', paddingBottom: '12px' } });
 
-  const editBtn = h('button', { class: `btn ${isEditing ? 'btn--error' : 'btn--ghost'} btn--sm`, style: { fontSize: '11px', minWidth: '28px' }, onClick: () => toggleEdit(id, sec) }, isEditing ? '×' : 'Edit');
-  container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', background: 'var(--surface-raised)', borderBottom: '1px solid var(--border)' } },
-    h('div', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--primary)', flex: '1' } }, sec.heading || 'Section'),
-    editBtn,
-    h('button', { class: 'btn btn--primary btn--sm', style: { fontSize: '11px' }, onClick: () => refineSection(sec) }, 'Refine')
-  ));
+  const headerRow = h('div', { style: { display: 'flex', alignItems: 'center', marginBottom: '6px' } },
+    h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.3px', flex: '1' } }, sec.heading || 'Section'),
+    h('button', { class: `btn btn--ghost btn--sm`, style: { fontSize: '10px', padding: '2px 6px', opacity: '0.7' }, onClick: () => toggleEdit(id, sec) }, isEditing ? 'Done' : 'Edit'),
+    h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '10px', padding: '2px 6px', color: 'var(--primary)', opacity: '0.7' }, onClick: () => refineSection(sec) }, 'Refine')
+  );
+  container.appendChild(headerRow);
 
   if (isEditing) {
-    const textarea = h('textarea', { id, class: 'input', style: { width: '100%', minHeight: '150px', fontSize: '12px', lineHeight: '1.5', fontFamily: 'inherit', border: 'none', borderTop: '2px solid var(--primary)', padding: '12px 14px', resize: 'vertical' } });
+    const textarea = h('textarea', { id, class: 'input', style: { width: '100%', minHeight: '120px', fontSize: '12px', lineHeight: '1.6', fontFamily: 'inherit', border: '2px solid var(--primary)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', resize: 'vertical' } });
     textarea.value = sec.body || '';
     textarea.addEventListener('input', () => { sec.body = textarea.value; });
     container.appendChild(textarea);
   } else {
-    const contentArea = h('div', { id, style: { padding: '12px 14px', fontSize: '12px', lineHeight: '1.6' } });
+    const contentArea = h('div', { id, style: { fontSize: '12px', lineHeight: '1.7', color: 'var(--text-primary)' } });
     contentArea.appendChild(renderMarkdown(sec.body));
     container.appendChild(contentArea);
   }
@@ -1819,10 +1766,6 @@ function copyAll(suggestions) {
   navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
 }
 
-function copyDraft(draft) {
-  const text = `# ${draft.title || 'New Article'}\n\n` + (draft.sections || []).map(s => `## ${s.heading}\n${s.body}`).join('\n\n');
-  navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
-}
 
 function hideTypeahead() {
   const dropdown = document.getElementById('case-typeahead');
@@ -1891,7 +1834,6 @@ function startAnalysis(caseId) {
   setState('case.caseSummary', null);
   setState('case.gusItems', null);
   setState('case.productDocs', null);
-  setState('case.hypotheses', null);
   setState('case.prodDocGap', null);
   setState('case.caseRecord', null);
   setState('case.caseCompleteness', null);
@@ -1953,7 +1895,6 @@ function onPortMessage(msg) {
       if (msg.caseSummary) setState('case.caseSummary', msg.caseSummary);
       if (msg.gusItems) setState('case.gusItems', msg.gusItems);
       if (msg.productDocs) setState('case.productDocs', msg.productDocs);
-      if (msg.hypotheses) setState('case.hypotheses', msg.hypotheses);
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
       if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
       if (msg.gapEvaluation) setState('case.gapEvaluation', msg.gapEvaluation);

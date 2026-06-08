@@ -611,21 +611,15 @@ KEY RULES:
 - Tables should use text, not visual indicators.
 - If reference links are provided from related KB articles, include relevant ones at the end of the Resolution section as a "See Also" note with descriptive link text.
 
-ALSO: Identify any claims or assertions where you are NOT fully confident (e.g., inferred root cause, assumed configuration, unclear error conditions). These become "hypotheses" that need SME validation.
-
 IMPORTANT: Use EXACTLY these 4 fields — title, summary, and two sections: Description and Resolution. No other section headings.
-Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["Description"|"Resolution"]}]}`,
+Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}${refLinks ? '\n\nREFERENCE LINKS FROM RELATED ARTICLES:\n' + refLinks : ''}` }],
     maxTokens: FINAL_MAX_TOKENS,
     temperature: 0.2,
     signal,
     onDelta: (chunk) => { send({ type: 'delta', chunk }); }
   });
-  const parsed = extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
-  if (parsed.hypotheses?.length) {
-    send({ type: 'meta', hypotheses: parsed.hypotheses.map((h, i) => ({ ...h, id: `h${i}`, status: 'pending' })) });
-  }
-  return parsed;
+  return extractJson(fullText) || { title: caseRecord.Subject, sections: [{ heading: 'Description', body: caseRecord.Description || '' }] };
 }
 
 function computeCompleteness(caseRecord, comments) {
