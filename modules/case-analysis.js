@@ -231,7 +231,7 @@ function renderAnalyzing() {
   if (!_container) return;
   _container.textContent = '';
 
-  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0 12px' } },
     buildInlineSearch(),
     buildStopButton()
   ));
@@ -262,7 +262,7 @@ function renderProgressive() {
   if (!_container) return;
   _container.textContent = '';
 
-  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0 12px' } },
     buildInlineSearch(),
     buildStopButton()
   ));
