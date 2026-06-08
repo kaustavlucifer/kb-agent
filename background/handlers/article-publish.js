@@ -1,6 +1,6 @@
 import { detectSession } from '../../shared/auth.js';
 import { sfGet, sfPost, sanitizeId } from '../../shared/api.js';
-import { SF_API_VERSION } from '../../shared/config.js';
+import { SF_API_VERSION, articleUrl } from '../../shared/config.js';
 
 const KNOWLEDGE_ARTICLE_RT_ID = '012Hx00000002oEIAQ';
 const CLAUDEGEN_MARKER = 'KBA-CLAUDEGEN';
@@ -157,7 +157,7 @@ export async function publishNewArticle(payload) {
     return {
       success: true,
       id: articleId,
-      url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${articleId}/view`
+      url: articleUrl(articleId)
     };
   } catch (e) {
     return { success: false, error: e?.message || 'Article creation failed.' };
@@ -225,7 +225,7 @@ export async function publishUpdateDraft(payload) {
     return {
       success: true,
       id: articleId,
-      url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${articleId}/view`,
+      url: articleUrl(articleId),
       masterArticleId: source.KnowledgeArticleId || null
     };
   } catch (e) {

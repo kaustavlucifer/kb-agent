@@ -1,11 +1,11 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText } from '../shared/api.js';
-import { callClaudeFast, streamClaude, extractText, extractJson } from '../shared/gateway.js';
+import { sfGet, sfQueryAll, mapWithConcurrency, stripHtml } from '../shared/api.js';
+import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SF_API_VERSION, SCORE_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHARS, SCORING_MODEL, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
+import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS, articleUrl } from '../shared/config.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
 
 let _container = null;
 let _unsubs = [];
@@ -29,7 +29,6 @@ const SCORE_META_FIELDS = [
   'Product_And_Topic__r.Name'
 ].join(', ');
 
-const SCORE_BODY_FIELDS = 'Id, Description__c, Resolution__c, Steps__c, additional_resources__c';
 
 
 
@@ -47,6 +46,7 @@ export function mount(container) {
     setState('kb.scores', {});
     setState('kb.loading', false);
     setState('kb.scoring', null);
+    setState('kb.scoringIds', []);
     loadArticles();
   }
   if (!_agfHits) loadAgfHits();
@@ -55,6 +55,7 @@ export function mount(container) {
   _unsubs.push(subscribe('kb.scores', debouncedRender));
   _unsubs.push(subscribe('kb.loading', render));
   _unsubs.push(subscribe('kb.scoring', debouncedRender));
+  _unsubs.push(subscribe('kb.scoringIds', debouncedRender));
   _unsubs.push(subscribe('kb.focusArticle', (articleId) => {
     if (!articleId) return;
     setState('kb.focusArticle', null);
@@ -120,7 +121,59 @@ let _searchFocused = false;
 let _renderTimer = null;
 function debouncedRender() {
   if (_renderTimer) return;
-  _renderTimer = setTimeout(() => { _renderTimer = null; render(); }, 100);
+  _renderTimer = setTimeout(() => {
+    _renderTimer = null;
+    if (getState('kb.scoring') && _container?.querySelector('.data-table') && _sortCol !== 'score') {
+      updateScoreCellsInPlace();
+    } else {
+      render();
+    }
+  }, 100);
+}
+
+function updateScoreCellsInPlace() {
+  const scores = getState('kb.scores') || {};
+  const scoringIds = getState('kb.scoringIds') || [];
+  const scoring = getState('kb.scoring');
+
+  // Update progress bar
+  if (scoring) {
+    const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
+    const progressLabel = _container.querySelector('.main__sticky .card:last-child span');
+    if (progressLabel) progressLabel.textContent = `Scoring: ${scoring.done} / ${scoring.total}`;
+    const bar = _container.querySelector('.progress__fill');
+    if (bar) bar.style.width = `${pct}%`;
+    const barLabel = _container.querySelector('.progress__label');
+    if (barLabel) barLabel.textContent = `${pct}%`;
+  }
+
+  // Update individual score cells in the table using data-article-id
+  const rows = _container.querySelectorAll('.data-table tbody tr[data-article-id]');
+  rows.forEach(row => {
+    const articleId = row.getAttribute('data-article-id');
+    if (!articleId) return;
+    const scoreData = scores[articleId];
+    const overall = scoreData?.overall;
+    const isBeingScored = scoringIds.includes(articleId);
+
+    const scoreTd = row.querySelectorAll('td')[5];
+    if (!scoreTd) return;
+
+    scoreTd.textContent = '';
+    if (isBeingScored) {
+      scoreTd.appendChild(spinner('sm'));
+    } else if (overall != null) {
+      const pill = h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' } }, String(overall));
+      scoreTd.appendChild(pill);
+    } else {
+      scoreTd.appendChild(h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—'));
+    }
+  });
+
+  // Force full re-render every 10 completions to sync stats bar
+  if (scoring && scoring.done % 10 === 0 && scoring.done > 0) {
+    setTimeout(render, 50);
+  }
 }
 
 function render() {
@@ -308,12 +361,16 @@ function render() {
   const tbody = table.querySelector('tbody');
   const pageEnd = pageStart + _pageSize;
   const pageItems = filtered.slice(pageStart, pageEnd);
+  const scoringIds = getState('kb.scoringIds') || [];
   pageItems.forEach(a => {
     const scoreData = scores[a.id];
     const overall = scoreData?.overall;
-    const scoreEl = overall != null
-      ? h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
-      : h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—');
+    const isBeingScored = scoringIds.includes(a.id);
+    const scoreEl = isBeingScored
+      ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'))
+      : overall != null
+        ? h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
+        : h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—');
 
     const pubDate = a.lastPublished ? new Date(a.lastPublished).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—';
     const agf = _agfHits?.[a.articleNumber];
@@ -324,10 +381,10 @@ function render() {
       a.caseAttachCount ? h('span', { class: 'pill pill--neutral', style: { fontSize: '9px', padding: '1px 4px' }, title: 'Cases linked to article' }, `${a.caseAttachCount} cases`) : null
     ) : h('span', { style: { color: 'var(--text-muted)', fontSize: '10px' } }, '—');
 
-    const articleUrl = `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`;
-    tbody.appendChild(h('tr', null,
+    const artUrl = articleUrl(a.id);
+    tbody.appendChild(h('tr', { 'data-article-id': a.id },
       h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px' } },
-        h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)', textDecoration: 'none' } }, a.articleNumber || '')
+        h('a', { href: artUrl, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)', textDecoration: 'none' } }, a.articleNumber || '')
       ),
       h('td', null,
         h('div', { style: { fontSize: '12px', fontWeight: '500' } }, a.title || ''),
@@ -442,23 +499,7 @@ async function loadArticles(forceLive = false) {
       (loaded, total) => setState('kb.loading', { loaded, total: total || totalCount })
     );
 
-    const articles = records.map(r => ({
-      id: r.Id,
-      knowledgeArticleId: r.KnowledgeArticleId,
-      articleNumber: r.ArticleNumber,
-      title: r.Title,
-      summary: r.Summary,
-      urlName: r.UrlName,
-      publishStatus: r.PublishStatus || 'Online',
-      validationStatus: r.ValidationStatus,
-      topicName: r.Product_And_Topic__r?.Name || '',
-      containsImage: !!r.Contains_Image__c,
-      containsVideo: !!r.Contains_Video__c,
-      articleLength: r.Article_Length__c || 0,
-      viewCount: r.ArticleTotalViewCount || 0,
-      caseAttachCount: r.ArticleCaseAttachCount || 0,
-      lastPublished: r.LastPublishedDate
-    }));
+    const articles = records.map(mapArticleRecord);
 
     setState('kb.articles', articles);
     await localSet({ [STORAGE_KEYS.ALL_ARTICLES]: articles, [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now() });
@@ -475,29 +516,6 @@ async function loadArticles(forceLive = false) {
   }
 }
 
-async function fetchBodies(articleIds, session) {
-  const bodyMap = new Map();
-  const batches = [];
-  for (let i = 0; i < articleIds.length; i += BODY_FETCH_BATCH_SIZE) {
-    batches.push(articleIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
-  }
-  for (const batch of batches) {
-    const soql = `SELECT ${SCORE_BODY_FIELDS} FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
-    const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-    try {
-      const result = await sfGet(url, session.sid);
-      for (const r of (result.records || [])) {
-        bodyMap.set(r.Id, {
-          description: r.Description__c || '',
-          resolution: r.Resolution__c || '',
-          steps: r.Steps__c || '',
-          additionalResources: r.additional_resources__c || ''
-        });
-      }
-    } catch {}
-  }
-  return bodyMap;
-}
 
 function getCloudFromPt(topicName) {
   if (!topicName) return 'Other';
@@ -544,11 +562,14 @@ async function scoreAll() {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
 
-  const bodyMap = await fetchBodies(toScore.map(a => a.id), session);
+  const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
   const scores = { ...existingScores };
   let done = 0;
+  const inFlight = new Set();
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
+    inFlight.add(article.id);
+    setState('kb.scoringIds', [...inFlight]);
     const body = bodyMap.get(article.id) || {};
     const enriched = { ...article, ...body };
     try {
@@ -558,13 +579,37 @@ async function scoreAll() {
       scores[article.id] = { overall: null, criteria: [], error: e.message };
     }
     done++;
+    inFlight.delete(article.id);
+    setState('kb.scoringIds', [...inFlight]);
     setState('kb.scores', { ...scores });
     setState('kb.scoring', { done, total: toScore.length });
   });
 
+  // Retry failed articles once
+  const failed = toScore.filter(a => scores[a.id]?.overall == null);
+  if (failed.length) {
+    await new Promise(r => setTimeout(r, 2000));
+    setState('kb.scoring', { done, total: toScore.length, retrying: failed.length });
+    await mapWithConcurrency(failed, 2, async (article) => {
+      inFlight.add(article.id);
+      setState('kb.scoringIds', [...inFlight]);
+      const body = bodyMap.get(article.id) || {};
+      const enriched = { ...article, ...body };
+      try {
+        const result = await scoreArticle(enriched);
+        scores[article.id] = result;
+      } catch {}
+      inFlight.delete(article.id);
+      setState('kb.scoringIds', [...inFlight]);
+      setState('kb.scores', { ...scores });
+    });
+  }
+
   await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
   setState('kb.scoring', null);
-  toast(`Scored ${done} articles.`, 'success');
+  setState('kb.scoringIds', []);
+  const successCount = toScore.filter(a => scores[a.id]?.overall != null).length;
+  toast(`Scored ${successCount}/${toScore.length} articles.${failed.length ? ` (${failed.length - toScore.filter(a => scores[a.id]?.overall == null).length} recovered on retry)` : ''}`, 'success');
 }
 
 function renderCriterionRow(c) {
@@ -645,7 +690,7 @@ async function scoreOne(article) {
 
   modal(`Score: ${article.articleNumber}`, bodyEl, { wide: true });
 
-  const bodyMap = await fetchBodies([article.id], session);
+  const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
   const enriched = { ...article, ...body };
   const { system, user, maxes } = buildScoringPrompt(enriched);
@@ -726,123 +771,27 @@ async function scoreOne(article) {
   }
 }
 
-function buildScoringPrompt(article) {
-  const descRaw = article.description || '';
-  const resRaw = article.resolution || '';
-  const descText = stripHtml(descRaw).slice(0, MAX_BODY_CHARS);
-  const resText = stripHtml(resRaw).slice(0, MAX_BODY_CHARS);
-  const stepsText = stripHtml(article.steps || '').slice(0, 1500);
-
-  const flags = [];
-  if (article.containsImage) flags.push('HAS_IMAGES');
-  if (article.containsVideo) flags.push('HAS_VIDEO');
-  if (hasCodeBlocks(descRaw) || hasCodeBlocks(resRaw)) flags.push('HAS_CODE_BLOCKS');
-  if (hasTables(descRaw) || hasTables(resRaw)) flags.push('HAS_TABLES');
-  if (!hasHeaders(descRaw) && !hasHeaders(resRaw)) flags.push('NO_HTML_HEADERS');
-  if (article.containsImage && !hasAltText(descRaw) && !hasAltText(resRaw)) flags.push('IMAGES_MISSING_ALT');
-  if (/orgcs\.lightning\.force\.com|orgcs\.my\.salesforce\.com/i.test(descRaw + resRaw)) flags.push('HAS_INTERNAL_URLS');
-  if ((article.additionalResources || '').trim().length > 20) flags.push('HAS_ADDITIONAL_RESOURCES');
-
-  const { maxes, naSet } = computeDynamicMaxes(flags);
-  const m = maxes;
-
-  const linkAnchors = (descRaw + resRaw).match(/<a\s[^>]*href\s*=\s*["'][^"']+["'][^>]*>[^<]+<\/a>/gi) || [];
-  const rawUrls = ((descRaw + resRaw).match(/(?<!['"=])https?:\/\/[^\s"'<>]{10,}/gi) || [])
-    .filter(u => !(descRaw + resRaw).includes('href="' + u));
-  const internalUrls = (descRaw + resRaw).match(/https?:\/\/(orgcs|org62)[^\s"'<>]*/gi) || [];
-
-  const system = `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
-Score this article. Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
-${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
-
-SCORING: Be STRICT. Most articles score 55-75. Score 90+ should be genuinely rare.
-Every criterion MUST include "passed" (what you verified passes) and "issues" (specific problems).
-
-CRITERIA: title(max ${m.title}), summary(max ${m.summary}), headers(max ${m.headers}), content(max ${m.content}), scannability(max ${m.scannability}), media(max ${m.media}), code(max ${m.code}), tables(max ${m.tables}), links(max ${m.links}), taxonomy(max ${m.taxonomy}).
-
-Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`;
-
-  const user = `ARTICLE:
-Title: ${article.title}
-Article#: ${article.articleNumber}
-P&T: ${article.topicName || '(none)'}
-Validation: ${article.validationStatus || 'Not Validated'}
-Flags: ${flags.join(', ') || 'none'}
-Links: RAW_URLs=${rawUrls.length}, ANCHORED=${linkAnchors.length}, INTERNAL=${internalUrls.length}
-Dynamic Maxes: ${Object.entries(m).map(([k, v]) => `${k}=${v}`).join(', ')}
-
-SUMMARY (${(article.summary || '').length} chars):
-${article.summary || '(empty)'}
-
-DESCRIPTION (${descText.length} chars):
-${descText || '(empty)'}
-
-RESOLUTION (${resText.length} chars):
-${resText || '(empty)'}
-${stepsText ? `\nSTEPS:\n${stepsText}` : ''}
-
-Score now. Return only JSON. overall must equal sum of all scores.`;
-
-  return { system, user, maxes };
-}
-
-async function scoreArticle(article) {
-  const { system, user, maxes } = buildScoringPrompt(article);
-  const resp = await callClaudeFast({
-    system,
-    messages: [{ role: 'user', content: user }],
-    maxTokens: 2200,
-    temperature: 0.1,
-    model: SCORING_MODEL
-  });
-  const text = extractText(resp);
-  return parseScoreResponse(text, maxes);
-}
-
-function parseScoreResponse(text, dynamicMaxes) {
-  const obj = extractJson(text);
-  if (!obj) return { overall: null, criteria: [], error: 'No JSON in response' };
-
-  const criteria = CRITERIA.map(c => {
-    const found = (obj.criteria || []).find(x => x.id === c.id) || {};
-    const effectiveMax = dynamicMaxes?.[c.id] ?? c.baseMax;
-    const isNa = found.na === true || effectiveMax === 0;
-    const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(found.score) || 0)));
-    return {
-      id: c.id,
-      label: c.label,
-      score,
-      max: effectiveMax,
-      na: isNa,
-      passed: Array.isArray(found.passed) ? found.passed.filter(Boolean) : [],
-      issues: Array.isArray(found.issues) ? found.issues.filter(Boolean) : [],
-      suggestions: Array.isArray(found.suggestions) ? found.suggestions.filter(Boolean) : []
-    };
-  });
-  const overall = Math.min(100, criteria.reduce((s, c) => s + c.score, 0));
-  return { overall, criteria, error: null };
-}
-
 async function rewriteArticle(article) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-  const bodyMap = await fetchBodies([article.id], session);
+  const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
   const desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
   const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
   const steps = stripHtml(body.steps || '').slice(0, 1500);
 
-  const streamEl = h('div', { id: 'rewrite-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
+  const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
   const content = h('div', null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, `#${article.articleNumber} — ${article.title}`),
     streamEl
   );
 
+  let _rewriteFullText = '';
   modal('Rewrite Article', content, {
     wide: true,
     primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(document.getElementById('rewrite-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
+      navigator.clipboard.writeText(_rewriteFullText).then(() => toast('Copied.', 'success'));
     }}
   });
 
@@ -865,19 +814,25 @@ CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
+  let _rewriteThrottle = null;
   try {
     await streamClaude({
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
       onDelta: (chunk, full) => {
+        _rewriteFullText = full;
+        if (_rewriteThrottle) return;
+        _rewriteThrottle = setTimeout(() => { _rewriteThrottle = null; }, 150);
         const el = document.getElementById('rewrite-stream');
-        if (el) el.textContent = full;
+        if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
     });
+    const el = document.getElementById('rewrite-stream');
+    if (el) { el.textContent = ''; el.appendChild(renderMarkdown(_rewriteFullText)); }
   } catch (e) {
     const el = document.getElementById('rewrite-stream');
-    if (el) el.textContent = 'Error: ' + e.message;
+    if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
   }
 }
 

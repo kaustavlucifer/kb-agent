@@ -1,37 +1,18 @@
 import { h, spinner, emptyState, toast, modal, progressBar, multiSelect } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { sfGet, soqlIdList, mapWithConcurrency, stripHtml } from '../shared/api.js';
-import { callClaudeFast, streamClaude, extractText, extractJson } from '../shared/gateway.js';
+import { mapWithConcurrency, stripHtml } from '../shared/api.js';
+import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, SCORING_MODEL, SF_API_VERSION, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS } from '../shared/config.js';
+import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS } from '../shared/config.js';
+import { runDedupBatch } from '../shared/dedup.js';
+import { fetchArticleBodies } from '../shared/scoring.js';
 
 let _container = null;
 let _unsubs = [];
 let _filterCloud = [];
 let _filterPt = [];
 
-const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
-
-STRICT DEFINITIONS:
-- DUPLICATE: Description AND Resolution are essentially the same — same root cause, same fix steps.
-- SUPERSEDED: One article directly replaces another — same problem, newer article fully covers older.
-
-DO NOT FLAG:
-- Same product but different error messages or symptoms
-- Different root causes even if both mention performance
-- Different audiences or setup scenarios
-- Broader vs. more specific articles (these should cross-link, not merge)
-
-Return JSON only:
-{"pairs":[{"articleA":"<number>","articleB":"<number>","relationship":"DUPLICATE"|"SUPERSEDED","keepArticle":"<number to keep>","confidence":0.85-1.0,"reason":"<what content is identical>"}]}
-
-Rules:
-- Only flag pairs with confidence >= 0.85
-- Reason must state specific identical content
-- If uncertain, do NOT flag — false negatives acceptable, false positives waste time
-- NEVER flag an article as a duplicate of ITSELF. articleA and articleB must be DIFFERENT article numbers.
-- If no duplicates: return {"pairs":[]}`;
 
 
 export function mount(container) {
@@ -209,7 +190,7 @@ async function detectDuplicates() {
     setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
 
     const bodyIds = articles.map(a => a.id);
-    const bodyMap = await fetchBodiesForDedup(session, bodyIds);
+    const bodyMap = await fetchArticleBodies(bodyIds, session);
 
     const allPairs = [];
     let done = 0;
@@ -259,48 +240,6 @@ async function detectDuplicates() {
   }
 }
 
-async function fetchBodiesForDedup(session, ids) {
-  const bodyMap = new Map();
-  const batches = [];
-  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
-  for (const batch of batches) {
-    try {
-      const soql = `SELECT Id, Description__c, Resolution__c FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-      const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, session.sid);
-      for (const r of (result.records || [])) {
-        bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '' });
-      }
-    } catch {}
-  }
-  return bodyMap;
-}
-
-async function runDedupBatch(articles) {
-  if (articles.length < 2) return [];
-  const snippets = articles.map(a => {
-    const desc = stripHtml(a.description || '').slice(0, 800);
-    const res = stripHtml(a.resolution || '').slice(0, 800);
-    return `--- ARTICLE ${a.articleNumber} ---\nTitle: ${a.title}\nSummary: ${(a.summary || '').slice(0, 200)}\n${desc ? `Description: ${desc}\n` : ''}${res ? `Resolution: ${res}` : ''}`;
-  }).join('\n\n');
-
-  try {
-    const resp = await callClaudeFast({
-      system: DEDUP_SYSTEM,
-      messages: [{ role: 'user', content: `Analyze these ${articles.length} articles for the same Product-Topic. Find near-identical duplicates.\n\n${snippets}` }],
-      maxTokens: 2000,
-      temperature: 0.1,
-      model: SCORING_MODEL
-    });
-    const parsed = extractJson(extractText(resp));
-    const pairs = (parsed?.pairs || []).filter(p => p.articleA && p.articleB && p.articleA !== p.articleB && p.confidence >= 0.85);
-    if (pairs.length) console.log('[KB-Agent] Dedup batch returned', pairs.length, 'pairs');
-    return pairs;
-  } catch (e) {
-    console.error('[KB-Agent] Dedup batch error:', e);
-    return [];
-  }
-}
 
 async function showMerge(pair) {
   const articles = getState('kb.articles') || [];
@@ -327,7 +266,7 @@ async function showMerge(pair) {
   const session = await detectSession();
   let descA = '', resA = '', descB = '', resB = '';
   if (session.sid && artA && artB) {
-    const bodyMap = await fetchBodiesForDedup(session, [artA.id, artB.id]);
+    const bodyMap = await fetchArticleBodies([artA.id, artB.id], session);
     descA = stripHtml(bodyMap.get(artA.id)?.description || '').slice(0, MAX_BODY_CHARS);
     resA = stripHtml(bodyMap.get(artA.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
     descB = stripHtml(bodyMap.get(artB.id)?.description || '').slice(0, MAX_BODY_CHARS);

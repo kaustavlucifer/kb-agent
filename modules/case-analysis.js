@@ -1,7 +1,7 @@
-import { h, spinner, emptyState, toast, progressBar, modal } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, progressBar, modal, renderMarkdown } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS } from '../shared/config.js';
+import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
 
 let _container = null;
 let _port = null;
@@ -13,6 +13,27 @@ let _editingSections = new Set();
 let _sidebarOnly = false;
 let _renderRaf = null;
 let _refinedKeys = new Set();
+
+function extractStreamingField(cleaned, fieldName) {
+  const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
+  const cm = cleaned.match(completeRe);
+  if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
+  const partialRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
+  const pm = cleaned.match(partialRe);
+  if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
+  return null;
+}
+
+function extractStreamingSectionBody(cleaned, heading) {
+  const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const completeRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
+  const cm = cleaned.match(completeRe);
+  if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
+  const partialRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
+  const pm = cleaned.match(partialRe);
+  if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
+  return null;
+}
 
 export function mount(container) {
   _unsubs.forEach(u => u());
@@ -326,6 +347,13 @@ function renderStreaming() {
   let mainEl = _container.querySelector('#case-stream-main');
   if (!mainEl) {
     _container.textContent = '';
+    const streamCaseStatus = getState('case.caseRecord')?.status;
+    if (streamCaseStatus && !['Closed', 'Closed - Duplicate'].includes(streamCaseStatus)) {
+      _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('span', { style: { fontSize: '14px' } }, '⚠'),
+        h('span', null, 'This case is still open. Root cause and resolution may change — treat generated content as preliminary.')
+      ));
+    }
     _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
       buildInlineSearch(),
       h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0' }, onClick: stopProcessing }, 'Stop')
@@ -409,7 +437,7 @@ function renderStreaming() {
       progressCard = h('div', { id: `sug-progress-${articleId}`, class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', background: 'var(--surface-raised)', borderBottom: '1px solid var(--border)' } },
           spinner('sm'),
-          h('a', { href: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${articleId}/view`, target: '_blank', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' } }, `#${articleNum}`),
+          h('a', { href: articleUrl(articleId), target: '_blank', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' } }, `#${articleNum}`),
           h('span', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, articleTitle)
         ),
         h('div', { class: 'sug-progress-content', style: { padding: '12px 14px', fontSize: '12px', lineHeight: '1.6', maxHeight: '250px', overflow: 'auto' } })
@@ -479,32 +507,11 @@ function renderStreamingSuggestion(text, container) {
     return;
   }
 
-  function extractField(fieldName) {
-    const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-    const cm = cleaned.match(completeRe);
-    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-    const partialRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-    const pm = cleaned.match(partialRe);
-    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
-    return null;
-  }
-
-  function extractSectionBody(heading) {
-    const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const completeRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-    const cm = cleaned.match(completeRe);
-    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-    const partialRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-    const pm = cleaned.match(partialRe);
-    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
-    return null;
-  }
-
-  const title = extractField('title');
-  const summary = extractField('summary');
-  const changes = extractField('changesSummary');
-  const description = extractSectionBody('Description');
-  const resolution = extractSectionBody('Resolution');
+  const title = extractStreamingField(cleaned, 'title');
+  const summary = extractStreamingField(cleaned, 'summary');
+  const changes = extractStreamingField(cleaned, 'changesSummary');
+  const description = extractStreamingSectionBody(cleaned, 'Description');
+  const resolution = extractStreamingSectionBody(cleaned, 'Resolution');
 
   const sections = [
     { name: 'Title', data: title },
@@ -555,31 +562,10 @@ function renderStreamingDraft(text, container) {
     return;
   }
 
-  function extractField(fieldName) {
-    const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-    const cm = cleaned.match(completeRe);
-    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-    const partialRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-    const pm = cleaned.match(partialRe);
-    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
-    return null;
-  }
-
-  function extractSectionBody(heading) {
-    const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const completeRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-    const cm = cleaned.match(completeRe);
-    if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-    const partialRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-    const pm = cleaned.match(partialRe);
-    if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
-    return null;
-  }
-
-  const title = extractField('title');
-  const summary = extractField('summary');
-  const description = extractSectionBody('Description');
-  const resolution = extractSectionBody('Resolution');
+  const title = extractStreamingField(cleaned, 'title');
+  const summary = extractStreamingField(cleaned, 'summary');
+  const description = extractStreamingSectionBody(cleaned, 'Description');
+  const resolution = extractStreamingSectionBody(cleaned, 'Resolution');
 
   const sections = [
     { name: 'Title', data: title },
@@ -643,6 +629,26 @@ function renderResult() {
 
   _container.textContent = '';
   _container.appendChild(buildInlineSearch());
+
+  const caseStatus = getState('case.caseRecord')?.status;
+  if (caseStatus && !['Closed', 'Closed - Duplicate'].includes(caseStatus)) {
+    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+      h('span', { style: { fontSize: '14px' } }, '⚠'),
+      h('span', null, 'This case is still open. Root cause and resolution may change — treat generated content as preliminary.')
+    ));
+  }
+
+  const custWarning = getState('case.customizationWarning');
+  if (custWarning?.isCustomerSpecific) {
+    const indicators = (custWarning.indicators || []).slice(0, 3).join(', ');
+    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--error) 8%, transparent)', border: '1px solid var(--error)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+      h('span', { style: { fontSize: '14px' } }, '⚙'),
+      h('div', null,
+        h('div', { style: { fontWeight: '600' } }, 'Customer-specific configuration detected'),
+        h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' } }, indicators ? `Indicators: ${indicators}` : 'Generated article may not be suitable for public KB without generalization.')
+      )
+    ));
+  }
 
   const result = getState('case.result');
   if (!result) return;
@@ -733,7 +739,7 @@ function renderResult() {
           h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '6px', textTransform: 'uppercase' } }, 'Covering Articles'),
           ...structured.coveringArticles.map(a =>
             h('div', { style: { padding: '4px 0', fontSize: '12px' } },
-              h('a', { href: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`, target: '_blank', style: { color: 'var(--primary)', textDecoration: 'none' } }, `#${a.articleNumber} — ${a.title}`)
+              h('a', { href: articleUrl(a.id), target: '_blank', style: { color: 'var(--primary)', textDecoration: 'none' } }, `#${a.articleNumber} — ${a.title}`)
             )
           )
         ) : null,
@@ -757,6 +763,11 @@ function renderResult() {
       ),
       h('p', { style: { fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0 0' } }, 'No product documentation update needed for this case scenario.')
     ));
+  }
+
+  const gapEval = getState('case.gapEvaluation');
+  if (gapEval?.length) {
+    main.appendChild(renderGapEvaluationCard(gapEval));
   }
 
   if (structured.suggestions?.length) {
@@ -895,15 +906,65 @@ function renderProductDocGapCard(prodDocGap) {
   const recColor = recColors[prodDocGap.recommendation] || 'var(--text-muted)';
   const recLabel = recLabels[prodDocGap.recommendation] || prodDocGap.recommendation;
 
+  const ownerLabels = { SUPPORT_KB: 'Support KB Team', PRODUCT_DOCUMENTATION: 'Product Documentation (CX)', BOTH: 'Both Teams' };
+  const ownerColors = { SUPPORT_KB: 'info', PRODUCT_DOCUMENTATION: 'warning', BOTH: 'neutral' };
+
   return h('div', { class: 'card', style: { marginBottom: '12px', border: `1px solid ${recColor}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden', animation: 'fadeIn 0.3s ease-in' } },
     h('div', { style: { padding: '12px 16px', background: `color-mix(in srgb, ${recColor} 6%, transparent)` } },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } },
         h('span', { style: { fontSize: '12px', fontWeight: '600', color: recColor } }, 'Product Documentation Assessment'),
         h('span', { class: `pill pill--${prodDocGap.recommendation === 'DOCS_SUFFICIENT' ? 'success' : prodDocGap.recommendation === 'DOCS_NEED_UPDATE' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, recLabel)
       ),
-      h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || '')
+      h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || ''),
+      prodDocGap.owner ? h('div', { style: { marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)' } }, 'Recommended Owner:'),
+        h('span', { class: `pill pill--${ownerColors[prodDocGap.owner] || 'neutral'}`, style: { fontSize: '10px' } }, ownerLabels[prodDocGap.owner] || prodDocGap.owner),
+        prodDocGap.ownerReason ? h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, prodDocGap.ownerReason) : null
+      ) : null
     )
   );
+}
+
+function renderGapEvaluationCard(gaps) {
+  const statusIcons = { CONFIRMED_CORRECT: '✓', INCOMPLETE: '◐', MISSING: '✗', OUTDATED: '⟳' };
+  const statusColors = { CONFIRMED_CORRECT: 'var(--success)', INCOMPLETE: 'var(--warning)', MISSING: 'var(--error)', OUTDATED: 'var(--error)' };
+  const isCollapsed = _collapsedSections['gap-eval'] || false;
+
+  const card = h('div', { class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
+
+  const gapCount = gaps.filter(g => g.status === 'MISSING' || g.status === 'OUTDATED').length;
+  const incompleteCount = gaps.filter(g => g.status === 'INCOMPLETE').length;
+
+  card.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections['gap-eval'] = !_collapsedSections['gap-eval']; renderByView(); } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+      h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
+      h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--text-primary)' } }, 'KB Gap Evaluation'),
+      gapCount > 0 ? h('span', { class: 'pill pill--error', style: { fontSize: '10px' } }, `${gapCount} missing`) : null,
+      incompleteCount > 0 ? h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, `${incompleteCount} incomplete`) : null
+    )
+  ));
+
+  if (!isCollapsed) {
+    const body = h('div', { style: { padding: '10px 14px' } });
+    gaps.forEach(gap => {
+      const color = statusColors[gap.status] || 'var(--text-muted)';
+      const icon = statusIcons[gap.status] || '?';
+      const row = h('div', { style: { display: 'flex', gap: '8px', padding: '6px 0', borderBottom: '1px solid var(--border)', alignItems: 'flex-start' } },
+        h('span', { style: { color, fontWeight: '700', fontSize: '13px', minWidth: '16px' } }, icon),
+        h('div', { style: { flex: '1' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            h('span', { style: { fontSize: '12px', fontWeight: '600', textTransform: 'capitalize' } }, (gap.dimension || '').replace(/_/g, ' ')),
+            h('span', { style: { fontSize: '10px', color } }, gap.status)
+          ),
+          gap.finding ? h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' } }, gap.finding) : null,
+          gap.suggestedEdit ? h('div', { style: { fontSize: '11px', color: 'var(--primary)', marginTop: '2px', fontStyle: 'italic' } }, 'Suggestion: ' + gap.suggestedEdit.slice(0, 150)) : null
+        )
+      );
+      body.appendChild(row);
+    });
+    card.appendChild(body);
+  }
+  return card;
 }
 
 function renderSidebarKnownIssues(kiItems) {
@@ -957,8 +1018,8 @@ function renderSidebarArticles(articles) {
       body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0' } }, 'No articles found'));
     } else {
       articles.forEach(a => {
-        const articleUrl = a.url || `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.id}/view`;
-        const link = h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title || 'Untitled');
+        const artLink = a.url || articleUrl(a.id);
+        const link = h('a', { href: artLink, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none', flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title || 'Untitled');
         link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
         link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
 
@@ -1279,77 +1340,12 @@ function renderSidebarProductDocs(docs) {
   return section;
 }
 
-function renderInlineFormatting(text) {
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
-  if (parts.length === 1) return document.createTextNode(text);
-  const span = h('span', null);
-  for (const part of parts) {
-    if (part.startsWith('**') && part.endsWith('**')) {
-      span.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
-    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
-      span.appendChild(h('em', null, part.slice(1, -1)));
-    } else if (part.startsWith('`') && part.endsWith('`')) {
-      span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, part.slice(1, -1)));
-    } else if (part) {
-      span.appendChild(document.createTextNode(part));
-    }
-  }
-  return span;
-}
-
-function renderMarkdown(text) {
-  if (!text) return h('span', null, '');
-  const lines = text.split('\n');
-  const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
-  let inCodeBlock = false;
-  let codeLines = [];
-  let codeLang = '';
-
-  for (const line of lines) {
-    if (!inCodeBlock && /^```(\w*)/.test(line)) {
-      inCodeBlock = true;
-      codeLang = line.match(/^```(\w*)/)[1] || '';
-      codeLines = [];
-      continue;
-    }
-    if (inCodeBlock) {
-      if (line.startsWith('```')) {
-        const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
-        if (codeLang) {
-          pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, codeLang));
-        }
-        pre.appendChild(h('code', null, codeLines.join('\n')));
-        container.appendChild(pre);
-        inCodeBlock = false;
-        codeLines = [];
-        codeLang = '';
-      } else {
-        codeLines.push(line);
-      }
-      continue;
-    }
-    if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, line.slice(4)));
-    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
-    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
-    else if (line.startsWith('- ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting('• ' + line.slice(2))));
-    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting(line)));
-    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, renderInlineFormatting(line)));
-  }
-
-  if (inCodeBlock && codeLines.length) {
-    const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
-    pre.appendChild(h('code', null, codeLines.join('\n')));
-    container.appendChild(pre);
-  }
-
-  return container;
-}
 
 function renderArticleSuggestionCard(sugs) {
   const articleNumber = sugs[0].articleNumber;
   const articleTitle = sugs[0].articleTitle;
   const articleId = sugs[0].articleId;
-  const articleUrl = `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${articleId}/view`;
+  const artLink = articleUrl(articleId);
   const collapseKey = `sug-${articleId}`;
   const isCollapsed = _collapsedSections[collapseKey] || false;
 
@@ -1359,7 +1355,7 @@ function renderArticleSuggestionCard(sugs) {
   const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
       collapseIcon,
-      h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${articleNumber}`),
+      h('a', { href: artLink, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${articleNumber}`),
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, articleTitle || 'Untitled')
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
@@ -1414,7 +1410,7 @@ function renderArticleSuggestionCard(sugs) {
 }
 
 function renderFullRewriteCard(rewrite) {
-  const articleUrl = `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${rewrite.articleId}/view`;
+  const rewriteLink = articleUrl(rewrite.articleId);
   const collapseKey = `rewrite-${rewrite.articleId}`;
   const isCollapsed = _collapsedSections[collapseKey] || false;
 
@@ -1424,7 +1420,7 @@ function renderFullRewriteCard(rewrite) {
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
       h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
       h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, 'REWRITE'),
-      h('a', { href: articleUrl, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${rewrite.articleNumber}`),
+      h('a', { href: rewriteLink, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${rewrite.articleNumber}`),
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, rewrite.title || rewrite.articleTitle)
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
@@ -1959,6 +1955,8 @@ function onPortMessage(msg) {
       if (msg.productDocs) setState('case.productDocs', msg.productDocs);
       if (msg.hypotheses) setState('case.hypotheses', msg.hypotheses);
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
+      if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
+      if (msg.gapEvaluation) setState('case.gapEvaluation', msg.gapEvaluation);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
       if (msg.scoringInProgress) {
         setState('case.scoringInProgress', msg.scoringInProgress);

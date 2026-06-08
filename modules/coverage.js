@@ -1,4 +1,4 @@
-import { h, spinner, toast, modal } from '../shared/ui.js';
+import { h, spinner, toast, modal, renderMarkdown } from '../shared/ui.js';
 import { getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS } from '../shared/config.js';
@@ -13,100 +13,6 @@ let _sortDir = 'desc';
 let _popstateHandler = null;
 let _coverageCache = {};
 
-function inlineFormat(text) {
-  const frag = document.createDocumentFragment();
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
-  for (const part of parts) {
-    if (part.startsWith('**') && part.endsWith('**')) {
-      frag.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
-    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
-      frag.appendChild(h('em', { style: { fontStyle: 'italic' } }, part.slice(1, -1)));
-    } else {
-      frag.appendChild(document.createTextNode(part));
-    }
-  }
-  return frag;
-}
-
-function renderMarkdown(text, container) {
-  if (!text) return;
-  const lines = text.split('\n');
-  let inTable = false;
-  let tableRows = [];
-
-  function flushTable() {
-    if (!tableRows.length) return;
-    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
-    const headerRow = tableRows[0];
-    const separatorIdx = tableRows.findIndex(r => /^[\s|:-]+$/.test(r.replace(/\|/g, '').replace(/[-:]/g, '')));
-    const dataStart = separatorIdx >= 0 ? separatorIdx + 1 : 1;
-
-    if (headerRow) {
-      const cells = headerRow.split('|').map(c => c.trim()).filter(Boolean);
-      const thead = h('thead', null, h('tr', null, ...cells.map(c => { const th = h('th', { style: { fontSize: '11px', padding: '6px 8px' } }); th.appendChild(inlineFormat(c)); return th; })));
-      table.appendChild(thead);
-    }
-
-    const tbody = h('tbody', null);
-    for (let i = dataStart; i < tableRows.length; i++) {
-      const cells = tableRows[i].split('|').map(c => c.trim()).filter(Boolean);
-      if (cells.length) {
-        tbody.appendChild(h('tr', null, ...cells.map(c => { const td = h('td', { style: { fontSize: '11px', padding: '5px 8px' } }); td.appendChild(inlineFormat(c)); return td; })));
-      }
-    }
-    table.appendChild(tbody);
-    container.appendChild(table);
-    tableRows = [];
-    inTable = false;
-  }
-
-  lines.forEach(line => {
-    if (line.trim().startsWith('|')) {
-      inTable = true;
-      tableRows.push(line.trim());
-      return;
-    }
-    if (inTable) flushTable();
-
-    if (/^#{4,}\s/.test(line)) {
-      const text = line.replace(/^#+\s*/, '');
-      const el = h('h5', { style: { fontSize: '12px', fontWeight: '600', marginTop: '10px', marginBottom: '4px', color: 'var(--primary)' } });
-      el.appendChild(inlineFormat(text));
-      container.appendChild(el);
-    } else if (line.startsWith('### ')) {
-      const el = h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '12px', marginBottom: '4px', color: 'var(--text-primary)' } });
-      el.appendChild(inlineFormat(line.slice(4)));
-      container.appendChild(el);
-    } else if (line.startsWith('## ')) {
-      const el = h('h3', { style: { fontSize: '13px', fontWeight: '700', marginTop: '14px', marginBottom: '6px', color: 'var(--text-primary)', borderBottom: '1px solid var(--border)', paddingBottom: '4px' } });
-      el.appendChild(inlineFormat(line.slice(3)));
-      container.appendChild(el);
-    } else if (line.startsWith('# ')) {
-      const el = h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '16px', marginBottom: '8px' } });
-      el.appendChild(inlineFormat(line.slice(2)));
-      container.appendChild(el);
-    } else if (/^---+$/.test(line.trim())) {
-      container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
-    } else if (line.startsWith('- ') || line.startsWith('* ')) {
-      const el = h('div', { style: { paddingLeft: '14px', fontSize: '12px', lineHeight: '1.6', marginBottom: '3px', position: 'relative' } });
-      el.appendChild(h('span', { style: { position: 'absolute', left: '2px' } }, '•'));
-      const span = h('span', null);
-      span.appendChild(inlineFormat(line.slice(2)));
-      el.appendChild(span);
-      container.appendChild(el);
-    } else if (/^\d+\.\s/.test(line)) {
-      const el = h('div', { style: { paddingLeft: '14px', fontSize: '12px', lineHeight: '1.6', marginBottom: '3px' } });
-      el.appendChild(inlineFormat(line));
-      container.appendChild(el);
-    } else if (line.trim()) {
-      const el = h('p', { style: { margin: '4px 0', fontSize: '12px', lineHeight: '1.6' } });
-      el.appendChild(inlineFormat(line));
-      container.appendChild(el);
-    }
-  });
-
-  if (inTable) flushTable();
-}
 
 function pushHistoryState() {
   const state = { selectedPt: _selectedPt, sortCol: _sortCol, sortDir: _sortDir };
@@ -390,7 +296,7 @@ function renderPtDetail(ptName, articles, target) {
 
 function showCoverageResult(ptName, narrative) {
   const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.7', maxHeight: '500px', overflowY: 'auto', padding: '4px' } });
-  renderMarkdown(narrative, streamEl);
+  streamEl.appendChild(renderMarkdown(narrative));
 
   const content = h('div', null, streamEl);
   modal(`Coverage: ${ptName}`, content, {
@@ -437,13 +343,13 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
       if (msg.type === 'delta') {
         fullText += msg.chunk;
         el.textContent = '';
-        renderMarkdown(fullText, el);
+        el.appendChild(renderMarkdown(fullText));
         el.scrollTop = el.scrollHeight;
       } else if (msg.type === 'done') {
         fullText = msg.narrative || fullText;
         el.textContent = '';
         el.setAttribute('data-raw', fullText);
-        renderMarkdown(fullText, el);
+        el.appendChild(renderMarkdown(fullText));
         _coverageCache[ptName] = fullText;
         localGet(['coverageCache']).then(d => {
           const cache = d.coverageCache || {};

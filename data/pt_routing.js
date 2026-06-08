@@ -1,32 +1,42 @@
 export const PT_ROUTING = {
   'health-cloud': {
-    ptPatterns: ['Industry-Health Cloud', 'Industry-Health & Insurance', 'Industry-Life Sciences'],
+    ptPatterns: ['Industry-Health Cloud'],
     keywords: [
       'health cloud', 'care plan', 'care gap', 'careplan', 'caregap', 'FHIR', 'HL7',
-      'vlocity_ins', 'insurance claim', 'utilization management', 'assessments',
-      'benefit verification', 'insurance enrollment', 'provider network', 'virtual care',
-      'social determinants', 'DORA', 'clinical data model', 'remote monitoring',
-      'member plan', 'authorization request', 'care management'
+      'clinical data model', 'provider network', 'virtual care',
+      'social determinants', 'DORA', 'remote monitoring',
+      'care management', 'patient card', 'care program'
     ],
-    excludeKeywords: ['financial services', 'banking', 'cpq', 'trade promotion']
+    excludeKeywords: ['financial services', 'banking', 'cpq', 'trade promotion', 'insurance claim', 'insurance enrollment']
+  },
+  'health-insurance': {
+    ptPatterns: ['Industry-Health & Insurance'],
+    keywords: [
+      'health insurance', 'vlocity_ins', 'insurance claim', 'utilization management',
+      'benefit verification', 'insurance enrollment', 'member plan',
+      'authorization request', 'payer', 'group insurance', 'insurance policy',
+      'claims processing', 'prior authorization', 'coverage verification'
+    ],
+    excludeKeywords: ['financial services', 'banking', 'cpq', 'life sciences']
   },
   'life-sciences': {
     ptPatterns: ['Industry-Life Sciences'],
     keywords: [
       'life sciences', 'clinical trial', 'drug program', 'medtech', 'patient services',
-      'consent management', 'REMS', 'companion diagnostics', 'referral management'
+      'consent management', 'REMS', 'companion diagnostics', 'referral management',
+      'pharma', 'therapeutic area'
     ],
-    excludeKeywords: []
+    excludeKeywords: ['insurance claim', 'banking']
   },
   'financial-services': {
     ptPatterns: ['Industry-Financial Services'],
     keywords: [
       'financial services cloud', 'FSC', 'financial account', 'account hierarchy',
-      'referral', 'relationship map', 'action plan', 'vlocity_ins_fsc',
+      'relationship map', 'action plan', 'vlocity_ins_fsc',
       'rollup summary', 'document checklist', 'life event', 'interaction summary',
-      'wealth management', 'banking', 'mortgage', 'loan'
+      'wealth management', 'banking', 'mortgage', 'loan', 'financial referral'
     ],
-    excludeKeywords: ['health', 'insurance claim', 'care plan']
+    excludeKeywords: ['health', 'insurance claim', 'care plan', 'clinical']
   },
   'comms-cloud': {
     ptPatterns: ['Industry-Communication Cloud'],
@@ -34,7 +44,7 @@ export const PT_ROUTING = {
       'communication cloud', 'comms cloud', 'EPC', 'order decomposition', 'MSM',
       'vlocity_cmt', 'catalog management', 'service qualification', 'CPE',
       'telecom', 'telecommunications', 'network inventory', 'service order',
-      'order management', 'enterprise product catalog'
+      'TMF order', 'enterprise product catalog'
     ],
     excludeKeywords: ['trade promotion', 'consumer goods']
   },
@@ -42,8 +52,8 @@ export const PT_ROUTING = {
     ptPatterns: ['Industry-OmniStudio', 'Revenue Cloud (Core)-OmniStudio'],
     keywords: [
       'omnistudio', 'omniscript', 'flexcard', 'dataraptor', 'integration procedure',
-      'vlocity_cmt', 'vlocity_ins', 'OmniProcess', 'OmniDataTransform',
-      'OmniIntegrationProcedure', 'FlexCard', 'IP', 'VBT'
+      'OmniProcess', 'OmniDataTransform', 'OmniIntegrationProcedure',
+      'FlexCard', 'OmniScript element', 'VBT', 'vlocity base template'
     ],
     excludeKeywords: []
   },
@@ -58,12 +68,13 @@ export const PT_ROUTING = {
       'Revenue Cloud (Core)-Transaction Management', 'Revenue Cloud (Core)-Usage & Ratings'
     ],
     keywords: [
-      'revenue cloud', 'billing', 'invoicing', 'BRE', 'business rules engine',
+      'revenue cloud', 'invoicing', 'BRE', 'business rules engine',
       'decision table', 'expression set', 'context definition', 'configurator',
-      'CLM', 'contract lifecycle', 'docgen', 'DRO', 'dynamic revenue orchestration',
+      'CLM', 'contract lifecycle', 'DRO', 'dynamic revenue orchestration',
       'product-to-order', 'product catalog', 'pricing', 'price management',
       'advanced approvals', 'transaction management', 'usage rating',
-      'billing schedule', 'invoice batch', 'credit memo', 'AvaTax', 'Vertex'
+      'billing schedule', 'invoice batch', 'credit memo', 'AvaTax', 'Vertex',
+      'revenue cloud billing'
     ],
     excludeKeywords: ['SBQQ', 'Steelbrick', 'cpq quote']
   },
@@ -87,7 +98,7 @@ export const PT_ROUTING = {
       'subscription pricing', 'cpq renewal', 'order contracting', 'MDQ',
       'Steelbrick', 'SBQQ__Quote__c', 'SBQQ__QuoteLine__c'
     ],
-    excludeKeywords: ['revenue cloud core', 'configurator', 'BRE']
+    excludeKeywords: []
   },
   'salesforce-billing': {
     ptPatterns: ['Revenue-Salesforce Billing', 'Revenue-Salesforce Subscription Management'],
@@ -95,13 +106,14 @@ export const PT_ROUTING = {
       'salesforce billing', 'blng__', 'subscription management', 'payment schedule',
       'revenue schedule', 'evergreen subscription'
     ],
-    excludeKeywords: ['revenue cloud core', 'billing schedule']
+    excludeKeywords: []
   },
   'document-generation': {
     ptPatterns: ['Industry-Document Generation', 'Revenue-Document Generation'],
     keywords: [
       'document generation', 'docgen', 'document template', 'merge field',
-      'word connector', 'clause library', 'PDF generation'
+      'word connector', 'clause library', 'PDF generation', 'DocGen template',
+      'document type', 'template section'
     ],
     excludeKeywords: []
   },
@@ -205,15 +217,6 @@ export function resolveTargetPts(caseProduct, caseSubject, caseDescription) {
 
   for (const [verticalId, config] of Object.entries(PT_ROUTING)) {
     let score = 0;
-    let excluded = false;
-
-    for (const ex of config.excludeKeywords) {
-      if (combinedText.includes(ex.toLowerCase())) {
-        excluded = true;
-        break;
-      }
-    }
-    if (excluded) continue;
 
     for (const kw of config.keywords) {
       const kwLower = kw.toLowerCase();
@@ -222,10 +225,19 @@ export function resolveTargetPts(caseProduct, caseSubject, caseDescription) {
       }
     }
 
-    if (score > 0) {
-      const normalized = (score / config.keywords.length) * 10;
-      scores.push({ verticalId, score: normalized, ptPatterns: config.ptPatterns });
+    if (score === 0) continue;
+
+    // excludeKeywords apply a heavy penalty (halve score) rather than hard-blocking,
+    // so related products (OmniStudio+DocGen, CPQ+Revenue Cloud) still rank correctly
+    // via keyword density while truly disjoint domains get suppressed
+    let penalty = 0;
+    for (const ex of config.excludeKeywords) {
+      if (combinedText.includes(ex.toLowerCase())) penalty++;
     }
+    if (penalty > 0) score *= Math.max(0.2, 1 - (penalty * 0.4));
+
+    const normalized = (score / config.keywords.length) * 10;
+    scores.push({ verticalId, score: normalized, ptPatterns: config.ptPatterns });
   }
 
   scores.sort((a, b) => b.score - a.score);

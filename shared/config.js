@@ -36,6 +36,9 @@ export const CASE_GUARD_RAIL_EXCLUSIONS = [
   'EU Premier', 'US Premier', 'Gov', 'US Sig'
 ];
 
+export const ORGCS_BASE = 'https://orgcs.lightning.force.com';
+export function articleUrl(id) { return `${ORGCS_BASE}/lightning/r/Knowledge__kav/${id}/view`; }
+
 export const STORAGE_KEYS = {
   GATEWAY_TOKEN: 'gatewayToken',
   MODEL: 'modelName',

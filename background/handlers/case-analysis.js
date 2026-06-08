@@ -1,7 +1,7 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, SCORE_CONCURRENCY } from '../../shared/config.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, SCORE_CONCURRENCY, articleUrl } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
@@ -78,10 +78,11 @@ export async function handleAnalyze(port, msg) {
   const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames) : Promise.resolve({ items: [], feed: [], error: null });
 
   send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
-  const [intentsResult, caseAbstract, gusData] = await Promise.all([
+  const [intentsResult, caseAbstract, gusData, structuredResolution] = await Promise.all([
     extractIntents(caseRecord, comments, signal),
     extractAbstract(caseRecord, comments, signal),
-    gusPromise
+    gusPromise,
+    extractStructuredResolution(caseRecord, comments, signal)
   ]);
 
   const caseSummaryPromise = streamCaseSummary(caseRecord, comments, gusData, send, signal);
@@ -93,6 +94,10 @@ export async function handleAnalyze(port, msg) {
   const ptPatterns = resolveTargetPts(product, caseRecord.Subject, caseRecord.Description);
 
   send({ type: 'meta', detectedPts: ptPatterns, caseAbstract: { product, symptomClass: caseAbstract?.symptomClass || '', errorSignature: caseAbstract?.errorSignature || '' } });
+
+  if (caseAbstract?.isCustomerSpecific) {
+    send({ type: 'meta', customizationWarning: { isCustomerSpecific: true, indicators: caseAbstract.customizationIndicators || [] } });
+  }
 
   const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject).catch(() => ({ items: [], error: null }));
 
@@ -193,7 +198,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     topicName: a.topicName || a.Product_And_Topic__r?.Name || '',
     publishStatus: a.publishStatus || a.PublishStatus || 'Online',
     validationStatus: a.validationStatus || a.ValidationStatus || '',
-    url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${a.Id}/view`
+    url: articleUrl(a.Id)
   }));
 
   send({ type: 'meta', topArticles: scoredArticles, productDocs: productDocs || [] });
@@ -209,7 +214,10 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
-  const decision = await makeDecision(caseRecord, caseAbstract, topArticles, signal);
+  const decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
+  if (decision.gaps?.length) {
+    send({ type: 'meta', gapEvaluation: decision.gaps });
+  }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
@@ -239,7 +247,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   }
 
   if (action === 'CREATE_NEW' || action === 'BOTH') {
-    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, send, signal);
+    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, candidateBodies, send, signal);
     if (structured && action === 'BOTH') {
       structured.newArticleDraft = draft;
     } else {
@@ -281,7 +289,9 @@ async function extractAbstract(caseRecord, comments, signal) {
   const commentsText = comments.slice(0, 8).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   try {
     const resp = await callClaudeFast({
-      system: 'Extract a problem signature from this case. Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"..."}',
+      system: `Extract a problem signature from this case. Also determine if this is a CUSTOMER-SPECIFIC issue (custom code, unique org configuration, bespoke integration design) that would NOT be useful as a public KB article vs. a GENERIC issue that many customers could encounter.
+
+Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"...","isCustomerSpecific":true/false,"customizationIndicators":["reason1","reason2"]}`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentsText.slice(0, 2000)}` }],
       maxTokens: 500,
       temperature: 0,
@@ -369,7 +379,7 @@ async function fetchCandidateBodies(apiBase, sid, candidates) {
 
   for (const batch of batches) {
     try {
-      const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
+      const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, additional_resources__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
       const result = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, sid);
       for (const r of (result.records || [])) {
         bodyMap.set(r.Id, {
@@ -380,7 +390,8 @@ async function fetchCandidateBodies(apiBase, sid, candidates) {
           topicName: r.Product_And_Topic__r?.Name || '',
           description: r.Description__c || '',
           resolution: r.Resolution__c || '',
-          steps: r.Steps__c || ''
+          steps: r.Steps__c || '',
+          additionalResources: r.additional_resources__c || ''
         });
       }
     } catch {}
@@ -401,7 +412,12 @@ IMPORTANT: Be CONSERVATIVE. Default to DOCS_SUFFICIENT unless there is a clear, 
 - Only recommend DOCS_MISSING when an entire product feature or workflow has ZERO documentation.
 - Bugs, data issues, org-specific configs, and one-off errors are NOT documentation gaps.
 
-Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs]}`,
+Also determine documentation OWNERSHIP — who should create/update the documentation:
+- SUPPORT_KB: Issue resolution, troubleshooting, workarounds, error explanations — owned by Support team
+- PRODUCT_DOCUMENTATION: UI behavior, feature limitations, setup guides, architecture explanations — owned by CX/Product Documentation team
+- BOTH: Needs both a support article (for resolution) AND a product doc update (for missing feature docs)
+
+Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs], "owner": "SUPPORT_KB"|"PRODUCT_DOCUMENTATION"|"BOTH", "ownerReason": "1 sentence why"}`,
       messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
       maxTokens: 200,
       temperature: 0,
@@ -432,7 +448,7 @@ async function searchProductDocs(apiBase, sid, queries) {
             title: r.Title,
             summary: r.Summary || '',
             articleNumber: r.ArticleNumber,
-            url: `https://orgcs.lightning.force.com/lightning/r/Knowledge__kav/${r.Id}/view`
+            url: articleUrl(r.Id)
           });
         }
       }
@@ -473,11 +489,12 @@ KEY RULES:
 - Explain acronyms. Use present tense. Be specific about product + feature.
 - After code blocks, add plain-text explanation
 - Tables should use text, not visual indicators
+- If reference links are provided from existing articles, include relevant ones in the Resolution section or as a "See Also" note at the end
 
 Return the COMPLETE rewritten article as publication-ready content.
 IMPORTANT: Use EXACTLY these 4 sections — Title, Summary, Description, Resolution. No other section headings.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
-        messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
+        messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${body.additionalResources ? '\nEXISTING REFERENCE LINKS:\n' + stripHtml(body.additionalResources).slice(0, 500) : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 3000,
         temperature: 0.2,
         signal,
@@ -506,46 +523,74 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   return allSuggestions;
 }
 
-async function makeDecision(caseRecord, abstract, topArticles, signal) {
-  if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.' };
-  const articleList = topArticles.slice(0, 5).map((a, i) => `${i+1}. #${a.ArticleNumber} "${a.Title}" (relevance: ${a._relevanceScore || 'N/A'}) — ${(a.Summary || '').slice(0, 150)}`).join('\n');
+async function extractStructuredResolution(caseRecord, comments, signal) {
+  const commentText = comments.slice(0, 8).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n');
+  try {
+    const resp = await callClaudeFast({
+      system: `You are a technical knowledge extraction engine. Extract structured resolution fields from this support case. Only include what is EXPLICITLY stated — do not infer or assume.
+
+Return JSON: {"problem_statement":"...","root_cause":"...or null","resolution_steps":["step1","step2"],"workarounds":["..."],"error_codes":["..."],"affected_versions":"...or null","prerequisites":["..."],"edge_cases":["..."]}`,
+      messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentText.slice(0, 3000)}` }],
+      maxTokens: 800,
+      temperature: 0,
+      signal
+    });
+    return extractJson(extractText(resp)) || null;
+  } catch { return null; }
+}
+
+async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, abstract, signal) {
+  if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.', gaps: [] };
+
+  const articleSummaries = topArticles.slice(0, 5).map((a, i) => {
+    const body = candidateBodies.get(a.Id) || {};
+    const desc = stripHtml(body.description || '').slice(0, 800);
+    const res = stripHtml(body.resolution || '').slice(0, 800);
+    return `[${i}] #${a.ArticleNumber} "${a.Title}" (relevance: ${a._relevanceScore || 'N/A'})\nSummary: ${(body.summary || a.Summary || '').slice(0, 200)}\nDescription: ${desc.slice(0, 400)}\nResolution: ${res.slice(0, 400)}`;
+  }).join('\n\n');
+
+  const resolutionContext = structuredResolution
+    ? `Problem: ${structuredResolution.problem_statement || ''}\nRoot Cause: ${structuredResolution.root_cause || 'unknown'}\nSteps: ${(structuredResolution.resolution_steps || []).join('; ')}\nWorkarounds: ${(structuredResolution.workarounds || []).join('; ')}\nErrors: ${(structuredResolution.error_codes || []).join(', ')}`
+    : `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}`;
+
   const resp = await callClaudeFast({
-    system: `You decide the KB action for a support case given existing related articles.
+    system: `You are a senior Salesforce KB gap evaluator. Your job is to evaluate what is MISSING, INCOMPLETE, or OUTDATED in existing KB articles given a real-world case resolution.
 
 ${GUIDE_DECISION}
 
-Choose ONE action:
+RUBRIC DIMENSIONS — evaluate each:
+1. problem_statement: Is the issue clearly described with symptoms?
+2. root_cause: Is the underlying technical cause identified?
+3. resolution: Are fix steps clear, ordered, and complete?
+4. workarounds: Are interim solutions captured?
+5. scope: Edge cases, known exceptions, affected versions?
+6. prerequisites: Permissions, org settings, feature flags needed?
 
-NO_ACTION — Choose when:
-- An existing article ALREADY fully covers the case's exact error, symptom, or scenario
-- The resolution in the existing article would directly solve this case without any modification
-- Only trivial cosmetic changes would improve the article (punctuation, minor wording)
-- The case describes a well-known issue that is completely documented
+For each dimension, classify: CONFIRMED_CORRECT (article covers it) | INCOMPLETE (partially covered) | MISSING (not in any article) | OUTDATED (article contradicts case resolution)
 
-UPDATE_EXISTING — Choose when:
-- Articles cover the same product/feature area but miss this specific error or scenario
-- The article could be meaningfully improved by adding resolution steps, error details, or context from this case
-- Prefer this over CREATE_NEW when an article exists in the same domain
+Then derive action:
+- 0-1 gaps (MISSING/OUTDATED) → NO_ACTION
+- 2-3 gaps → UPDATE_EXISTING
+- 4+ gaps or ALL MISSING → CREATE_NEW
+- Mix of covered + uncoverable → BOTH
 
-CREATE_NEW — Choose when:
-- ZERO articles relate to the same product feature area or specific issue category
-- This should be rare when relevant articles exist
-
-BOTH — Choose when:
-- Existing articles should be updated AND a distinctly different aspect needs a new article
-
-Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence explaining the decision","coveringArticles":[indices of articles that already cover this case, if NO_ACTION]}`,
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nExisting articles (scored for relevance to this case):\n${articleList}` }],
-    maxTokens: 250,
-    temperature: 0,
+Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
+    messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
+    maxTokens: 8000,
+    thinking: { type: 'enabled', budget_tokens: 5000 },
     signal
   });
   const parsed = extractJson(extractText(resp));
-  return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.' };
+  return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.', gaps: [] };
 }
 
-async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, send, signal) {
+async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, candidateBodies, send, signal) {
   const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
+  const refLinks = [...(candidateBodies || new Map()).values()]
+    .map(b => stripHtml(b.additionalResources || '').trim())
+    .filter(r => r.length > 10)
+    .slice(0, 3)
+    .join('\n');
   const fullText = await streamClaude({
     system: `You are drafting a new Salesforce KB article optimized for Agentforce consumption.
 
@@ -564,12 +609,13 @@ KEY RULES:
 - Explain acronyms and abbreviations. Use simple present tense.
 - Code blocks should be described succinctly in text.
 - Tables should use text, not visual indicators.
+- If reference links are provided from related KB articles, include relevant ones at the end of the Resolution section as a "See Also" note with descriptive link text.
 
 ALSO: Identify any claims or assertions where you are NOT fully confident (e.g., inferred root cause, assumed configuration, unclear error conditions). These become "hypotheses" that need SME validation.
 
 IMPORTANT: Use EXACTLY these 4 fields — title, summary, and two sections: Description and Resolution. No other section headings.
 Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"hypotheses":[{"claim":"...","confidence":0.0-1.0,"source":"where this was inferred from","affectedSections":["Description"|"Resolution"]}]}`,
-    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}` }],
+    messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}${refLinks ? '\n\nREFERENCE LINKS FROM RELATED ARTICLES:\n' + refLinks : ''}` }],
     maxTokens: FINAL_MAX_TOKENS,
     temperature: 0.2,
     signal,

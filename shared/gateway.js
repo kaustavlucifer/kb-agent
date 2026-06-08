@@ -42,7 +42,7 @@ export async function pingGateway(token) {
   }
 }
 
-export async function callClaude({ system, messages, maxTokens, model, token, temperature, signal }) {
+export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, signal }) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
   const t = token || await getToken();
@@ -54,7 +54,12 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
     messages
   };
   if (system) body.system = system;
-  if (temperature != null) body.temperature = temperature;
+  if (thinking) {
+    body.thinking = thinking;
+    body.temperature = 1;
+  } else if (temperature != null) {
+    body.temperature = temperature;
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);

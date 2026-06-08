@@ -3,7 +3,8 @@ import { pingGateway, callClaude, extractText, extractJson } from '../shared/gat
 import { localGet, localSet } from '../shared/storage.js';
 import { sfGet, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION } from '../shared/config.js';
-import { GUIDE_GENERATION, GUIDE_STYLE, GUIDE_SCORING } from '../data/writing_guide_prompts.js';
+import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/scoring.js';
+import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
@@ -112,25 +113,9 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
 async function scoreDraftArticle(article) {
   if (!article) return { success: false, error: 'No article provided' };
   try {
-    const desc = (article.description || '').slice(0, 4000);
-    const res = (article.resolution || '').slice(0, 4000);
-    const resp = await callClaude({
-      system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
-
-${GUIDE_SCORING}
-
-Score this article. TOTAL MUST EQUAL 100. Be STRICT. Most articles score 55-75.
-CRITERIA: title(max 12), summary(max 10), headers(max 10), content(max 18), scannability(max 10), media(max 8), code(max 8), tables(max 8), links(max 8), taxonomy(max 8).
-For criteria not applicable (no images/code/tables), set "na": true and score 0, redistribute points to content.
-Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","label":"...","score":<n>,"max":<n>,"na":false,"issues":["..."],"suggestions":["..."]},...]}`,
-      messages: [{ role: 'user', content: `Title: ${article.title}\nArticle#: ${article.articleNumber || 'DRAFT'}\nP&T: ${article.topicName || '(none)'}\nSUMMARY: ${article.summary || '(empty)'}\nDESCRIPTION:\n${desc || '(empty)'}\nRESOLUTION:\n${res || '(empty)'}` }],
-      maxTokens: 2000,
-      temperature: 0.1
-    });
-    const text = extractText(resp);
-    const parsed = extractJson(text);
-    if (!parsed?.overall) return { success: false, error: 'Could not parse score' };
-    return { success: true, score: parsed };
+    const result = await sharedScoreArticle(article);
+    if (result.overall == null) return { success: false, error: result.error || 'Could not parse score' };
+    return { success: true, score: result };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -339,25 +324,6 @@ function handlePort(port) {
   }
 }
 
-function mapArticleRecord(r) {
-  return {
-    id: r.Id,
-    knowledgeArticleId: r.KnowledgeArticleId,
-    articleNumber: r.ArticleNumber,
-    title: r.Title,
-    summary: r.Summary,
-    urlName: r.UrlName,
-    publishStatus: r.PublishStatus || 'Online',
-    validationStatus: r.ValidationStatus,
-    topicName: r.Product_And_Topic__r?.Name || '',
-    containsImage: !!r.Contains_Image__c,
-    containsVideo: !!r.Contains_Video__c,
-    articleLength: r.Article_Length__c || 0,
-    viewCount: r.ArticleTotalViewCount || 0,
-    caseAttachCount: r.ArticleCaseAttachCount || 0,
-    lastPublished: r.LastPublishedDate
-  };
-}
 
 (async () => {
   try {

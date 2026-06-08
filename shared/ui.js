@@ -92,6 +92,100 @@ export function emptyState(icon, text) {
   );
 }
 
+export function renderInlineFormatting(text) {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+  if (parts.length === 1) return document.createTextNode(text);
+  const span = h('span', null);
+  for (const part of parts) {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      span.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
+    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+      span.appendChild(h('em', null, part.slice(1, -1)));
+    } else if (part.startsWith('`') && part.endsWith('`')) {
+      span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, part.slice(1, -1)));
+    } else if (part) {
+      span.appendChild(document.createTextNode(part));
+    }
+  }
+  return span;
+}
+
+export function renderMarkdown(text) {
+  if (!text) return h('span', null, '');
+  const lines = text.split('\n');
+  const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
+  let inCodeBlock = false;
+  let codeLines = [];
+  let codeLang = '';
+  let inTable = false;
+  let tableRows = [];
+
+  function flushTable() {
+    if (!tableRows.length) return;
+    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
+    const headerRow = tableRows[0];
+    const separatorIdx = tableRows.findIndex(r => /^[\s|:-]+$/.test(r.replace(/\|/g, '').replace(/[-:]/g, '')));
+    const dataStart = separatorIdx >= 0 ? separatorIdx + 1 : 1;
+    if (headerRow) {
+      const cells = headerRow.split('|').map(c => c.trim()).filter(Boolean);
+      table.appendChild(h('thead', null, h('tr', null, ...cells.map(c => h('th', { style: { fontSize: '11px', padding: '6px 8px' } }, renderInlineFormatting(c))))));
+    }
+    const tbody = h('tbody', null);
+    for (let i = dataStart; i < tableRows.length; i++) {
+      const cells = tableRows[i].split('|').map(c => c.trim()).filter(Boolean);
+      if (cells.length) tbody.appendChild(h('tr', null, ...cells.map(c => h('td', { style: { fontSize: '11px', padding: '5px 8px' } }, renderInlineFormatting(c)))));
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+    tableRows = [];
+    inTable = false;
+  }
+
+  for (const line of lines) {
+    if (!inCodeBlock && /^```(\w*)/.test(line)) {
+      if (inTable) flushTable();
+      inCodeBlock = true;
+      codeLang = line.match(/^```(\w*)/)[1] || '';
+      codeLines = [];
+      continue;
+    }
+    if (inCodeBlock) {
+      if (line.startsWith('```')) {
+        const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
+        if (codeLang) {
+          pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, codeLang));
+        }
+        pre.appendChild(h('code', null, codeLines.join('\n')));
+        container.appendChild(pre);
+        inCodeBlock = false;
+        codeLines = [];
+        codeLang = '';
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+    if (line.trim().startsWith('|')) { inTable = true; tableRows.push(line.trim()); continue; }
+    if (inTable) flushTable();
+    if (/^---+$/.test(line.trim())) container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
+    else if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, line.slice(4)));
+    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
+    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
+    else if (line.startsWith('- ') || line.startsWith('* ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting('• ' + line.slice(2))));
+    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting(line)));
+    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, renderInlineFormatting(line)));
+  }
+
+  if (inTable) flushTable();
+  if (inCodeBlock && codeLines.length) {
+    const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
+    pre.appendChild(h('code', null, codeLines.join('\n')));
+    container.appendChild(pre);
+  }
+
+  return container;
+}
+
 export function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
   wrap.style.position = 'relative';
