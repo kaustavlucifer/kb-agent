@@ -122,9 +122,10 @@ export const PT_ROUTING = {
     keywords: [
       'retail', 'consumer goods', 'cgcloud', 'store operations', 'trade promotion',
       'consumer goods cloud', 'retail execution', 'planogram', 'store visit',
-      'product hierarchy', 'assortment', 'promotion', 'RCG'
+      'product hierarchy', 'assortment', 'promotion', 'RCG',
+      'tour share', 'tour plan', 'retail visit', 'action item', 'delivery task'
     ],
-    excludeKeywords: ['revenue cloud', 'financial', 'health']
+    excludeKeywords: ['financial', 'health']
   },
   'tpm': {
     ptPatterns: ['Industry-Retail and Consumer Goods'],
@@ -211,8 +212,8 @@ export const PT_ROUTING = {
   }
 };
 
-export function resolveTargetPts(caseProduct, caseSubject, caseDescription) {
-  const combinedText = `${caseProduct || ''} ${caseSubject || ''} ${caseDescription || ''}`.toLowerCase();
+export function resolveTargetPts(caseProduct, caseSubject, caseDescription, extraContext) {
+  const combinedText = `${caseProduct || ''} ${caseSubject || ''} ${caseDescription || ''} ${extraContext || ''}`.toLowerCase();
   const scores = [];
 
   for (const [verticalId, config] of Object.entries(PT_ROUTING)) {

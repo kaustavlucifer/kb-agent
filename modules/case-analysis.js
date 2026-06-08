@@ -225,6 +225,12 @@ function renderIdle() {
 function renderAnalyzing() {
   if (!_container) return;
   _container.textContent = '';
+
+  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+    buildInlineSearch(),
+    h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
+  ));
+
   const progress = getState('case.progress') || { step: 0, label: 'Starting…' };
   const steps = ['Connecting', 'Fetching case + comments', 'Extracting intents', 'Searching knowledge base', 'Ranking + loading articles', 'Generating recommendation'];
   const pct = Math.max(5, Math.round(((progress.step + 1) / steps.length) * 100));
@@ -232,10 +238,7 @@ function renderAnalyzing() {
   const card = h('div', { class: 'card' },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '12px' } },
       h('span', { style: { fontWeight: '600', fontSize: '14px' } }, progress.caseNumber ? `Analyzing Case #${progress.caseNumber}` : 'Analyzing…'),
-      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
-        h('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, `${progress.step + 1} / ${steps.length}`),
-        h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', fontSize: '11px' }, onClick: stopProcessing }, 'Stop')
-      )
+      h('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, `${progress.step + 1} / ${steps.length}`)
     ),
     progressBar(pct, 'default', true),
     h('div', { style: { marginTop: '16px' } },
@@ -253,6 +256,11 @@ function renderAnalyzing() {
 function renderProgressive() {
   if (!_container) return;
   _container.textContent = '';
+
+  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+    buildInlineSearch(),
+    h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
+  ));
 
   const caseRecord = getState('case.caseRecord');
   const caseSummary = getState('case.caseSummary');
@@ -302,8 +310,7 @@ function renderProgressive() {
   const progressCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px 16px' } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
       spinner('sm'),
-      h('span', { style: { fontSize: '12px', color: 'var(--primary)', fontWeight: '500' } }, progress.label || 'Processing…'),
-      h('button', { class: 'btn btn--ghost btn--sm', style: { marginLeft: 'auto', color: 'var(--error)' }, onClick: stopProcessing }, 'Stop')
+      h('span', { style: { fontSize: '12px', color: 'var(--primary)', fontWeight: '500' } }, progress.label || 'Processing…')
     )
   );
   main.appendChild(progressCard);
@@ -356,7 +363,7 @@ function renderStreaming() {
     }
     _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
       buildInlineSearch(),
-      h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0' }, onClick: stopProcessing }, 'Stop')
+      h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
     ));
     const grid = buildResizableGrid();
     const sidebar = grid.querySelector('[data-role="sidebar"]');

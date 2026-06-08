@@ -44,7 +44,7 @@ export async function handleAnalyze(port, msg) {
   // Guard rail field discovery first (fast, cached), then case fetch with extra fields
   const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
   const extraFields = getGuardRailExtraFields(guardRailFields);
-  const caseFields = `Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate${extraFields}`;
+  const caseFields = `Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
   if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
 
@@ -91,7 +91,11 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 3, label: 'Searching KB articles (SOSL)' });
   const product = caseAbstract?.product || intentsResult.product || '';
   const allQueries = intentsResult.intents.flatMap(i => i.queries);
-  const ptPatterns = resolveTargetPts(product, caseRecord.Subject, caseRecord.Description);
+  const casePt = caseRecord.cssf_Product_Topic_Name__c || '';
+  const commentContext = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200) || '').join(' ');
+  const ptPatterns = casePt
+    ? [casePt, ...resolveTargetPts(product, caseRecord.Subject, caseRecord.Description, commentContext).filter(p => p !== casePt)]
+    : resolveTargetPts(product, caseRecord.Subject, caseRecord.Description, commentContext);
 
   send({ type: 'meta', detectedPts: ptPatterns, caseAbstract: { product, symptomClass: caseAbstract?.symptomClass || '', errorSignature: caseAbstract?.errorSignature || '' } });
 
