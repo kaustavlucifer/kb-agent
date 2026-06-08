@@ -92,10 +92,11 @@ export async function handleAnalyze(port, msg) {
   const product = caseAbstract?.product || intentsResult.product || '';
   const allQueries = intentsResult.intents.flatMap(i => i.queries);
   const casePt = caseRecord.cssf_Product_Topic_Name__c || '';
-  const commentContext = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200) || '').join(' ');
-  const ptPatterns = casePt
-    ? [casePt, ...resolveTargetPts(product, caseRecord.Subject, caseRecord.Description, commentContext).filter(p => p !== casePt)]
-    : resolveTargetPts(product, caseRecord.Subject, caseRecord.Description, commentContext);
+  const isIndustryOrRevenue = /^(Industry|Revenue)/i.test(casePt);
+  if (!isIndustryOrRevenue) {
+    send({ type: 'meta', ptWarning: `This case's P&T is "${casePt}" — this tool is optimized for Industry & Revenue Cloud cases. Results may be limited.` });
+  }
+  const ptPatterns = isIndustryOrRevenue ? resolveTargetPts(casePt) : [];
 
   send({ type: 'meta', detectedPts: ptPatterns, caseAbstract: { product, symptomClass: caseAbstract?.symptomClass || '', errorSignature: caseAbstract?.errorSignature || '' } });
 

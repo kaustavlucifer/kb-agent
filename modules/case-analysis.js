@@ -655,6 +655,14 @@ function renderResult() {
     ));
   }
 
+  const ptWarning = getState('case.ptWarning');
+  if (ptWarning) {
+    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--primary) 8%, transparent)', border: '1px solid var(--primary)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+      h('span', { style: { fontSize: '14px' } }, 'i'),
+      h('span', null, ptWarning)
+    ));
+  }
+
   const result = getState('case.result');
   if (!result) return;
 
@@ -1904,6 +1912,7 @@ function onPortMessage(msg) {
       if (msg.productDocs) setState('case.productDocs', msg.productDocs);
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
       if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
+      if (msg.ptWarning) setState('case.ptWarning', msg.ptWarning);
       if (msg.gapEvaluation) setState('case.gapEvaluation', msg.gapEvaluation);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
       if (msg.scoringInProgress) {
