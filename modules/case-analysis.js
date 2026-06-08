@@ -143,14 +143,19 @@ function scheduleRender() {
 }
 
 function buildInlineSearch() {
-  const input = h('input', { type: 'text', class: 'input', style: { flex: '1', maxWidth: '320px', fontSize: '12px', padding: '5px 10px' }, placeholder: 'New case #, ID, or URL…', id: 'case-inline-search' });
+  const input = h('input', { type: 'text', class: 'input', style: { flex: '1', fontSize: '12px', padding: '6px 12px' }, placeholder: 'New case #, ID, or URL…', id: 'case-inline-search' });
   input.addEventListener('keydown', e => { if (e.key === 'Enter') submitInlineSearch(); });
   const btn = h('button', { class: 'btn btn--primary btn--sm', onClick: () => submitInlineSearch() }, 'Analyze');
-  const bar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
-    input, btn,
-    h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginLeft: '8px' } }, 'Enter a case to start new analysis')
+  const bar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flex: '1' } },
+    input, btn
   );
   return bar;
+}
+
+function buildStopButton() {
+  return h('button', { class: 'btn btn--ghost btn--sm', style: { width: '32px', height: '32px', padding: '0', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', border: '2px solid var(--error)', flexShrink: '0' }, title: 'Stop processing', onClick: stopProcessing },
+    h('div', { style: { width: '10px', height: '10px', background: 'var(--error)', borderRadius: '2px' } })
+  );
 }
 
 async function submitInlineSearch() {
@@ -228,7 +233,7 @@ function renderAnalyzing() {
 
   _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
     buildInlineSearch(),
-    h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
+    buildStopButton()
   ));
 
   const progress = getState('case.progress') || { step: 0, label: 'Starting…' };
@@ -259,7 +264,7 @@ function renderProgressive() {
 
   _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
     buildInlineSearch(),
-    h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
+    buildStopButton()
   ));
 
   const caseRecord = getState('case.caseRecord');
@@ -363,14 +368,17 @@ function renderStreaming() {
     }
     _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
       buildInlineSearch(),
-      h('button', { class: 'btn btn--ghost btn--sm', style: { color: 'var(--error)', flexShrink: '0', padding: '6px 12px' }, onClick: stopProcessing }, 'Stop')
+      buildStopButton()
     ));
     const grid = buildResizableGrid();
     const sidebar = grid.querySelector('[data-role="sidebar"]');
     sidebar.id = 'case-stream-sidebar';
     const result = getState('case.result');
-    const structured = result?.structured || { action: 'UPDATE_EXISTING', confidence: 'MEDIUM' };
-    sidebar.appendChild(renderSidebarQuality(structured));
+    if (result?.structured) {
+      sidebar.appendChild(renderSidebarQuality(result.structured));
+    } else {
+      sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, spinner('sm'), h('span', null, 'Evaluating…')));
+    }
     sidebar.appendChild(renderSidebarArticles(topArticles));
     const knownIssues = getState('case.knownIssues') || [];
     if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
@@ -402,8 +410,11 @@ function renderStreaming() {
     if (sidebar) {
       sidebar.textContent = '';
       const result = getState('case.result');
-      const structured = result?.structured || { action: 'UPDATE_EXISTING', confidence: 'MEDIUM' };
-      sidebar.appendChild(renderSidebarQuality(structured));
+      if (result?.structured) {
+        sidebar.appendChild(renderSidebarQuality(result.structured));
+      } else {
+        sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, spinner('sm'), h('span', null, 'Evaluating…')));
+      }
       sidebar.appendChild(renderSidebarArticles(topArticles));
       const ki = getState('case.knownIssues') || [];
       if (ki.length) sidebar.appendChild(renderSidebarKnownIssues(ki));
