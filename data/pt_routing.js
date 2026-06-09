@@ -61,8 +61,19 @@ export const PT_RELATED = {
     'Revenue Cloud (Core)-Price Management'
   ],
   'Revenue Cloud (Core)-Billing & Invoicing': [
-    'Revenue Cloud (Core)-Transaction Management',
+    'Revenue Cloud (Core)-Developer Support - Invoice to Cash',
+    'Revenue Cloud (Core)-Price Management',
     'Revenue Cloud (Core)-Usage & Ratings'
+  ],
+  'Revenue Cloud (Core)-Transaction Management': [
+    'Revenue Cloud (Core)-Advanced Configurator',
+    'Revenue Cloud (Core)-Configurator',
+    'Revenue Cloud (Core)-Developer Support - Product to Order',
+    'Revenue Cloud (Core)-Price Management'
+  ],
+  'Revenue Cloud (Core)-Dynamic Revenue Orchestration': [
+    'Revenue Cloud (Core)-Transaction Management',
+    'Revenue Cloud (Core)-Price Management'
   ],
   'Revenue Cloud (Core)-Configurator': [
     'Revenue Cloud (Core)-Product Catalog Management',
@@ -70,14 +81,14 @@ export const PT_RELATED = {
     'Revenue Cloud (Core)-Price Management'
   ],
   'Revenue Cloud (Core)-Contract Lifecycle Management with DocGen': [
-    'Industry-Document Generation',
+    'Revenue Cloud (Core)-OmniStudio',
     'Revenue-Document Generation',
-    'Revenue Cloud (Core)-OmniStudio'
+    'Industry-Document Generation'
   ],
   'Revenue Cloud (Core)-Price Management': [
-    'Revenue Cloud (Core)-Configurator',
-    'Revenue Cloud (Core)-Business Rules Engine',
-    'Revenue Cloud (Core)-Product Catalog Management'
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Transaction Management',
+    'Revenue Cloud (Core)-Dynamic Revenue Orchestration'
   ],
   'Revenue Cloud (Core)-Product Catalog Management': [
     'Revenue Cloud (Core)-Configurator',
@@ -85,17 +96,18 @@ export const PT_RELATED = {
   ],
   'Revenue-Salesforce CPQ': [
     'Revenue-CPQ Developer Support',
-    'Revenue-Salesforce Billing'
+    'Revenue-Salesforce Subscription Management',
+    'Revenue-Salesforce Contracts'
   ],
   'Revenue-CPQ Developer Support': [
-    'Revenue-Salesforce CPQ'
+    'Revenue-Salesforce CPQ',
+    'Revenue-Billing Developer Support'
   ],
   'Revenue-Salesforce Billing': [
-    'Revenue-Salesforce Subscription Management',
-    'Revenue-Salesforce CPQ'
+    'Revenue-Billing Developer Support'
   ],
   'Revenue-Salesforce Subscription Management': [
-    'Revenue-Salesforce Billing'
+    'Revenue-Salesforce CPQ'
   ],
   'Revenue Lifecycle Management-Asset Lifecycle Management': [
     'Revenue Lifecycle Management-Quote to Order Capture',
