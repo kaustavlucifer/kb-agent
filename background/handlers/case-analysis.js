@@ -38,10 +38,11 @@ export async function handleAnalyze(port, msg) {
     clearInterval(keepalive);
   });
 
-  const session = await detectSession();
-  if (!session.sid) { clearInterval(keepalive); port.postMessage({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
-
   const send = (data) => { try { port.postMessage(data); } catch {} };
+
+  const session = await detectSession();
+  if (!session.sid) { clearInterval(keepalive); send({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
+
   const caseId = sanitizeId(msg.caseId);
 
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
@@ -222,10 +223,6 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
   const kbScoredArticles = [...scoredArticles];
 
-  if (!stopped) {
-    batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal);
-  }
-
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
@@ -274,10 +271,15 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   await caseSummaryPromise;
   const prodDocGap = await prodDocGapPromise;
 
-  clearInterval(keepalive);
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 
-  if (!stopped) autoScoreGeneratedArticles(structured, send, signal);
+  if (!stopped) {
+    await Promise.all([
+      autoScoreGeneratedArticles(structured, send, signal).catch(() => {}),
+      batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal).catch(() => {})
+    ]);
+  }
+  clearInterval(keepalive);
 }
 
 export async function handleGenerateNew(port, msg) {
@@ -382,7 +384,7 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
 
   let ptFilter = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
   if (ptPatterns.length && ptPatterns.length <= 5) {
-    const ptClauses = ptPatterns.map(p => `Product_And_Topic__r.Name = '${p.replace(/'/g, "\\'")}'`);
+    const ptClauses = ptPatterns.map(p => `Product_And_Topic__r.Name = '${escapeSoql(p)}'`);
     ptFilter = `(${ptClauses.join(' OR ')})`;
   }
 

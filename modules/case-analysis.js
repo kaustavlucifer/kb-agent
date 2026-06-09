@@ -12,7 +12,6 @@ let _streamPending = false;
 let _editingSections = new Set();
 let _sidebarOnly = false;
 let _renderRaf = null;
-let _refinedKeys = new Set();
 
 function extractStreamingField(cleaned, fieldName) {
   const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
@@ -1558,7 +1557,6 @@ function refineRewrite(rewrite) {
         rewrite.summary = newSummary || rewrite.summary;
         if (newSections.length) rewrite.sections = newSections;
         const refKey = rewrite.articleId ? `rewrite-${rewrite.articleId}` : 'new-draft';
-        _refinedKeys.add(refKey);
         renderByView();
         toast('Article refined.', 'success');
       } else {
@@ -1599,32 +1597,6 @@ function showScoreInsights(draftScores) {
   modal('AF Readiness Insights', content, { wide: true });
 }
 
-async function scoreArticleDraft(draft, draftKey) {
-  toast('Scoring article for AF readiness…', 'info');
-  try {
-    const sectionsText = (draft.sections || []).map(s => s.body || '').join('\n');
-    const resp = await chrome.runtime.sendMessage({
-      action: 'SCORE_DRAFT_ARTICLE',
-      article: {
-        title: draft.title || draft.articleTitle || '',
-        summary: draft.summary || '',
-        description: (draft.sections || []).find(s => /description/i.test(s.heading))?.body || sectionsText.slice(0, 3000),
-        resolution: (draft.sections || []).find(s => /resolution/i.test(s.heading))?.body || '',
-        articleNumber: draft.articleNumber || 'DRAFT',
-        topicName: ''
-      }
-    });
-    if (resp?.success && resp.score) {
-      setState('case.draftScores', { ...(getState('case.draftScores') || {}), [draftKey]: resp.score });
-      renderByView();
-      toast(`AF Score: ${resp.score.overall}/100`, resp.score.overall >= 75 ? 'success' : 'info');
-    } else {
-      toast(resp?.error || 'Scoring failed.', 'error');
-    }
-  } catch (e) {
-    toast('Score error: ' + e.message, 'error');
-  }
-}
 
 function refineSection(section) {
   const content = section.content || section.body || '';
@@ -1657,7 +1629,6 @@ function refineSection(section) {
       if (resp?.success && resp.refined) {
         if ('content' in section) section.content = resp.refined;
         else if ('body' in section) section.body = resp.refined;
-        _refinedKeys.add('any');
         renderByView();
         toast('Section refined.', 'success');
       } else {
@@ -1746,6 +1717,8 @@ function triggerNewArticleGeneration(caseId) {
 
   setState('case.view', 'streaming');
   setState('case.streamText', '');
+  setState('case.suggestions', []);
+  setState('case.suggestionDeltas', {});
   setState('case.progress', { step: 0, label: 'Generating new article…' });
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
@@ -1759,12 +1732,25 @@ function triggerNewArticleGeneration(caseId) {
       const existingResult = getState('case.result') || {};
       setState('case.result', { ...existingResult, structured: msg.structured });
       setState('case.view', 'result');
+    } else if (msg.type === 'meta') {
+      if (msg.draftScore) {
+        const scores = getState('case.draftScores') || {};
+        scores[msg.draftScore.key] = msg.draftScore.score;
+        setState('case.draftScores', { ...scores });
+      }
+      if (msg.scoringInProgress) setState('case.scoringInProgress', msg.scoringInProgress);
     } else if (msg.type === 'error') {
       toast(msg.error, 'error');
       setState('case.view', 'result');
     }
   });
-  _port.onDisconnect.addListener(() => { _port = null; });
+  _port.onDisconnect.addListener(() => {
+    _port = null;
+    if (getState('case.view') === 'streaming') {
+      toast('Connection lost during generation.', 'error');
+      setState('case.view', 'result');
+    }
+  });
 }
 
 
@@ -1854,7 +1840,6 @@ function startAnalysis(caseId, isRetry = false) {
     _retryCount = 0;
     _sidebarOnly = false;
     _editingSections.clear();
-    _refinedKeys.clear();
   }
   const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
