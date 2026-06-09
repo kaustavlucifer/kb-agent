@@ -6,7 +6,7 @@ import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION } from '../shared/config.js'
 import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
-import { handleAnalyze } from './handlers/case-analysis.js';
+import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
 import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
 import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
 import { handleDedup, handleMerge } from './handlers/dedup.js';
@@ -255,8 +255,8 @@ function handlePort(port) {
   switch (port.name) {
     case 'kba-analyze':
       port.onMessage.addListener((msg) => {
-        if (msg.action !== 'ANALYZE_CASE') return;
-        wrap(handleAnalyze)(msg);
+        if (msg.action === 'ANALYZE_CASE') wrap(handleAnalyze)(msg);
+        else if (msg.action === 'GENERATE_NEW_ARTICLE') wrap(handleGenerateNew)(msg);
       });
       break;
     case 'kbs-score-batch':

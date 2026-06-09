@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, progressBar, modal, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
@@ -291,7 +291,7 @@ function renderProgressive() {
 
   const summaryCard = h('div', { id: 'progressive-summary', class: 'card', style: { marginBottom: '12px', padding: '12px 16px', borderLeft: '3px solid var(--primary)' } },
     h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '6px' } }, 'Case Summary'),
-    h('div', { class: 'summary-content' }, caseSummary ? renderMarkdown(caseSummary) : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, spinner('sm'), h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Generating summary…')))
+    h('div', { class: 'summary-content' }, caseSummary ? renderMarkdown(caseSummary) : h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, streamingDots(), h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, 'Generating summary')))
   );
   const gusItems = getState('case.gusItems') || [];
   if (gusItems.length) {
@@ -361,7 +361,7 @@ function renderStreaming() {
     _container.textContent = '';
     const streamCaseStatus = getState('case.caseRecord')?.status;
     if (streamCaseStatus && !['Closed', 'Closed - Duplicate'].includes(streamCaseStatus)) {
-      _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+      _container.appendChild(h('div', { style: { padding: '10px 14px', marginTop: '8px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
         h('span', { style: { fontSize: '14px' } }, '⚠'),
         h('span', null, 'This case is still open. Root cause and resolution may change — treat generated content as preliminary.')
       ));
@@ -377,7 +377,7 @@ function renderStreaming() {
     if (result?.structured) {
       sidebar.appendChild(renderSidebarQuality(result.structured));
     } else {
-      sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, spinner('sm'), h('span', null, 'Evaluating…')));
+      sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, streamingDots(), h('span', null, 'Evaluating')));
     }
     sidebar.appendChild(renderSidebarArticles(topArticles));
     const knownIssues = getState('case.knownIssues') || [];
@@ -413,7 +413,7 @@ function renderStreaming() {
       if (result?.structured) {
         sidebar.appendChild(renderSidebarQuality(result.structured));
       } else {
-        sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, spinner('sm'), h('span', null, 'Evaluating…')));
+        sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, streamingDots(), h('span', null, 'Evaluating')));
       }
       sidebar.appendChild(renderSidebarArticles(topArticles));
       const ki = getState('case.knownIssues') || [];
@@ -454,7 +454,7 @@ function renderStreaming() {
       const articleTitle = topArticle?.title || '';
       progressCard = h('div', { id: `sug-progress-${articleId}`, class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 14px', background: 'var(--surface-raised)', borderBottom: '1px solid var(--border)' } },
-          spinner('sm'),
+          streamingDots(),
           h('a', { href: articleUrl(articleId), target: '_blank', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' } }, `#${articleNum}`),
           h('span', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, articleTitle)
         ),
@@ -479,8 +479,8 @@ function renderStreaming() {
     if (!draftEl) {
       draftEl = h('div', { id: 'stream-draft', class: 'card', style: { marginBottom: '12px', padding: '16px' } },
         h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' } },
-          spinner('sm'),
-          h('span', null, 'Drafting New Article…')
+          streamingDots(),
+          h('span', null, 'Drafting New Article')
         ),
         h('div', { id: 'stream-draft-content', style: { fontSize: '12px', lineHeight: '1.6', color: 'var(--text-primary)' } })
       );
@@ -500,15 +500,15 @@ function renderStreaming() {
   let loadingEl = mainEl.querySelector('#stream-loading');
   if (hasActiveStreams && !loadingEl) {
     loadingEl = h('div', { id: 'stream-loading', style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '12px', justifyContent: 'center' } },
-      spinner('sm'),
-      h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, 'Generating…')
+      streamingDots(),
+      h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, 'Generating')
     );
     mainEl.appendChild(loadingEl);
   } else if (!hasActiveStreams && !suggestions.length && !streamText) {
     if (!loadingEl) {
       loadingEl = h('div', { id: 'stream-loading', style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '16px', justifyContent: 'center' } },
-        spinner('sm'),
-        h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, 'Generating recommendations…')
+        streamingDots(),
+        h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, 'Generating recommendations')
       );
       mainEl.appendChild(loadingEl);
     }
@@ -521,7 +521,7 @@ function renderStreamingSuggestion(text, container) {
   const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
 
   if (cleaned.length < 20) {
-    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, spinner('sm'), h('span', null, 'Generating…')));
+    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, streamingDots(), h('span', null, 'Generating')));
     return;
   }
 
@@ -555,11 +555,11 @@ function renderStreamingSuggestion(text, container) {
         });
         if (text.split('\n').length > 10) sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, '…'));
       }
-      if (!data.complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', fontSize: '10px', marginTop: '3px' } }, spinner('sm'), h('span', null, 'streaming…')));
+      if (!data.complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', fontSize: '10px', marginTop: '3px' } }, streamingDots(), h('span', null, 'streaming')));
     } else {
       const isWriting = (name === 'Summary' && title?.complete) || (name === 'Description' && summary?.complete) || (name === 'Resolution' && description);
       if (isWriting) {
-        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
+        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, streamingDots(), h('span', null, 'Writing')));
       } else {
         sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Pending…'));
       }
@@ -576,7 +576,7 @@ function renderStreamingDraft(text, container) {
   const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
 
   if (cleaned.length < 20) {
-    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, spinner('sm'), h('span', null, 'Generating…')));
+    container.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '12px' } }, streamingDots(), h('span', null, 'Generating')));
     return;
   }
 
@@ -609,11 +609,11 @@ function renderStreamingDraft(text, container) {
           else if (line.trim()) sec.appendChild(h('p', { style: { margin: '3px 0', fontSize: '12px' } }, line));
         });
       }
-      if (!data.complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', fontSize: '10px', marginTop: '4px' } }, spinner('sm'), h('span', null, 'streaming…')));
+      if (!data.complete) sec.appendChild(h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--primary)', fontSize: '10px', marginTop: '4px' } }, streamingDots(), h('span', null, 'streaming')));
     } else {
       const isWriting = (name === 'Summary' && title?.complete) || (name === 'Description' && summary?.complete) || (name === 'Resolution' && description);
       if (isWriting) {
-        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, spinner('sm'), h('span', null, 'Writing…')));
+        sec.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '10px' } }, streamingDots(), h('span', null, 'Writing')));
       } else {
         sec.appendChild(h('div', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, 'Pending…'));
       }
@@ -648,7 +648,7 @@ function renderResult() {
 
   const caseStatus = getState('case.caseRecord')?.status;
   if (caseStatus && !['Closed', 'Closed - Duplicate'].includes(caseStatus)) {
-    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+    _container.appendChild(h('div', { style: { padding: '10px 14px', marginTop: '8px', marginBottom: '12px', background: 'color-mix(in srgb, var(--warning) 10%, transparent)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
       h('span', { style: { fontSize: '14px' } }, '⚠'),
       h('span', null, 'This case is still open. Root cause and resolution may change — treat generated content as preliminary.')
     ));
@@ -812,8 +812,7 @@ function renderResult() {
         h('span', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' } }, draft.title || 'New Article Draft')
       ),
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
-        (() => { const ds = (getState('case.draftScores') || {})['new-draft']; const scoring = (getState('case.scoringInProgress') || []).includes('new-draft'); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'), 'AF: scoring…'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
-        getState('case.gapEvaluation')?.length ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px' }, onClick: () => showGapEvaluationModal() }, 'Gaps') : null,
+        (() => { const ds = (getState('case.draftScores') || {})['new-draft']; const scoring = (getState('case.scoringInProgress') || []).includes('new-draft'); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, streamingDots(), 'AF: scoring'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
       )
@@ -893,7 +892,8 @@ function renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstra
     : null;
 
   const metaItems = [];
-  if (caseRecord.priority) metaItems.push(['Priority', caseRecord.priority]);
+  if (caseRecord.severity) metaItems.push(['Severity', caseRecord.severity]);
+  if (caseRecord.supportLevel) metaItems.push(['Support', caseRecord.supportLevel]);
   if (caseRecord.status) metaItems.push(['Status', caseRecord.status]);
   if (caseAbstract?.product) metaItems.push(['Product', caseAbstract.product]);
 
@@ -941,41 +941,6 @@ function renderProductDocGapCard(prodDocGap) {
   );
 }
 
-function showGapEvaluationModal() {
-  const gaps = getState('case.gapEvaluation') || [];
-  if (!gaps.length) { toast('No gap evaluation data available.', 'info'); return; }
-
-  const statusIcons = { CONFIRMED_CORRECT: '✓', INCOMPLETE: '◐', MISSING: '✗', OUTDATED: '⟳' };
-  const statusColors = { CONFIRMED_CORRECT: 'var(--success)', INCOMPLETE: 'var(--warning)', MISSING: 'var(--error)', OUTDATED: 'var(--error)' };
-  const gapCount = gaps.filter(g => g.status === 'MISSING' || g.status === 'OUTDATED').length;
-  const coveredCount = gaps.filter(g => g.status === 'CONFIRMED_CORRECT').length;
-
-  const body = h('div', null,
-    h('div', { style: { display: 'flex', gap: '12px', marginBottom: '16px', fontSize: '12px' } },
-      h('span', { style: { color: 'var(--success)', fontWeight: '600' } }, `${coveredCount} covered`),
-      h('span', { style: { color: 'var(--error)', fontWeight: '600' } }, `${gapCount} missing/outdated`),
-      h('span', { style: { color: 'var(--warning)', fontWeight: '600' } }, `${gaps.length - coveredCount - gapCount} incomplete`)
-    )
-  );
-
-  gaps.forEach(gap => {
-    const color = statusColors[gap.status] || 'var(--text-muted)';
-    const icon = statusIcons[gap.status] || '?';
-    body.appendChild(h('div', { style: { display: 'flex', gap: '10px', padding: '10px 0', borderBottom: '1px solid var(--border)', alignItems: 'flex-start' } },
-      h('span', { style: { color, fontWeight: '700', fontSize: '14px', minWidth: '18px' } }, icon),
-      h('div', { style: { flex: '1' } },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' } },
-          h('span', { style: { fontSize: '13px', fontWeight: '600', textTransform: 'capitalize' } }, (gap.dimension || '').replace(/_/g, ' ')),
-          h('span', { class: `pill pill--${gap.status === 'CONFIRMED_CORRECT' ? 'success' : gap.status === 'INCOMPLETE' ? 'warning' : 'error'}`, style: { fontSize: '9px' } }, gap.status)
-        ),
-        gap.finding ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' } }, gap.finding) : null,
-        gap.suggestedEdit ? h('div', { style: { fontSize: '11px', color: 'var(--primary)', marginTop: '4px', padding: '6px 8px', background: 'var(--primary-soft)', borderRadius: 'var(--radius-xs)' } }, gap.suggestedEdit) : null
-      )
-    ));
-  });
-
-  modal('KB Gap Evaluation', body, { wide: true });
-}
 
 async function showComparisonModal(rewrite) {
   toast('Loading original article…', 'info');
@@ -1307,10 +1272,14 @@ function renderSidebarProductDocs(docs) {
       const link = h('a', { href: d.url, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none' } }, d.title || 'Untitled');
       link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
       link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
+      const scoreColor = d._relevanceScore >= 70 ? 'var(--success)' : d._relevanceScore >= 50 ? 'var(--warning)' : 'var(--text-muted)';
       body.appendChild(h('div', { style: { padding: '5px 0', borderBottom: '1px solid var(--border)' } },
         link,
         d.summary ? h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: '1.3' } }, d.summary.slice(0, 120)) : null,
-        h('span', { class: 'pill pill--info', style: { fontSize: '9px', marginTop: '2px' } }, 'Product Doc')
+        h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', marginTop: '3px' } },
+          d._relevanceScore ? h('span', { style: { fontSize: '9px', fontWeight: '600', color: scoreColor } }, `${d._relevanceScore}%`) : null,
+          h('span', { class: 'pill pill--info', style: { fontSize: '9px' } }, 'Product Doc')
+        )
       ));
     });
     section.appendChild(body);
@@ -1402,8 +1371,7 @@ function renderFullRewriteCard(rewrite) {
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, rewrite.title || rewrite.articleTitle)
     ),
     h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
-      (() => { const key = `rewrite-${rewrite.articleId}`; const ds = (getState('case.draftScores') || {})[key]; const scoring = (getState('case.scoringInProgress') || []).includes(key); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'), 'AF: scoring…'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
-      getState('case.gapEvaluation')?.length ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px' }, onClick: () => showGapEvaluationModal() }, 'Gaps') : null,
+      (() => { const key = `rewrite-${rewrite.articleId}`; const ds = (getState('case.draftScores') || {})[key]; const scoring = (getState('case.scoringInProgress') || []).includes(key); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, streamingDots(), 'AF: scoring'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showComparisonModal(rewrite) }, 'Compare'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
@@ -1755,14 +1723,48 @@ async function triggerUpdateForArticle(article) {
 function overrideDecision(newAction) {
   const result = getState('case.result');
   if (!result) return;
+
+  if (newAction === 'CREATE_NEW') {
+    const caseRecord = getState('case.caseRecord');
+    const caseId = caseRecord?.id || result?.caseId;
+    if (!caseId) { toast('No case ID available.', 'error'); return; }
+    triggerNewArticleGeneration(caseId);
+    return;
+  }
+
   const newStructured = {
     ...(result.structured || {}),
     action: newAction,
-    summary: `User override: ${newAction === 'CREATE_NEW' ? 'Creating new article.' : 'Suggesting updates.'}`
+    summary: `User override: Suggesting updates.`
   };
   setState('case.result', { ...result, structured: newStructured });
-  toast(`Switched to ${newAction === 'CREATE_NEW' ? 'Create New' : 'Update Existing'} mode. Re-analyze to generate content.`, 'info');
   renderByView();
+}
+
+function triggerNewArticleGeneration(caseId) {
+  if (_port) { try { _port.disconnect(); } catch {} _port = null; }
+
+  setState('case.view', 'streaming');
+  setState('case.streamText', '');
+  setState('case.progress', { step: 0, label: 'Generating new article…' });
+
+  _port = chrome.runtime.connect({ name: 'kba-analyze' });
+  _port.postMessage({ action: 'GENERATE_NEW_ARTICLE', caseId });
+  _port.onMessage.addListener((msg) => {
+    if (msg.type === 'delta') {
+      setState('case.streamText', (getState('case.streamText') || '') + msg.chunk);
+    } else if (msg.type === 'streaming-start') {
+      setState('case.streamText', '');
+    } else if (msg.type === 'result') {
+      const existingResult = getState('case.result') || {};
+      setState('case.result', { ...existingResult, structured: msg.structured });
+      setState('case.view', 'result');
+    } else if (msg.type === 'error') {
+      toast(msg.error, 'error');
+      setState('case.view', 'result');
+    }
+  });
+  _port.onDisconnect.addListener(() => { _port = null; });
 }
 
 
@@ -1843,15 +1845,20 @@ async function onAnalyzeClick() {
 }
 
 let _analysisGen = 0;
+let _retryCount = 0;
+const MAX_AUTO_RETRIES = 1;
 
-function startAnalysis(caseId) {
+function startAnalysis(caseId, isRetry = false) {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
-  _sidebarOnly = false;
-  _editingSections.clear();
-  _refinedKeys.clear();
+  if (!isRetry) {
+    _retryCount = 0;
+    _sidebarOnly = false;
+    _editingSections.clear();
+    _refinedKeys.clear();
+  }
   const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
-  setState('case.progress', { step: 0, label: 'Connecting…' });
+  setState('case.progress', { step: 0, label: isRetry ? 'Reconnecting…' : 'Connecting…' });
   setState('case.result', null);
   setState('case.streamText', '');
   setState('case.topArticles', null);
@@ -1879,11 +1886,22 @@ function startAnalysis(caseId) {
     const view = getState('case.view');
     if (view === 'analyzing' || view === 'progressive' || view === 'streaming') {
       const suggestions = getState('case.suggestions') || [];
+      const lastStep = getState('case.progress')?.label || 'unknown';
+      const disconnectReason = chrome.runtime.lastError?.message || 'service worker terminated';
+
       if (suggestions.length) {
         setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Connection lost. Showing partial results.', suggestions }, caseNumber: getState('case.progress')?.caseNumber, subject: '' });
         setState('case.view', 'result');
+      } else if (_retryCount < MAX_AUTO_RETRIES) {
+        _retryCount++;
+        console.warn(`[KB-Agent] Port disconnected at "${lastStep}" (${disconnectReason}). Auto-retrying (${_retryCount}/${MAX_AUTO_RETRIES})…`);
+        toast(`Connection dropped at "${lastStep}". Retrying…`, 'info');
+        setTimeout(() => {
+          if (gen === _analysisGen) startAnalysis(caseId, true);
+        }, 1500);
       } else {
-        toast('Connection lost. Try again.', 'error');
+        console.error(`[KB-Agent] Port disconnected at "${lastStep}" after ${_retryCount} retry. Reason: ${disconnectReason}`);
+        toast(`Analysis failed — disconnected at "${lastStep}" (${disconnectReason}). Try again.`, 'error');
         setState('case.view', 'idle');
       }
     }
@@ -1891,6 +1909,7 @@ function startAnalysis(caseId) {
 }
 
 function onPortMessage(msg) {
+  if (msg.type === 'keepalive') return;
   switch (msg.type) {
     case 'progress':
       setState('case.progress', { ...getState('case.progress'), step: msg.step ?? 0, label: msg.label || '', caseNumber: msg.caseNumber || getState('case.progress')?.caseNumber });
@@ -1924,7 +1943,6 @@ function onPortMessage(msg) {
       if (msg.prodDocGap) setState('case.prodDocGap', msg.prodDocGap);
       if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
       if (msg.ptWarning) setState('case.ptWarning', msg.ptWarning);
-      if (msg.gapEvaluation) setState('case.gapEvaluation', msg.gapEvaluation);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
       if (msg.scoringInProgress) {
         setState('case.scoringInProgress', msg.scoringInProgress);

@@ -85,6 +85,14 @@ export function spinner(size = 'md') {
   return h('div', { class: `spinner spinner--${size}` });
 }
 
+export function streamingDots() {
+  return h('span', { class: 'streaming-dots' },
+    h('span', { class: 'streaming-dots__dot' }),
+    h('span', { class: 'streaming-dots__dot' }),
+    h('span', { class: 'streaming-dots__dot' })
+  );
+}
+
 export function emptyState(icon, text) {
   return h('div', { class: 'empty-state' },
     h('div', { class: 'empty-state__icon' }, icon),

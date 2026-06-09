@@ -29,10 +29,13 @@ export const PT_RELATED = {
     'Industry-OmniStudio'
   ],
   'Industry-Life Sciences': [
-    'Industry-Health Cloud'
+    'Industry-Health Cloud',
+    'Industry-OmniStudio'
   ],
   'Industry-Financial Services': [
-    'Industry-OmniStudio'
+    'Industry-OmniStudio',
+    'Industry-Health Cloud',
+    'Industry-Public Sector Solutions'
   ],
   'Industry-Communication Cloud': [
     'Industry-OmniStudio',
@@ -43,7 +46,6 @@ export const PT_RELATED = {
     'Industry-OmniStudio'
   ],
   'Industry-Retail and Consumer Goods': [
-    'Industry-OmniStudio'
   ],
   'Industry-Energy & Utilities Cloud': [
     'Industry-OmniStudio',
@@ -115,15 +117,32 @@ export const PT_RELATED = {
     'Industry-Nonprofit Cloud',
     'Industry-Nonprofit Packages (Other SFDO)'
   ],
-  'Industry-Loyalty Management': [],
-  'Industry-Manufacturing Cloud': [],
-  'Industry-Public Sector Solutions': [],
+  'Industry-Loyalty Management': [
+    'Industry-Manufacturing Cloud'
+  ],
+  'Industry-Manufacturing Cloud': [
+    'Industry-Loyalty Management',
+    'Industry-Business Rules Engine (BRE)',
+    'Revenue Cloud (Core)-Business Rules Engine'
+  ],
+  'Industry-Public Sector Solutions': [
+    'Industry-Financial Services',
+    'Industry-Business Rules Engine (BRE)',
+    'Revenue Cloud (Core)-Business Rules Engine',
+    'Industry-Manufacturing Cloud',
+    'Industry-OmniStudio'
+  ],
   'Industry-Media Cloud': []
 };
 
+const _ptKeyMap = Object.fromEntries(
+  Object.keys(PT_RELATED).map(k => [k.toLowerCase(), k])
+);
+
 export function resolveTargetPts(casePt) {
   if (!casePt) return [];
-  const primary = [casePt];
-  const related = PT_RELATED[casePt] || [];
+  const normalizedKey = _ptKeyMap[casePt.toLowerCase()] || casePt;
+  const primary = [normalizedKey];
+  const related = PT_RELATED[normalizedKey] || [];
   return [...new Set([...primary, ...related])];
 }

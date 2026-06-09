@@ -1,8 +1,9 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, SCORE_CONCURRENCY, articleUrl } from '../../shared/config.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
+import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
 import { GUIDE_GENERATION, GUIDE_SCORING, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
@@ -19,6 +20,11 @@ export async function handleAnalyze(port, msg) {
   const signal = abortController.signal;
   let stopped = false;
 
+  // Keepalive ping every 25s to prevent Chrome from killing the service worker mid-analysis
+  const keepalive = setInterval(() => {
+    try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
+  }, 25_000);
+
   port.onMessage.addListener((m) => {
     if (m.action === 'STOP') {
       stopped = true;
@@ -29,10 +35,11 @@ export async function handleAnalyze(port, msg) {
   port.onDisconnect.addListener(() => {
     stopped = true;
     abortController.abort();
+    clearInterval(keepalive);
   });
 
   const session = await detectSession();
-  if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
+  if (!session.sid) { clearInterval(keepalive); port.postMessage({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
 
   const send = (data) => { try { port.postMessage(data); } catch {} };
   const caseId = sanitizeId(msg.caseId);
@@ -44,9 +51,9 @@ export async function handleAnalyze(port, msg) {
   // Guard rail field discovery first (fast, cached), then case fetch with extra fields
   const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
   const extraFields = getGuardRailExtraFields(guardRailFields);
-  const caseFields = `Id,CaseNumber,Subject,Description,Status,Priority,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
+  const caseFields = `Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
-  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
+  if (!caseRecord || !caseRecord.Id) { clearInterval(keepalive); send({ type: 'error', error: 'Case not found.' }); return; }
 
   // Check bypass setting
   const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
@@ -59,12 +66,13 @@ export async function handleAnalyze(port, msg) {
     caseRecord.__hyperforce = hyperforce;
     const guardCheck = isCaseAnalysisAllowed(caseRecord);
     if (!guardCheck.allowed) {
+      clearInterval(keepalive);
       send({ type: 'error', error: guardCheck.reason });
       return;
     }
   }
 
-  send({ type: 'meta', caseRecord: { id: caseRecord.Id, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, status: caseRecord.Status, priority: caseRecord.Priority, createdDate: caseRecord.CreatedDate, description: (caseRecord.Description || '').slice(0, 500) } });
+  send({ type: 'meta', caseRecord: { id: caseRecord.Id, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, status: caseRecord.Status, severity: caseRecord.Severity_Level__c, supportLevel: caseRecord.SupportLevel__c, createdDate: caseRecord.CreatedDate, description: (caseRecord.Description || '').slice(0, 500) } });
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
   const comments = await sfQuery(session.apiBase, session.sid,
@@ -106,9 +114,10 @@ export async function handleAnalyze(port, msg) {
 
   const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject).catch(() => ({ items: [], error: null }));
 
+  const caseContextForDocs = `Subject: ${caseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}`;
   const [soslResults, productDocs, kiData] = await Promise.all([
     soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns),
-    searchProductDocs(session.apiBase, session.sid, allQueries),
+    searchProductDocs(session.apiBase, session.sid, allQueries, casePt, caseContextForDocs),
     kiPromise
   ]);
 
@@ -159,7 +168,7 @@ Be STRICT. Do not inflate scores. An article about the same PRODUCT but a DIFFER
 
 Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason", "notRelevant": false}, ...]}
 Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
-    messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nPriority: ${caseRecord.Priority || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
+    messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
     maxTokens: 1200,
     temperature: 0
   };
@@ -206,7 +215,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     url: articleUrl(a.Id)
   }));
 
-  send({ type: 'meta', topArticles: scoredArticles, productDocs: productDocs || [] });
+  send({ type: 'meta', topArticles: scoredArticles, productDocs: (productDocs || []).slice(0, 20) });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
@@ -220,9 +229,6 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
-  if (decision.gaps?.length) {
-    send({ type: 'meta', gapEvaluation: decision.gaps });
-  }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
@@ -268,9 +274,50 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   await caseSummaryPromise;
   const prodDocGap = await prodDocGapPromise;
 
+  clearInterval(keepalive);
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 
   if (!stopped) autoScoreGeneratedArticles(structured, send, signal);
+}
+
+export async function handleGenerateNew(port, msg) {
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+
+  port.onMessage.addListener((m) => { if (m.action === 'STOP') abortController.abort(); });
+  port.onDisconnect.addListener(() => abortController.abort());
+
+  const session = await detectSession();
+  if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session.' }); return; }
+
+  const send = (data) => { try { port.postMessage(data); } catch {} };
+  const caseId = sanitizeId(msg.caseId);
+
+  send({ type: 'progress', label: 'Generating new article…' });
+
+  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid);
+  const comments = await sfQuery(session.apiBase, session.sid,
+    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
+  );
+
+  const [intentsResult, caseAbstract] = await Promise.all([
+    extractIntents(caseRecord, comments, signal),
+    extractAbstract(caseRecord, comments, signal)
+  ]);
+
+  send({ type: 'streaming-start' });
+  const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, new Map(), send, signal);
+
+  const structured = {
+    action: 'CREATE_NEW',
+    confidence: 'HIGH',
+    summary: 'New article generated from case.',
+    newArticleDraft: draft
+  };
+
+  send({ type: 'result', success: true, draft, structured });
+
+  autoScoreGeneratedArticles(structured, send, signal);
 }
 
 
@@ -314,7 +361,7 @@ async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
   try {
     const fullText = await streamClaude({
       system: `Summarize this support case as a bulleted list (use - for bullets). Each bullet should start with a bold label like **Issue:** or **Product:** followed by the detail. Cover: the issue, the affected product/feature, current status/impact, and any related engineering work. Be concise and specific.`,
-      messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nPriority: ${caseRecord.Priority || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
+      messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nStatus: ${caseRecord.Status}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1000)}\nComments:\n${commentText}${gusContext ? '\n\nRelated GUS Work Items:\n' + gusContext : ''}${gusFeedText ? '\nGUS Feed:\n' + gusFeedText : ''}` }],
       maxTokens: 400,
       temperature: 0,
       signal,
@@ -406,7 +453,7 @@ async function fetchCandidateBodies(apiBase, sid, candidates) {
 
 async function assessProductDocGap(caseRecord, caseAbstract, productDocs, signal) {
   if (!productDocs.length) return null;
-  const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}" — ${(d.summary || '').slice(0, 100)}`).join('\n');
+  const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}"${d._relevanceScore ? ` (relevance: ${d._relevanceScore})` : ''} — ${(d.summary || '').slice(0, 300)}`).join('\n');
   try {
     const resp = await callClaudeFast({
       system: `You assess whether existing product documentation adequately covers a support case scenario.
@@ -424,7 +471,7 @@ Also determine documentation OWNERSHIP — who should create/update the document
 
 Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs], "owner": "SUPPORT_KB"|"PRODUCT_DOCUMENTATION"|"BOTH", "ownerReason": "1 sentence why"}`,
       messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
-      maxTokens: 200,
+      maxTokens: 350,
       temperature: 0,
       signal
     });
@@ -432,7 +479,71 @@ Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendati
   } catch { return null; }
 }
 
-async function searchProductDocs(apiBase, sid, queries) {
+const PROD_DOCS_CACHE_TTL = 24 * 60 * 60 * 1000;
+const PROD_DOCS_CACHE_PREFIX = 'prodDocs_';
+
+const _docConfigKeyMap = Object.fromEntries(
+  Object.keys(PRODUCT_DOCS_CONFIG).map(k => [k.toLowerCase(), k])
+);
+
+function getProductDocsConfig(casePt) {
+  const allPts = resolveTargetPts(casePt);
+  const urlPatterns = new Set();
+
+  for (const pt of allPts) {
+    const configKey = _docConfigKeyMap[pt.toLowerCase()] || pt;
+    const config = PRODUCT_DOCS_CONFIG[configKey];
+    if (config) {
+      config.urlPatterns.forEach(p => urlPatterns.add(p));
+    }
+  }
+  return { urlPatterns: [...urlPatterns] };
+}
+
+async function getCachedProductDocs(cacheKey) {
+  try {
+    const data = await chrome.storage.local.get([cacheKey, cacheKey + '_at']);
+    if (data[cacheKey] && data[cacheKey + '_at']) {
+      if (Date.now() - data[cacheKey + '_at'] < PROD_DOCS_CACHE_TTL) {
+        return data[cacheKey];
+      }
+    }
+  } catch {}
+  return null;
+}
+
+async function setCachedProductDocs(cacheKey, articles) {
+  try {
+    await chrome.storage.local.set({ [cacheKey]: articles, [cacheKey + '_at']: Date.now() });
+  } catch {}
+}
+
+async function searchProductDocs(apiBase, sid, queries, casePt, caseContext) {
+  const { urlPatterns } = getProductDocsConfig(casePt);
+
+  // Phase 1+2: SOSL keyword search + SOQL pattern search in parallel
+  const [soslDocs, patternDocs] = await Promise.all([
+    searchProductDocsSosl(apiBase, sid, queries),
+    urlPatterns.length ? searchProductDocsByPattern(apiBase, sid, urlPatterns) : Promise.resolve([])
+  ]);
+
+  // Phase 3: Merge and deduplicate
+  const seen = new Set();
+  const merged = [];
+  for (const d of [...soslDocs, ...patternDocs]) {
+    if (seen.has(d.id)) continue;
+    seen.add(d.id);
+    merged.push(d);
+  }
+
+  if (!merged.length) return [];
+
+  // Phase 4: AI relevance scoring against case context
+  const scored = await scoreProductDocsRelevance(merged, caseContext);
+  return scored;
+}
+
+async function searchProductDocsSosl(apiBase, sid, queries) {
   const uniqueQueries = [...new Set(
     queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2)
   )].slice(0, 3);
@@ -440,26 +551,102 @@ async function searchProductDocs(apiBase, sid, queries) {
   const results = [];
 
   await mapWithConcurrency(uniqueQueries, 3, async (q) => {
-    if (results.length >= 5) return;
     try {
       const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,UrlName,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 3`
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,Help_Portal_URL__c,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 5`
       );
       for (const r of records) {
         if (!seen.has(r.Id)) {
           seen.add(r.Id);
           results.push({
-            id: r.Id,
-            title: r.Title,
-            summary: r.Summary || '',
-            articleNumber: r.ArticleNumber,
-            url: articleUrl(r.Id)
+            id: r.Id, title: r.Title, summary: r.Summary || '',
+            articleNumber: r.ArticleNumber, url: articleUrl(r.Id),
+            helpUrl: r.Help_Portal_URL__c || '', source: 'sosl'
           });
         }
       }
     } catch {}
   });
-  return results.slice(0, 5);
+  return results;
+}
+
+async function searchProductDocsByPattern(apiBase, sid, urlPatterns) {
+  const patternKey = urlPatterns.sort().join('|');
+  const cacheKey = PROD_DOCS_CACHE_PREFIX + patternKey.slice(0, 80);
+  const cached = await getCachedProductDocs(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const results = await mapWithConcurrency(urlPatterns, 3, async (pattern) => {
+      const soql = `SELECT Id, Title, Help_Portal_URL__c, ArticleNumber, Summary `
+        + `FROM Knowledge__kav `
+        + `WHERE RecordType.DeveloperName = 'Product_Documentation' `
+        + `AND PublishStatus = 'Online' AND IsLatestVersion = true AND Language = 'en_US' `
+        + `AND Help_Portal_URL__c LIKE '%id=${pattern}%' `
+        + `LIMIT 2000`;
+      const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+      const result = await sfGet(url, sid);
+      return result.records || [];
+    });
+
+    const seen = new Set();
+    const articles = [];
+    for (const batch of results) {
+      if (batch?.__error) continue;
+      for (const r of (batch || [])) {
+        if (seen.has(r.Id)) continue;
+        seen.add(r.Id);
+        articles.push({
+          id: r.Id, title: r.Title, articleNumber: r.ArticleNumber,
+          summary: r.Summary || '', url: articleUrl(r.Id),
+          helpUrl: r.Help_Portal_URL__c || '', source: 'pattern'
+        });
+      }
+    }
+    await setCachedProductDocs(cacheKey, articles);
+    return articles;
+  } catch {
+    return [];
+  }
+}
+
+async function scoreProductDocsRelevance(articles, caseContext) {
+  if (!caseContext || !articles.length) return articles.slice(0, 15);
+
+  const candidates = articles.slice(0, 50);
+  const docsList = candidates
+    .map((a, i) => `[${i}] "${a.title}"${a.summary ? ' — ' + a.summary.slice(0, 100) : ''}`)
+    .join('\n');
+
+  try {
+    const resp = await callClaudeFast({
+      system: `You are a product documentation relevance assessor for Salesforce support cases.
+
+Given a support case and a list of product documentation article titles, identify which articles would help an engineer understand the product behavior, feature setup, or limitations described in the case.
+
+Score each article 0-100:
+- 80-100: Article directly documents the exact feature, component, or behavior in the case
+- 60-79: Article covers a closely related feature, setup step, or prerequisite
+- 40-59: Article is in the same product area and provides useful background context
+- 0-39: Not relevant to this case
+
+Return ONLY JSON: {"scored": [{"i": 0, "s": 85}, {"i": 3, "s": 72}, ...]}
+Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
+      messages: [{ role: 'user', content: `CASE:\n${caseContext.slice(0, 1200)}\n\nPRODUCT DOCUMENTATION ARTICLES:\n${docsList}` }],
+      maxTokens: 800,
+      temperature: 0
+    });
+    const parsed = extractJson(extractText(resp));
+    if (parsed?.scored?.length) {
+      return parsed.scored
+        .filter(s => s.i >= 0 && s.i < candidates.length && s.s >= 40)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 15)
+        .map(s => ({ ...candidates[s.i], _relevanceScore: s.s }));
+    }
+  } catch {}
+
+  return candidates.slice(0, 15);
 }
 
 
