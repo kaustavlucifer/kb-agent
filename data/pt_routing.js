@@ -14,11 +14,6 @@ export const PT_RELATED = {
     'Industry-OmniStudio',
     'Revenue Cloud (Core)-OmniStudio'
   ],
-  'Revenue-Document Generation': [
-    'Industry-Document Generation',
-    'Industry-OmniStudio',
-    'Revenue Cloud (Core)-OmniStudio'
-  ],
   'Industry-Health Cloud': [
     'Industry-Health & Insurance',
     'Industry-Life Sciences',
@@ -132,6 +127,8 @@ export const PT_RELATED = {
     'Revenue-Salesforce Billing'
   ],
   'Revenue-Document Generation': [
+    'Industry-Document Generation',
+    'Industry-OmniStudio',
     'Revenue-Salesforce CPQ',
     'Revenue Cloud (Core)-OmniStudio',
     'Revenue Cloud (Core)-Contract Lifecycle Management with DocGen'

@@ -1,5 +1,5 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
-import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
+import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl } from '../../shared/config.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
@@ -59,6 +59,15 @@ export async function handleAnalyze(port, msg) {
   // Check bypass setting
   const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
   const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
+
+  // Fail closed: if the Case describe call failed we cannot evaluate the guard rail,
+  // so block analysis rather than silently sending a potentially-restricted case to the
+  // AI gateway. An explicit bypass setting still overrides this.
+  if (!bypassEnabled && guardRailFields.describeFailed) {
+    clearInterval(keepalive);
+    send({ type: 'error', error: 'Could not verify case guard-rail fields (Case describe failed). Analysis blocked for safety. Retry, or enable bypass in options if you have authorization.' });
+    return;
+  }
 
   if (!bypassEnabled && guardRailFields.bothPresent) {
     const supportLevel = guardRailFields.supportLevelName ? (caseRecord[guardRailFields.supportLevelName] || '') : '';
@@ -298,6 +307,7 @@ export async function handleGenerateNew(port, msg) {
   send({ type: 'progress', label: 'Generating new article…' });
 
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid);
+  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
   const comments = await sfQuery(session.apiBase, session.sid,
     `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
   );

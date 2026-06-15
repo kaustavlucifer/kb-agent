@@ -115,7 +115,7 @@ function render() {
     return;
   }
 
-  const displayPairs = _filterPt.length ? pairs.filter(p => _filterPt.includes(p.ptName) || _filterPt.some(pt => p.titleA?.includes(pt) || p.titleB?.includes(pt))) : pairs;
+  const displayPairs = _filterPt.length ? pairs.filter(p => _filterPt.includes(p.ptName)) : pairs;
   if (displayPairs.length) {
     const table = h('table', { class: 'data-table data-table--animated' },
       h('thead', null, h('tr', null,

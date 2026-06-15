@@ -152,10 +152,19 @@ export async function scoreArticle(article) {
   return parseScoreResponse(text, maxes);
 }
 
+const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
+
 export async function fetchArticleBodies(articleIds, session) {
   const bodyMap = new Map();
+  // Filter to valid SF IDs first. soqlIdList -> sanitizeId throws on a single bad ID,
+  // and because each query covers a whole batch that would silently drop ~50 articles'
+  // bodies (they'd then score as empty). Drop only the offending IDs instead.
+  const validIds = articleIds.filter(id => SF_ID_RE.test(id));
+  if (validIds.length !== articleIds.length) {
+    console.warn(`[KB-Agent] fetchArticleBodies: skipped ${articleIds.length - validIds.length} invalid article ID(s).`);
+  }
   const batches = [];
-  for (let i = 0; i < articleIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(articleIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
+  for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
   for (const batch of batches) {
     try {
       const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
@@ -164,7 +173,11 @@ export async function fetchArticleBodies(articleIds, session) {
       for (const r of (result.records || [])) {
         bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
       }
-    } catch {}
+    } catch (e) {
+      // Best-effort: a failed batch leaves those articles without bodies (scored as empty).
+      // Surface the cause (e.g. session expiry) instead of hiding it.
+      console.warn(`[KB-Agent] fetchArticleBodies: batch of ${batch.length} failed: ${e.message}`);
+    }
   }
   return bodyMap;
 }

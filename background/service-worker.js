@@ -1,7 +1,7 @@
 import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfGet, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
+import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION } from '../shared/config.js';
 import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';

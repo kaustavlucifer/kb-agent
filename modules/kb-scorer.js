@@ -543,8 +543,10 @@ async function scoreAll() {
 
   const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
   const scores = { ...existingScores };
-  let done = 0;
   const inFlight = new Set();
+  // Derive progress from `scores` rather than a counter so retries can't double-count
+  // or push `done` past `total` (see scoring retry pass below).
+  const countDone = () => toScore.filter(a => scores[a.id]?.overall != null).length;
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
     inFlight.add(article.id);
@@ -557,18 +559,17 @@ async function scoreAll() {
     } catch (e) {
       scores[article.id] = { overall: null, criteria: [], error: e.message };
     }
-    done++;
     inFlight.delete(article.id);
     setState('kb.scoringIds', [...inFlight]);
     setState('kb.scores', { ...scores });
-    setState('kb.scoring', { done, total: toScore.length });
+    setState('kb.scoring', { done: countDone(), total: toScore.length });
   });
 
   // Retry failed articles once
   const failed = toScore.filter(a => scores[a.id]?.overall == null);
   if (failed.length) {
     await new Promise(r => setTimeout(r, 2000));
-    setState('kb.scoring', { done, total: toScore.length, retrying: failed.length });
+    setState('kb.scoring', { done: countDone(), total: toScore.length, retrying: failed.length });
     await mapWithConcurrency(failed, 2, async (article) => {
       inFlight.add(article.id);
       setState('kb.scoringIds', [...inFlight]);
@@ -577,12 +578,11 @@ async function scoreAll() {
       try {
         const result = await scoreArticle(enriched);
         scores[article.id] = result;
-        if (result?.overall != null) done++;
       } catch {}
       inFlight.delete(article.id);
       setState('kb.scoringIds', [...inFlight]);
       setState('kb.scores', { ...scores });
-      setState('kb.scoring', { done, total: toScore.length, retrying: failed.length });
+      setState('kb.scoring', { done: countDone(), total: toScore.length, retrying: failed.length });
     });
   }
 

@@ -1,6 +1,5 @@
 import { detectGusSession, pingGusSession } from '../../shared/auth.js';
-import { sfGet, sfQuery, soqlIdList, escapeSoql } from '../../shared/api.js';
-import { SF_API_VERSION } from '../../shared/config.js';
+import { sfQuery, soqlIdList, escapeSoql } from '../../shared/api.js';
 
 const GUS_WORK_ITEM_RE = /\bW-\d{4,8}\b/g;
 const WORK_OBJECT = 'ADM_Work__c';

@@ -1556,7 +1556,14 @@ function refineRewrite(rewrite) {
         rewrite.title = newTitle || rewrite.title;
         rewrite.summary = newSummary || rewrite.summary;
         if (newSections.length) rewrite.sections = newSections;
+        // Invalidate the stale Agentforce-readiness score for this draft — the content
+        // just changed, so the old score no longer applies.
         const refKey = rewrite.articleId ? `rewrite-${rewrite.articleId}` : 'new-draft';
+        const draftScores = { ...(getState('case.draftScores') || {}) };
+        if (refKey in draftScores) {
+          delete draftScores[refKey];
+          setState('case.draftScores', draftScores);
+        }
         renderByView();
         toast('Article refined.', 'success');
       } else {

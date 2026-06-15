@@ -63,7 +63,10 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
-  if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+  // Capture the handler so we can remove it in finally — a reused external signal would
+  // otherwise accumulate one listener (bound to a dead controller) per call.
+  const onAbort = () => controller.abort();
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
   try {
     const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
       method: 'POST',
@@ -79,6 +82,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
     return resp.json();
   } finally {
     clearTimeout(timeout);
+    if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -104,17 +108,33 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   if (temperature != null) body.temperature = temperature;
 
   const controller = new AbortController();
-  if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+  // Track whether *we* aborted due to stream stall vs. the caller aborting, so a stalled
+  // stream can surface a distinct error rather than masquerading as a user cancel.
+  let idleAborted = false;
+  const onAbort = () => controller.abort();
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
   const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
     method: 'POST',
     headers: buildHeaders(t),
     body: JSON.stringify(body),
     signal: controller.signal
+  }).catch(err => {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    if (onError) onError(err);
+    throw err;
   });
   if (!resp.ok) {
+    if (signal) signal.removeEventListener('abort', onAbort);
     const text = await resp.text().catch(() => '');
     const err = new Error(`Gateway ${resp.status}: ${text.slice(0, 200)}`);
     err.status = resp.status;
+    if (onError) onError(err);
+    throw err;
+  }
+  if (!resp.body) {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    const err = new Error('Gateway returned no response body for streaming request');
     if (onError) onError(err);
     throw err;
   }
@@ -123,14 +143,14 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
-  let idleTimer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
+  let idleTimer = setTimeout(() => { idleAborted = true; controller.abort(); }, STREAM_IDLE_TIMEOUT_MS);
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
+      idleTimer = setTimeout(() => { idleAborted = true; controller.abort(); }, STREAM_IDLE_TIMEOUT_MS);
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -149,8 +169,20 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
         } catch {}
       }
     }
+  } catch (err) {
+    // If the read failed because the idle watchdog fired (not a caller abort), keep the
+    // text streamed so far rather than discarding it, and report a clear stall error.
+    if (idleAborted) {
+      const stallErr = new Error('Stream stalled (no data received within idle timeout)');
+      stallErr.partialText = fullText;
+      if (onError) onError(stallErr);
+      throw stallErr;
+    }
+    if (onError) onError(err);
+    throw err;
   } finally {
     clearTimeout(idleTimer);
+    if (signal) signal.removeEventListener('abort', onAbort);
   }
 
   if (onDone) onDone(fullText);

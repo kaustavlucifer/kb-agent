@@ -1,5 +1,5 @@
 import { detectSession } from '../../shared/auth.js';
-import { sfGet, sfPost, sanitizeId } from '../../shared/api.js';
+import { sfGet, sfPost, sanitizeId, escapeSoql } from '../../shared/api.js';
 import { SF_API_VERSION, articleUrl } from '../../shared/config.js';
 
 const KNOWLEDGE_ARTICLE_RT_ID = '012Hx00000002oEIAQ';
@@ -94,7 +94,7 @@ async function resolveProductAndTopic(apiBase, sid, { taxonomyName, taxonomyId }
     return { ok: true, fieldName: info.fieldName, idToWrite: taxonomyId };
   }
 
-  const safeName = String(taxonomyName).replace(/'/g, "\\'");
+  const safeName = escapeSoql(taxonomyName);
   try {
     const q = `SELECT Id FROM ${info.refObject} WHERE Name = '${safeName}' LIMIT 1`;
     const data = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`, sid);

@@ -1,7 +1,6 @@
 import { detectKiSession } from '../../shared/auth.js';
-import { sfSearch, sfQuery, escapeSosl, mapWithConcurrency } from '../../shared/api.js';
+import { sfSearch, sfQuery, escapeSoql, escapeSosl, mapWithConcurrency } from '../../shared/api.js';
 import { callClaudeFast, extractText, extractJson } from '../../shared/gateway.js';
-import { SF_API_VERSION } from '../../shared/config.js';
 import { KI_CLOUD_MAPPING } from '../../data/ki_mapping.js';
 
 const KI_FIELDS = 'Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Category__r.Name, Workaround__c, Work_ID__c, Reporting_User_Count__c';
@@ -21,7 +20,7 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
   let candidates = [];
 
   if (cloudValues.length) {
-    const cloudFilter = cloudValues.map(c => `Cloud__c = '${c.replace(/'/g, "\\'")}'`).join(' OR ');
+    const cloudFilter = cloudValues.map(c => `Cloud__c = '${escapeSoql(c)}'`).join(' OR ');
     const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
 
     await mapWithConcurrency(searchTerms.slice(0, 3), 3, async (term) => {
