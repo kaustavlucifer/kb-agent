@@ -1,29 +1,27 @@
-import { h, spinner, toast, modal, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, toast, stickyScrollLayout, createSorter, statsBar, streamingModal } from '../shared/ui.js';
 import { getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS } from '../shared/config.js';
+import { PT_HIGH_VOLUME_CONVS, PT_MID_VOLUME_CONVS, CLUSTER_HIGH_VOLUME_CONVS, CLUSTER_MID_VOLUME_CONVS, CLOUDS } from '../shared/config.js';
 
 let _container = null;
 let _unsubs = [];
 let _data = null;
 let _selectedPt = null;
 let _cloudFilter = '';
-let _sortCol = 'totalConvs';
-let _sortDir = 'desc';
+const _sorter = createSorter('totalConvs', 'desc');
 let _popstateHandler = null;
 let _coverageCache = {};
 
 
 function pushHistoryState() {
-  const state = { selectedPt: _selectedPt, sortCol: _sortCol, sortDir: _sortDir };
+  const state = { selectedPt: _selectedPt, sortCol: _sorter.col, sortDir: _sorter.dir };
   history.pushState(state, '', '');
 }
 
 function onPopState(e) {
   if (e.state && ('selectedPt' in e.state)) {
     _selectedPt = e.state.selectedPt;
-    _sortCol = e.state.sortCol || 'totalConvs';
-    _sortDir = e.state.sortDir || 'desc';
+    _sorter.set(e.state.sortCol || 'totalConvs', e.state.sortDir || 'desc');
     renderView();
     const select = document.getElementById('pt-select');
     if (select) select.value = _selectedPt || '';
@@ -78,10 +76,7 @@ function renderView() {
   _container.textContent = '';
   const articles = getState('kb.articles') || [];
 
-  const stickySection = h('div', { class: 'main__sticky' });
-  const scrollSection = h('div', { class: 'main__scroll' });
-  _container.appendChild(stickySection);
-  _container.appendChild(scrollSection);
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
   if (!_data) {
     scrollSection.appendChild(h('div', { style: { textAlign: 'center', padding: '32px' } }, spinner('md')));
@@ -95,11 +90,10 @@ function renderView() {
 
   const cloudSelect = h('select', { class: 'input', id: 'cloud-select', style: { maxWidth: '140px' } },
     h('option', { value: '', selected: !_cloudFilter }, 'All Clouds'),
-    h('option', { value: 'Industry', selected: _cloudFilter === 'Industry' }, 'Industry'),
-    h('option', { value: 'Revenue', selected: _cloudFilter === 'Revenue' }, 'Revenue')
+    ...CLOUDS.map(c => h('option', { value: c, selected: _cloudFilter === c }, c))
   );
 
-  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '0', flexWrap: 'wrap' } },
+  const toolbar = h('div', { class: 'tab-toolbar' },
     cloudSelect,
     h('select', { class: 'input', id: 'pt-select', style: { maxWidth: '300px' } },
       h('option', { value: '' }, `All P&Ts (${ptNames.length})`),
@@ -129,14 +123,13 @@ function renderView() {
 }
 
 function toggleSort(col) {
-  if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
-  else { _sortCol = col; _sortDir = 'asc'; }
+  _sorter.toggle(col);
   pushHistoryState();
   renderView();
 }
 
 function sortIndicator(col) {
-  return _sortCol === col ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  return _sorter.indicator(col);
 }
 
 function renderOverview(ptNames, articles, target) {
@@ -155,38 +148,22 @@ function renderOverview(ptNames, articles, target) {
     return { pt, totalConvs, resPct, clusterCount: clusters.length, gapCount, articleCount: validatedOnlineCount };
   });
 
+  const sortCol = _sorter.col;
   rows.sort((a, b) => {
     let va, vb;
-    if (_sortCol === 'pt') { va = a.pt.toLowerCase(); vb = b.pt.toLowerCase(); }
-    else { va = a[_sortCol] ?? 0; vb = b[_sortCol] ?? 0; }
-    if (va < vb) return _sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return _sortDir === 'asc' ? 1 : -1;
-    return 0;
+    if (sortCol === 'pt') { va = a.pt.toLowerCase(); vb = b.pt.toLowerCase(); }
+    else { va = a[sortCol] ?? 0; vb = b[sortCol] ?? 0; }
+    return _sorter.compare(va, vb);
   });
 
-  const summaryCard = h('div', { class: 'card', style: { marginBottom: '12px', padding: '12px' } },
-    h('div', { style: { display: 'flex', gap: '24px', fontSize: '12px' } },
-      h('div', null,
-        h('div', { style: { fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)' } }, String(ptNames.length)),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Product & Topics')
-      ),
-      h('div', null,
-        h('div', { style: { fontSize: '20px', fontWeight: '700', color: 'var(--text-primary)' } }, String(rows.reduce((s, r) => s + r.clusterCount, 0))),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Clusters')
-      ),
-      h('div', null,
-        h('div', { style: { fontSize: '20px', fontWeight: '700', color: 'var(--error)' } }, String(rows.reduce((s, r) => s + r.gapCount, 0))),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Coverage Gaps')
-      ),
-      h('div', null,
-        h('div', { style: { fontSize: '20px', fontWeight: '700', color: 'var(--success)' } }, String(rows.reduce((s, r) => s + r.totalConvs, 0).toLocaleString())),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Total Conversations')
-      )
-    )
-  );
-  target.appendChild(summaryCard);
+  target.appendChild(statsBar([
+    { value: ptNames.length, label: 'Product & Topics' },
+    { value: rows.reduce((s, r) => s + r.clusterCount, 0), label: 'Clusters' },
+    { value: rows.reduce((s, r) => s + r.gapCount, 0), label: 'Coverage Gaps', color: 'var(--error)' },
+    { value: rows.reduce((s, r) => s + r.totalConvs, 0).toLocaleString(), label: 'Total Conversations', color: 'var(--success)' }
+  ]));
 
-  const table = h('table', { class: 'data-table' },
+  const table = h('table', { class: 'data-table data-table--animated' },
     h('thead', null, h('tr', null,
       h('th', { style: { cursor: 'pointer' }, onClick: () => toggleSort('pt') }, 'Product & Topic' + sortIndicator('pt')),
       h('th', { style: { width: '90px', cursor: 'pointer' }, onClick: () => toggleSort('totalConvs') }, 'Convs' + sortIndicator('totalConvs')),
@@ -254,7 +231,7 @@ function renderPtDetail(ptName, articles, target) {
   );
   target.appendChild(headerCard);
 
-  const table = h('table', { class: 'data-table' },
+  const table = h('table', { class: 'data-table data-table--animated' },
     h('thead', null, h('tr', null,
       h('th', null, 'Cluster'),
       h('th', { style: { width: '70px' } }, 'Convs'),
@@ -280,7 +257,7 @@ function renderPtDetail(ptName, articles, target) {
         h('div', { style: { fontSize: '12px', fontWeight: '500' } }, c.label || c.name),
         (c.top_utterances || []).length ? h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' } }, (c.top_utterances || []).slice(0, 1).join('; ').slice(0, 80)) : null
       ),
-      h('td', null, h('span', { class: `pill pill--${(c.conversations || 0) >= 200 ? 'error' : (c.conversations || 0) >= 50 ? 'warning' : 'neutral'}` }, String(c.conversations || 0))),
+      h('td', null, h('span', { class: `pill pill--${(c.conversations || 0) >= CLUSTER_HIGH_VOLUME_CONVS ? 'error' : (c.conversations || 0) >= CLUSTER_MID_VOLUME_CONVS ? 'warning' : 'neutral'}` }, String(c.conversations || 0))),
       h('td', { style: { fontSize: '12px' } }, `${Math.round((c.resolution_pct || 0) * 100)}%`),
       h('td', { style: { fontSize: '12px' } }, String(c.escalations || 0)),
       h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } },
@@ -295,16 +272,8 @@ function renderPtDetail(ptName, articles, target) {
 }
 
 function showCoverageResult(ptName, narrative) {
-  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.7', maxHeight: '500px', overflowY: 'auto', padding: '4px' } });
-  streamEl.appendChild(renderMarkdown(narrative));
-
-  const content = h('div', null, streamEl);
-  modal(`Coverage: ${ptName}`, content, {
-    wide: true,
-    primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(narrative).then(() => toast('Copied.', 'success'));
-    }}
-  });
+  const m = streamingModal(`Coverage: ${ptName}`);
+  m.renderFull(narrative);
 }
 
 async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = false) {
@@ -313,23 +282,15 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
     return;
   }
 
-  const streamEl = h('div', { id: 'coverage-stream', style: { fontSize: '12px', lineHeight: '1.7', maxHeight: '500px', overflowY: 'auto', padding: '4px' } });
-  streamEl.appendChild(spinner('md'));
-
-  const statsHeader = h('div', { style: { marginBottom: '12px', padding: '8px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '11px', color: 'var(--text-secondary)' } },
+  const statsHeader = h('div', { class: 'stream-stats' },
     `${clusters.length} clusters · ${clusters.reduce((s, c) => s + (c.conversations || 0), 0).toLocaleString()} conversations · ${ptArticles.length} KB articles`
   );
 
-  const content = h('div', null, statsHeader, streamEl);
-
   let coveragePort = null;
-
-  modal(`Coverage: ${ptName}`, content, {
-    wide: true,
-    onClose: () => { if (coveragePort) { try { coveragePort.disconnect(); } catch {} coveragePort = null; } },
-    primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(document.getElementById('coverage-stream')?.getAttribute('data-raw') || '').then(() => toast('Copied.', 'success'));
-    }}
+  let done = false;
+  const m = streamingModal(`Coverage: ${ptName}`, {
+    header: statsHeader,
+    onClose: () => { if (coveragePort) { try { coveragePort.disconnect(); } catch {} coveragePort = null; } }
   });
 
   try {
@@ -338,18 +299,13 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
     let fullText = '';
 
     coveragePort.onMessage.addListener((msg) => {
-      const el = document.getElementById('coverage-stream');
-      if (!el) return;
       if (msg.type === 'delta') {
         fullText += msg.chunk;
-        el.textContent = '';
-        el.appendChild(renderMarkdown(fullText));
-        el.scrollTop = el.scrollHeight;
+        m.renderFull(fullText, { scroll: true });
       } else if (msg.type === 'done') {
         fullText = msg.narrative || fullText;
-        el.textContent = '';
-        el.setAttribute('data-raw', fullText);
-        el.appendChild(renderMarkdown(fullText));
+        m.renderFull(fullText);
+        done = true;
         _coverageCache[ptName] = fullText;
         localGet(['coverageCache']).then(d => {
           const cache = d.coverageCache || {};
@@ -359,20 +315,17 @@ async function handleAiSummary(ptName, clusters, ptArticles, forceRefresh = fals
         coveragePort.disconnect();
         coveragePort = null;
       } else if (msg.type === 'error') {
-        el.textContent = 'Error: ' + (msg.error || 'Unknown');
+        m.setError('Error: ' + (msg.error || 'Unknown'));
+        done = true;
         coveragePort.disconnect();
         coveragePort = null;
       }
     });
     coveragePort.onDisconnect.addListener(() => {
       coveragePort = null;
-      const el = document.getElementById('coverage-stream');
-      if (el && !el.getAttribute('data-raw')) {
-        el.textContent = 'Connection lost — try again.';
-      }
+      if (!done) m.setError('Connection lost — try again.');
     });
   } catch (e) {
-    const el = document.getElementById('coverage-stream');
-    if (el) el.textContent = 'Error: ' + e.message;
+    m.setError('Error: ' + e.message);
   }
 }

@@ -1,10 +1,10 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { sfGet, sfQueryAll, mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS, articleUrl } from '../shared/config.js';
+import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
 
 let _container = null;
@@ -15,8 +15,7 @@ let _filterPt = [];
 let _filterScore = [];
 let _filterValidation = ['Validated External'];
 let _filterPublish = ['Online'];
-let _sortCol = 'articleNumber';
-let _sortDir = 'asc';
+const _sorter = createSorter('articleNumber', 'asc');
 let _page = 0;
 const _pageSize = 50;
 let _agfHits = null;
@@ -34,13 +33,13 @@ const SCORE_META_FIELDS = [
 
 
 function toggleKbSort(col) {
-  if (_sortCol === col) _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
-  else { _sortCol = col; _sortDir = 'asc'; }
+  _sorter.toggle(col);
   render();
 }
 
 export function mount(container) {
   _container = container;
+  _wasScoring = !!getState('kb.scoring');
   if (!getState('kb.articles')) {
     setState('kb.articles', []);
     setState('kb.scores', {});
@@ -54,7 +53,7 @@ export function mount(container) {
   _unsubs.push(subscribe('kb.articles', render));
   _unsubs.push(subscribe('kb.scores', debouncedRender));
   _unsubs.push(subscribe('kb.loading', render));
-  _unsubs.push(subscribe('kb.scoring', debouncedRender));
+  _unsubs.push(subscribe('kb.scoring', onScoringChange));
   _unsubs.push(subscribe('kb.scoringIds', debouncedRender));
   _unsubs.push(subscribe('kb.focusArticle', (articleId) => {
     if (!articleId) return;
@@ -119,16 +118,31 @@ function handleFocusArticle(articleId) {
 
 let _searchFocused = false;
 let _renderTimer = null;
+let _wasScoring = false;
 function debouncedRender() {
   if (_renderTimer) return;
   _renderTimer = setTimeout(() => {
     _renderTimer = null;
-    if (getState('kb.scoring') && _container?.querySelector('.data-table') && _sortCol !== 'score') {
+    if (getState('kb.scoring') && _container?.querySelector('.data-table') && _sorter.col !== 'score') {
       updateScoreCellsInPlace();
     } else {
       render();
     }
   }, 100);
+}
+
+// kb.scoring transitions (null → active, active → null) must do a FULL render so the
+// progress-bar card and disabled "Scoring…" button are drawn/removed. The cheap
+// in-place path only handles per-article increments while scoring stays active.
+function onScoringChange(scoring) {
+  const isScoring = !!scoring;
+  if (isScoring !== _wasScoring) {
+    _wasScoring = isScoring;
+    if (_renderTimer) { clearTimeout(_renderTimer); _renderTimer = null; }
+    render();
+    return;
+  }
+  debouncedRender();
 }
 
 function updateScoreCellsInPlace() {
@@ -139,11 +153,11 @@ function updateScoreCellsInPlace() {
   // Update progress bar
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
-    const progressLabel = _container.querySelector('.main__sticky .card:last-child span');
+    const progressLabel = document.getElementById('kb-scoring-label');
     if (progressLabel) progressLabel.textContent = `Scoring: ${scoring.done} / ${scoring.total}`;
-    const bar = _container.querySelector('.progress__fill');
+    const bar = _container.querySelector('#kb-scoring-card .progress__fill');
     if (bar) bar.style.width = `${pct}%`;
-    const barLabel = _container.querySelector('.progress__label');
+    const barLabel = _container.querySelector('#kb-scoring-card .progress__label');
     if (barLabel) barLabel.textContent = `${pct}%`;
   }
 
@@ -163,7 +177,12 @@ function updateScoreCellsInPlace() {
     if (isBeingScored) {
       scoreTd.appendChild(spinner('sm'));
     } else if (overall != null) {
-      const pill = h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' } }, String(overall));
+      const article = (getState('kb.articles') || []).find(a => a.id === articleId);
+      const pill = h('span', {
+        class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`,
+        style: { cursor: 'pointer' },
+        onClick: article ? () => showScoreDetail(article, scoreData) : undefined
+      }, String(overall));
       scoreTd.appendChild(pill);
     } else {
       scoreTd.appendChild(h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—'));
@@ -186,39 +205,18 @@ function render() {
   const scoring = getState('kb.scoring');
   const filtered = getFilteredArticles();
 
-  const stickySection = h('div', { class: 'main__sticky' });
-  const scrollSection = h('div', { class: 'main__scroll' });
-  _container.appendChild(stickySection);
-  _container.appendChild(scrollSection);
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
   const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
-  const scored = articles.filter(a => scores[a.id]?.overall != null);
-  const avgScore = scored.length ? Math.round(scored.reduce((s, a) => s + scores[a.id].overall, 0) / scored.length) : null;
-
   const filteredScored = filtered.filter(a => scores[a.id]?.overall != null);
   const filteredAvg = filteredScored.length ? Math.round(filteredScored.reduce((s, a) => s + scores[a.id].overall, 0) / filteredScored.length) : null;
 
-  const statsBar = h('div', { class: 'card', style: { padding: '12px', marginBottom: '12px' } },
-    h('div', { style: { display: 'flex', gap: '24px', fontSize: '12px' } },
-      h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700' } }, String(filtered.length)),
-        h('div', { style: { color: 'var(--text-secondary)' } }, filtered.length !== articles.length ? `of ${articles.length} Articles` : 'Articles')
-      ),
-      h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--primary)' } }, `${filteredScored.length}/${filtered.length}`),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Scored')
-      ),
-      filteredAvg != null ? h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: filteredAvg >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : filteredAvg >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(filteredAvg)),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Avg Score')
-      ) : null,
-      filteredScored.length ? h('div', null,
-        h('div', { style: { fontSize: '18px', fontWeight: '700', color: 'var(--error)' } }, String(filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length)),
-        h('div', { style: { color: 'var(--text-secondary)' } }, 'Below 60')
-      ) : null
-    )
-  );
-  stickySection.appendChild(statsBar);
+  stickySection.appendChild(statsBar([
+    { value: filtered.length, label: filtered.length !== articles.length ? `of ${articles.length} Articles` : 'Articles' },
+    { value: `${filteredScored.length}/${filtered.length}`, label: 'Scored', color: 'var(--primary)' },
+    filteredAvg != null ? { value: filteredAvg, label: 'Avg Score', color: filteredAvg >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : filteredAvg >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } : null,
+    filteredScored.length ? { value: filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length, label: 'Below 60', color: 'var(--error)' } : null
+  ]));
 
   const validationOptions = [...new Set(articles.map(a => a.validationStatus).filter(Boolean))].sort();
 
@@ -229,7 +227,7 @@ function render() {
   }
 
   const cloudMulti = multiSelect('kb-cloud-filter', 'Cloud',
-    [{ value: 'Industry', label: 'Industry' }, { value: 'Revenue', label: 'Revenue' }],
+    CLOUDS.map(c => ({ value: c, label: c })),
     _filterCloud,
     (sel) => { _filterCloud = sel; _page = 0; render(); }
   );
@@ -274,7 +272,7 @@ function render() {
   const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !pageArticleCount || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
 
-  const filtersRow = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '0', flexWrap: 'wrap' } },
+  const filtersRow = h('div', { class: 'tab-toolbar' },
     searchInput,
     cloudMulti,
     ptMulti,
@@ -290,9 +288,9 @@ function render() {
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
-    stickySection.appendChild(h('div', { class: 'card', style: { marginTop: '8px', padding: '12px' } },
+    stickySection.appendChild(h('div', { id: 'kb-scoring-card', class: 'card', style: { marginTop: '8px', padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-        h('span', null, `Scoring: ${scoring.done} / ${scoring.total}`),
+        h('span', { id: 'kb-scoring-label' }, `Scoring: ${scoring.done} / ${scoring.total}`),
         h('span', null, `${pct}%`)
       ),
       progressBar(pct, 'default', true)
@@ -323,38 +321,36 @@ function render() {
     return;
   }
 
+  const sortCol = _sorter.col;
   filtered.sort((a, b) => {
     let va, vb;
-    if (_sortCol === 'score') {
+    if (sortCol === 'score') {
       va = scores[a.id]?.overall ?? -1;
       vb = scores[b.id]?.overall ?? -1;
-    } else if (_sortCol === 'agfHits') {
+    } else if (sortCol === 'agfHits') {
       va = _agfHits?.[a.articleNumber]?.agfHits ?? 0;
       vb = _agfHits?.[b.articleNumber]?.agfHits ?? 0;
-    } else if (_sortCol === 'lastPublished') {
+    } else if (sortCol === 'lastPublished') {
       va = a.lastPublished || '';
       vb = b.lastPublished || '';
     } else {
-      va = (a[_sortCol] || '').toLowerCase();
-      vb = (b[_sortCol] || '').toLowerCase();
+      va = (a[sortCol] || '').toLowerCase();
+      vb = (b[sortCol] || '').toLowerCase();
     }
-    if (va < vb) return _sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return _sortDir === 'asc' ? 1 : -1;
-    return 0;
+    return _sorter.compare(va, vb);
   });
 
-  function kbSortIndicator(col) {
-    return _sortCol === col ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
-  }
-
-  const table = h('table', { class: 'data-table' },
+  const ind = (col) => _sorter.indicator(col);
+  // Animate row entrance only when not actively scoring — scoring triggers periodic
+  // re-renders, and re-animating rows each time would flicker.
+  const table = h('table', { class: scoring ? 'data-table' : 'data-table data-table--animated' },
     h('thead', null, h('tr', null,
-      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => { toggleKbSort('articleNumber'); } }, '#' + kbSortIndicator('articleNumber')),
-      h('th', { style: { cursor: 'pointer' }, onClick: () => { toggleKbSort('title'); } }, 'Title' + kbSortIndicator('title')),
-      h('th', { style: { width: '180px', cursor: 'pointer' }, onClick: () => { toggleKbSort('topicName'); } }, 'Product & Topic' + kbSortIndicator('topicName')),
-      h('th', { style: { width: '85px', cursor: 'pointer' }, onClick: () => { toggleKbSort('lastPublished'); } }, 'Published' + kbSortIndicator('lastPublished')),
-      h('th', { style: { width: '80px', cursor: 'pointer' }, onClick: () => { toggleKbSort('agfHits'); } }, 'AGF' + kbSortIndicator('agfHits')),
-      h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + kbSortIndicator('score')),
+      h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => { toggleKbSort('articleNumber'); } }, '#' + ind('articleNumber')),
+      h('th', { style: { cursor: 'pointer' }, onClick: () => { toggleKbSort('title'); } }, 'Title' + ind('title')),
+      h('th', { style: { width: '180px', cursor: 'pointer' }, onClick: () => { toggleKbSort('topicName'); } }, 'Product & Topic' + ind('topicName')),
+      h('th', { style: { width: '85px', cursor: 'pointer' }, onClick: () => { toggleKbSort('lastPublished'); } }, 'Published' + ind('lastPublished')),
+      h('th', { style: { width: '80px', cursor: 'pointer' }, onClick: () => { toggleKbSort('agfHits'); } }, 'AGF' + ind('agfHits')),
+      h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + ind('score')),
       h('th', { style: { width: '120px' } }, 'Actions')
     )),
     h('tbody', null)
@@ -446,20 +442,8 @@ function showScoreDetail(article, scoreData) {
   );
   const ctbody = criteriaTable.querySelector('tbody');
   scoreData.criteria.forEach(c => {
-    if (c.na) return;
-    ctbody.appendChild(h('tr', null,
-      h('td', { style: { fontWeight: '500', fontSize: '12px' } }, c.label || c.id),
-      h('td', null, h('span', { class: `pill pill--${c.score >= c.max * 0.8 ? 'success' : c.score >= c.max * 0.5 ? 'warning' : 'error'}` }, `${c.score}/${c.max}`)),
-      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
-        (c.passed || []).length ? h('div', null, ...c.passed.map(p => h('div', { style: { marginBottom: '2px', color: 'var(--success)' } }, '• ' + p))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-      ),
-      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
-        (c.issues || []).length ? h('div', null, ...c.issues.map(issue => h('div', { style: { marginBottom: '2px', color: 'var(--error)' } }, '• ' + issue))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-      ),
-      h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
-        (c.suggestions || []).length ? h('div', null, ...c.suggestions.map(sug => h('div', { style: { marginBottom: '2px', color: 'var(--primary)' } }, '• ' + sug))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-      )
-    ));
+    const row = renderCriterionRow(c, Infinity);
+    if (row) ctbody.appendChild(row);
   });
   body.appendChild(criteriaTable);
 
@@ -519,13 +503,6 @@ async function loadArticles(forceLive = false) {
 }
 
 
-function getCloudFromPt(topicName) {
-  if (!topicName) return 'Other';
-  if (topicName.toLowerCase().startsWith('industry')) return 'Industry';
-  if (topicName.toLowerCase().startsWith('revenue')) return 'Revenue';
-  return 'Other';
-}
-
 function getFilteredArticles() {
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
@@ -557,7 +534,7 @@ async function scoreAll() {
   const pageEnd = pageStart + _pageSize;
   const pageArticles = filtered.slice(pageStart, pageEnd);
   const existingScores = getState('kb.scores') || {};
-  const toScore = pageArticles.filter(a => !existingScores[a.id]?.overall);
+  const toScore = pageArticles.filter(a => existingScores[a.id]?.overall == null);
   if (!toScore.length) { toast('All articles on this page already scored.', 'info'); return; }
 
   setState('kb.scoring', { done: 0, total: toScore.length });
@@ -600,10 +577,12 @@ async function scoreAll() {
       try {
         const result = await scoreArticle(enriched);
         scores[article.id] = result;
+        if (result?.overall != null) done++;
       } catch {}
       inFlight.delete(article.id);
       setState('kb.scoringIds', [...inFlight]);
       setState('kb.scores', { ...scores });
+      setState('kb.scoring', { done, total: toScore.length, retrying: failed.length });
     });
   }
 
@@ -611,24 +590,26 @@ async function scoreAll() {
   setState('kb.scoring', null);
   setState('kb.scoringIds', []);
   const successCount = toScore.filter(a => scores[a.id]?.overall != null).length;
-  toast(`Scored ${successCount}/${toScore.length} articles.${failed.length ? ` (${failed.length - toScore.filter(a => scores[a.id]?.overall == null).length} recovered on retry)` : ''}`, 'success');
+  const stillFailed = toScore.length - successCount;
+  toast(`Scored ${successCount}/${toScore.length} articles.${stillFailed ? ` ${stillFailed} failed.` : ''}`, stillFailed ? 'warning' : 'success');
 }
 
-function renderCriterionRow(c) {
+function renderCriterionRow(c, limit = 2) {
   if (c.na) return null;
-  const scoreColor = c.score >= c.max * 0.8 ? 'var(--success)' : c.score >= c.max * 0.5 ? 'var(--warning)' : 'var(--error)';
+  // limit caps how many bullet items show per cell (the live-streaming view stays
+  // compact with 2; the detail modal passes Infinity to show everything).
+  const colorPill = `pill pill--${c.score >= c.max * 0.8 ? 'success' : c.score >= c.max * 0.5 ? 'warning' : 'error'}`;
+  const bulletCell = (items, color) => h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
+    (items || []).length
+      ? h('div', null, ...items.slice(0, limit).map(t => h('div', { style: { marginBottom: '2px', color } }, '• ' + t)))
+      : h('span', { style: { color: 'var(--text-muted)' } }, '—')
+  );
   return h('tr', null,
     h('td', { style: { fontWeight: '500', fontSize: '12px' } }, c.label || c.id),
-    h('td', null, h('span', { style: { fontWeight: '600', color: scoreColor } }, `${c.score}/${c.max}`)),
-    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
-      (c.passed || []).length ? h('div', null, ...c.passed.slice(0, 2).map(p => h('div', { style: { marginBottom: '2px', color: 'var(--success)' } }, '• ' + p))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-    ),
-    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
-      (c.issues || []).length ? h('div', null, ...c.issues.slice(0, 2).map(issue => h('div', { style: { marginBottom: '2px', color: 'var(--error)' } }, '• ' + issue))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-    ),
-    h('td', { style: { fontSize: '11px', maxWidth: '180px' } },
-      (c.suggestions || []).length ? h('div', null, ...c.suggestions.slice(0, 2).map(sug => h('div', { style: { marginBottom: '2px', color: 'var(--primary)' } }, '• ' + sug))) : h('span', { style: { color: 'var(--text-muted)' } }, '—')
-    )
+    h('td', null, h('span', { class: colorPill }, `${c.score}/${c.max}`)),
+    bulletCell(c.passed, 'var(--success)'),
+    bulletCell(c.issues, 'var(--error)'),
+    bulletCell(c.suggestions, 'var(--primary)')
   );
 }
 
@@ -691,6 +672,14 @@ async function scoreOne(article) {
   );
 
   modal(`Score: ${article.articleNumber}`, bodyEl, { wide: true });
+
+  // Mark the table row as scoring so it shows a spinner like batch scoring does.
+  const markScoring = (on) => {
+    const ids = new Set(getState('kb.scoringIds') || []);
+    if (on) ids.add(article.id); else ids.delete(article.id);
+    setState('kb.scoringIds', [...ids]);
+  };
+  markScoring(true);
 
   const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
@@ -770,6 +759,8 @@ async function scoreOne(article) {
       progressEl.textContent = '';
       progressEl.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, 'Error: ' + e.message));
     }
+  } finally {
+    markScoring(false);
   }
 }
 
@@ -789,9 +780,10 @@ async function rewriteArticle(article) {
   }
 
   const content = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
       h('span', null, `#${article.articleNumber} — ${article.title}`),
-      h('div', { style: { display: 'flex', gap: '6px' } },
+      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+        h('div', { id: 'rewrite-score', style: { display: 'flex', alignItems: 'center', gap: '6px' } }),
         h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', onClick: () => generateRewrite(article, session) }, cached ? 'Regenerate' : 'Generating…'),
         h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create in ORGCS')
       )
@@ -801,7 +793,77 @@ async function rewriteArticle(article) {
 
   modal('Rewrite Article', content, { wide: true });
 
-  if (!cached) generateRewrite(article, session);
+  if (cached) {
+    // Show the cached score if we already scored this rewrite this session.
+    const cachedScore = _rewriteScoreCache[article.id];
+    if (cachedScore) renderRewriteScore(article, cachedScore);
+  } else {
+    generateRewrite(article, session);
+  }
+}
+
+// Parse the streamed "## TITLE/SUMMARY/DESCRIPTION/RESOLUTION" markdown into an
+// article-shaped object the scorer understands.
+function parseRewriteSections(text) {
+  const titleMatch = text.match(/##\s*TITLE\s*\n([^\n]+)/i);
+  const summaryMatch = text.match(/##\s*SUMMARY\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+  const descMatch = text.match(/##\s*DESCRIPTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+  const resMatch = text.match(/##\s*RESOLUTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
+  return {
+    title: titleMatch?.[1]?.trim() || '',
+    summary: summaryMatch?.[1]?.trim() || '',
+    description: descMatch?.[1]?.trim() || '',
+    resolution: resMatch?.[1]?.trim() || ''
+  };
+}
+
+let _rewriteScoreCache = {};
+
+async function scoreRewrite(article, fullText) {
+  const scoreEl = document.getElementById('rewrite-score');
+  if (scoreEl) {
+    scoreEl.textContent = '';
+    scoreEl.appendChild(spinner('sm'));
+    scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Scoring…'));
+  }
+  const parsed = parseRewriteSections(fullText);
+  // Markdown ## headers become HTML <h2> in the real article, so the scorer's
+  // header/scannability checks see proper structure. We hand it the rewritten body.
+  const headerHtml = (label, text) => text ? `<h2>${label}</h2>${text.split('\n').map(l => `<p>${l}</p>`).join('')}` : '';
+  const enriched = {
+    ...article,
+    title: parsed.title || article.title,
+    summary: parsed.summary,
+    description: headerHtml('Description', parsed.description),
+    resolution: headerHtml('Resolution', parsed.resolution),
+    steps: ''
+  };
+  try {
+    const result = await scoreArticle(enriched);
+    result.title = enriched.title;
+    _rewriteScoreCache[article.id] = result;
+    renderRewriteScore(article, result);
+  } catch (e) {
+    if (scoreEl) {
+      scoreEl.textContent = '';
+      scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, 'Score failed'));
+    }
+  }
+}
+
+function renderRewriteScore(article, result) {
+  const scoreEl = document.getElementById('rewrite-score');
+  if (!scoreEl || result?.overall == null) return;
+  scoreEl.textContent = '';
+  const overall = result.overall;
+  const color = overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error';
+  scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'New score:'));
+  scoreEl.appendChild(h('span', {
+    class: `pill pill--${color}`,
+    style: { cursor: 'pointer' },
+    title: 'View score details',
+    onClick: () => showScoreDetail({ ...article, title: result.title || article.title }, result)
+  }, String(overall)));
 }
 
 async function generateRewrite(article, session) {
@@ -809,6 +871,10 @@ async function generateRewrite(article, session) {
   if (regenBtn) { regenBtn.disabled = true; regenBtn.textContent = 'Generating…'; }
   const el = document.getElementById('rewrite-stream');
   if (el) { el.textContent = ''; el.appendChild(spinner('md')); }
+  // Clear any prior score for this article — it no longer matches the new draft.
+  delete _rewriteScoreCache[article.id];
+  const scoreEl = document.getElementById('rewrite-score');
+  if (scoreEl) scoreEl.textContent = '';
 
   const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
@@ -816,19 +882,36 @@ async function generateRewrite(article, session) {
   const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
   const steps = stripHtml(body.steps || '').slice(0, 1500);
 
-  const system = `You are an expert technical writer improving Salesforce Knowledge Articles for Agentforce readiness.
-Apply these rules:
-- TITLE: Specific to product + exact issue. Include product name, error text, or scenario.
-- SUMMARY: 2-4 sentences covering problem context and resolution.
-- HEADERS: Use ## headers to break content. Never bold text as substitute.
-- DESCRIPTION: State problem, symptoms, context. Explain the "why".
-- RESOLUTION: Brief statement of what steps accomplish, then numbered steps. After code blocks, add plain-text explanation.
+  // This prompt is deliberately aligned with shared/scoring.js criteria so the
+  // rewritten article scores well on the same rubric used by the Score action.
+  const system = `You are an expert technical writer rewriting Salesforce Knowledge Articles to maximize Agentforce (AGF) RAG retrieval and consumption quality.
 
-Output exactly: ## TITLE, ## SUMMARY, ## DESCRIPTION, ## RESOLUTION. No other commentary.`;
+HOW AGENTFORCE RETRIEVES CONTENT (optimize for this):
+- Articles are chunked at header boundaries (≤512 tokens/chunk). Only the top 5 chunks from 195k+ pieces are retrieved via hybrid (exact + vector) search.
+- The title is prepended to every chunk — it drives ALL retrieval.
+- Product & Topic tags are NOT used by RAG, so the product name MUST appear in the body text.
+- Videos, screenshots, and attachments are ignored — only text and alt-text are indexed.
+- Code blocks consume poorly — always explain them in plain text.
+
+REWRITE RULES (each maps to a scored criterion — satisfy ALL):
+1. TITLE: ≤60 chars, front-load keywords, include the specific product name, no question format, symptom-based for troubleshooting.
+2. SUMMARY: ≤170 chars, use DIFFERENT words/synonyms than the title, specify the audience, include exact error text for error articles.
+3. HEADERS: Use ## for each section (renders as <h2>) — NEVER bold text as a header. Make headers descriptive with intent keywords. Keep each section ≤~2000 chars; split with ### if longer.
+4. DESCRIPTION: Open with an intent paragraph stating WHAT question this answers and WHY. Explain uncommon acronyms. Present tense. Include the customer's likely phrasing. State the product name explicitly.
+5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does.
+6. SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists, no wall-of-text. Each section must read as a self-contained chunk.
+7. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
+
+Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
+## TITLE
+## SUMMARY
+## DESCRIPTION
+## RESOLUTION`;
 
   const user = `Rewrite this article:
 Title: ${article.title}
-P&T: ${article.topicName || ''}
+Product & Topic: ${article.topicName || '(none)'}
+Validation: ${article.validationStatus || 'Not Validated'}
 
 CURRENT SUMMARY: ${article.summary || '(empty)'}
 CURRENT DESCRIPTION: ${desc || '(empty)'}
@@ -856,24 +939,24 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
   } catch (e) {
     const el = document.getElementById('rewrite-stream');
     if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
+    if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+    return;
   }
   if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+  // Score the freshly generated article so the user sees its quality immediately.
+  if (fullText.trim()) scoreRewrite(article, fullText);
 }
 
 async function publishRewriteToOrgcs(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
 
+  const parsed = parseRewriteSections(cached);
+  const title = parsed.title || article.title;
+  const summary = parsed.summary;
   const sections = [];
-  const titleMatch = cached.match(/##\s*TITLE\s*\n([^\n]+)/i);
-  const summaryMatch = cached.match(/##\s*SUMMARY\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-  const descMatch = cached.match(/##\s*DESCRIPTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-  const resMatch = cached.match(/##\s*RESOLUTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-
-  const title = titleMatch?.[1]?.trim() || article.title;
-  const summary = summaryMatch?.[1]?.trim() || '';
-  if (descMatch) sections.push({ heading: 'Description', body: descMatch[1].trim() });
-  if (resMatch) sections.push({ heading: 'Resolution', body: resMatch[1].trim() });
+  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
+  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
 
   toast('Creating draft update in ORGCS…', 'info');
   try {

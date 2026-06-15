@@ -7,7 +7,6 @@ import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
-import { handleScoreBatch, handleRewrite } from './handlers/kb-scorer.js';
 import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
 import { handleDedup, handleMerge } from './handlers/dedup.js';
 import { publishNewArticle, publishUpdateDraft } from './handlers/article-publish.js';
@@ -258,12 +257,6 @@ function handlePort(port) {
         if (msg.action === 'ANALYZE_CASE') wrap(handleAnalyze)(msg);
         else if (msg.action === 'GENERATE_NEW_ARTICLE') wrap(handleGenerateNew)(msg);
       });
-      break;
-    case 'kbs-score-batch':
-      port.onMessage.addListener(wrap(handleScoreBatch));
-      break;
-    case 'kbs-rewrite':
-      port.onMessage.addListener(wrap(handleRewrite));
       break;
     case 'kbs-coverage':
       port.onMessage.addListener(wrap(handleCoverage));

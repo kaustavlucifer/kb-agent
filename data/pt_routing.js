@@ -56,8 +56,8 @@ export const PT_RELATED = {
     'Industry-OmniStudio'
   ],
   'Revenue Cloud (Core)-Business Rules Engine': [
-    'Industry-Business Rules Engine (BRE)',
-    'Revenue Cloud (Core)-Configurator',
+    'Revenue Cloud (Core)-Transaction Management',
+    'Revenue Cloud (Core)-Product Catalog Management',
     'Revenue Cloud (Core)-Price Management'
   ],
   'Revenue Cloud (Core)-Billing & Invoicing': [
@@ -76,14 +76,12 @@ export const PT_RELATED = {
     'Revenue Cloud (Core)-Price Management'
   ],
   'Revenue Cloud (Core)-Configurator': [
-    'Revenue Cloud (Core)-Product Catalog Management',
     'Revenue Cloud (Core)-Business Rules Engine',
-    'Revenue Cloud (Core)-Price Management'
+    'Revenue Cloud (Core)-Advanced Configurator'
   ],
   'Revenue Cloud (Core)-Contract Lifecycle Management with DocGen': [
     'Revenue Cloud (Core)-OmniStudio',
-    'Revenue-Document Generation',
-    'Industry-Document Generation'
+    'Revenue-Document Generation'
   ],
   'Revenue Cloud (Core)-Price Management': [
     'Revenue Cloud (Core)-Billing & Invoicing',
@@ -91,23 +89,61 @@ export const PT_RELATED = {
     'Revenue Cloud (Core)-Dynamic Revenue Orchestration'
   ],
   'Revenue Cloud (Core)-Product Catalog Management': [
-    'Revenue Cloud (Core)-Configurator',
+    'Revenue Cloud (Core)-Business Rules Engine',
+    'Revenue Cloud (Core)-Advanced Configurator'
+  ],
+  'Revenue Cloud (Core)-Advanced Approvals': [
+    'Revenue Cloud (Core)-Developer Support - Product to Order'
+  ],
+  'Revenue Cloud (Core)-Advanced Configurator': [
+    'Revenue Cloud (Core)-Transaction Management',
+    'Revenue Cloud (Core)-Developer Support - Product to Order'
+  ],
+  'Revenue Cloud (Core)-Developer Support - Invoice to Cash': [
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Price Management',
+    'Revenue Cloud (Core)-Usage & Ratings'
+  ],
+  'Revenue Cloud (Core)-Developer Support - Product to Order': [
+    'Revenue Cloud (Core)-Developer Support - Invoice to Cash',
     'Revenue Cloud (Core)-Price Management'
+  ],
+  'Revenue Cloud (Core)-Usage & Ratings': [
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Price Management',
+    'Revenue Cloud (Core)-Developer Support - Invoice to Cash'
   ],
   'Revenue-Salesforce CPQ': [
     'Revenue-CPQ Developer Support',
+    'Revenue-Document Generation',
     'Revenue-Salesforce Subscription Management',
     'Revenue-Salesforce Contracts'
   ],
   'Revenue-CPQ Developer Support': [
     'Revenue-Salesforce CPQ',
-    'Revenue-Billing Developer Support'
+    'Revenue-Billing Developer Support',
+    'Revenue-Document Generation'
   ],
   'Revenue-Salesforce Billing': [
     'Revenue-Billing Developer Support'
   ],
+  'Revenue-Billing Developer Support': [
+    'Revenue-CPQ Developer Support',
+    'Revenue-Salesforce Billing'
+  ],
+  'Revenue-Document Generation': [
+    'Revenue-Salesforce CPQ',
+    'Revenue Cloud (Core)-OmniStudio',
+    'Revenue Cloud (Core)-Contract Lifecycle Management with DocGen'
+  ],
+  'Revenue-Salesforce Contracts': [
+    'Revenue Cloud (Core)-Contract Lifecycle Management with DocGen',
+    'Revenue Cloud (Core)-OmniStudio',
+    'Revenue-Document Generation'
+  ],
   'Revenue-Salesforce Subscription Management': [
-    'Revenue-Salesforce CPQ'
+    'Revenue-Salesforce CPQ',
+    'Revenue-CPQ Developer Support'
   ],
   'Revenue Lifecycle Management-Asset Lifecycle Management': [
     'Revenue Lifecycle Management-Quote to Order Capture',
@@ -143,6 +179,63 @@ export const PT_RELATED = {
     'Revenue Cloud (Core)-Business Rules Engine',
     'Industry-Manufacturing Cloud',
     'Industry-OmniStudio'
+  ],
+  'Industry-Automotive Cloud': [
+    'Industry-Manufacturing Cloud',
+    'Industry-OmniStudio'
+  ],
+  'Industry-CRM Analytics': [
+    'Industry-OmniStudio'
+  ],
+  'Industry-Developer Support': [
+    'Industry-OmniStudio'
+  ],
+  'Industry-Disability and Product Accessibility': [],
+  'Industry-Education Packages (Other SFDO)': [
+    'Industry-Education Cloud',
+    'Industry-Education Data Architecture (EDA)'
+  ],
+  'Industry-Email Delivery & Desktop Integrations': [],
+  'Industry-Feature Activation & Limits': [],
+  'Industry-Flow': [
+    'Industry-OmniStudio'
+  ],
+  'Industry-How-to, Setup, Configuration, Reports & Dashboards': [],
+  'Industry-Mobile apps': [],
+  'Industry-Multi-Factor Authentication (MFA)': [],
+  'Industry-Net Zero Cloud': [
+    'Industry-OmniStudio'
+  ],
+  'Industry-Network Infrastructure and Core Maintenance': [],
+  'Industry-Nonprofit Packages (Other SFDO)': [
+    'Industry-Nonprofit Cloud',
+    'Industry-Nonprofit Success Pack (NPSP)'
+  ],
+  'Industry-Rebate Management': [
+    'Industry-Manufacturing Cloud',
+    'Industry-Loyalty Management'
+  ],
+  'Industry-Security': [],
+  'Industry-Security & Activations': [],
+  'Revenue Cloud (Core)-Billing': [
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Developer Support - Invoice to Cash'
+  ],
+  'Revenue Cloud (Core)-Configuration': [
+    'Revenue Cloud (Core)-Configurator',
+    'Revenue Cloud (Core)-Advanced Configurator'
+  ],
+  'Revenue Cloud (Core)-Invoice Management': [
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Developer Support - Invoice to Cash'
+  ],
+  'Revenue Cloud (Core)-Non Security - DORA': [],
+  'Revenue Cloud (Core)-Revenue Cloud Analytics': [
+    'Revenue Cloud (Core)-Billing & Invoicing',
+    'Revenue Cloud (Core)-Transaction Management'
+  ],
+  'Revenue Lifecycle Management-Developer Support - Product, Pricing, Config': [
+    'Revenue Lifecycle Management-Asset Lifecycle Management'
   ],
   'Industry-Media Cloud': []
 };

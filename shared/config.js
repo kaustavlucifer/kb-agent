@@ -28,6 +28,11 @@ export const PT_HIGH_VOLUME_CONVS = 200;
 export const PT_MID_VOLUME_CONVS = 100;
 export const PT_LOW_COVERAGE_ARTICLES = 3;
 
+// Cluster-level volume thresholds (a cluster is a sub-grouping within a P&T, so
+// its conversation counts run lower than the P&T totals above).
+export const CLUSTER_HIGH_VOLUME_CONVS = 200;
+export const CLUSTER_MID_VOLUME_CONVS = 50;
+
 export const STREAM_RENDER_THROTTLE_MS = 150;
 
 export const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -38,6 +43,18 @@ export const CASE_GUARD_RAIL_EXCLUSIONS = [
 
 export const ORGCS_BASE = 'https://orgcs.lightning.force.com';
 export function articleUrl(id) { return `${ORGCS_BASE}/lightning/r/Knowledge__kav/${id}/view`; }
+
+// Cloud taxonomy — articles are grouped by the prefix of their Product & Topic name.
+export const CLOUDS = ['Industry', 'Revenue'];
+
+export function getCloudFromPt(topicName) {
+  if (!topicName) return 'Other';
+  const lower = topicName.toLowerCase();
+  for (const cloud of CLOUDS) {
+    if (lower.startsWith(cloud.toLowerCase())) return cloud;
+  }
+  return 'Other';
+}
 
 export const STORAGE_KEYS = {
   GATEWAY_TOKEN: 'gatewayToken',

@@ -100,6 +100,88 @@ export function emptyState(icon, text) {
   );
 }
 
+// Standard tab layout: a non-scrolling sticky header region + a scrolling body.
+// Returns both sections AND appends them to the container in order.
+export function stickyScrollLayout(container) {
+  const sticky = h('div', { class: 'main__sticky' });
+  const scroll = h('div', { class: 'main__scroll' });
+  container.appendChild(sticky);
+  container.appendChild(scroll);
+  return { sticky, scroll };
+}
+
+// Sortable-table state factory. Encapsulates the col/dir toggle + arrow indicator
+// that every table tab re-implemented identically.
+export function createSorter(defaultCol, defaultDir = 'asc') {
+  let col = defaultCol;
+  let dir = defaultDir;
+  return {
+    get col() { return col; },
+    get dir() { return dir; },
+    toggle(c) {
+      if (col === c) dir = dir === 'asc' ? 'desc' : 'asc';
+      else { col = c; dir = 'asc'; }
+    },
+    set(c, d) { col = c; dir = d; },
+    indicator(c) { return col === c ? (dir === 'asc' ? ' ↑' : ' ↓') : ''; },
+    // Compares two values for the active direction. Caller supplies the accessor.
+    compare(va, vb) {
+      if (va < vb) return dir === 'asc' ? -1 : 1;
+      if (va > vb) return dir === 'asc' ? 1 : -1;
+      return 0;
+    }
+  };
+}
+
+// A row of big-number / small-label stat blocks. `stats` is an array of
+// { value, label, color? } — color is a CSS value (e.g. 'var(--success)').
+export function statsBar(stats) {
+  return h('div', { class: 'card stats-bar' },
+    h('div', { class: 'stats-bar__row' },
+      ...stats.filter(Boolean).map(s => h('div', { class: 'stats-bar__item' },
+        h('div', { class: 'stats-bar__value', style: s.color ? { color: s.color } : null }, String(s.value)),
+        h('div', { class: 'stats-bar__label' }, s.label)
+      ))
+    )
+  );
+}
+
+// Streaming-output modal shell. Opens a modal with a scrollable stream area and a
+// "Copy" action, and hands back the stream element + helpers so callers can pump
+// deltas in (from streamClaude or a port) without re-implementing the shell.
+// onClose is invoked when the modal closes (use it to disconnect ports).
+export function streamingModal(title, { header = null, onClose } = {}) {
+  const stream = h('div', { class: 'stream-output' });
+  stream.appendChild(spinner('md'));
+  let raw = '';
+  const content = h('div', null, header, stream);
+  const ref = modal(title, content, {
+    wide: true,
+    onClose,
+    primaryAction: {
+      label: 'Copy',
+      handler: () => navigator.clipboard.writeText(raw).then(() => toast('Copied.', 'success'))
+    }
+  });
+  return {
+    ...ref,
+    stream,
+    getRaw: () => raw,
+    // Replace the stream content with rendered markdown for the given full text.
+    renderFull(text, { scroll = false } = {}) {
+      raw = text;
+      stream.textContent = '';
+      stream.appendChild(renderMarkdown(text));
+      if (scroll) stream.scrollTop = stream.scrollHeight;
+    },
+    setError(message) {
+      raw = '';
+      stream.textContent = '';
+      stream.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, message));
+    }
+  };
+}
+
 export function renderInlineFormatting(text) {
   const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
   if (parts.length === 1) return document.createTextNode(text);

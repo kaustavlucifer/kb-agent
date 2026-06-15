@@ -504,6 +504,50 @@ body {
   30% { opacity: 1; transform: scale(1.2); }
 }
 
+/* ─── Stats Bar ─── */
+
+.stats-bar {
+  padding: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.stats-bar__row {
+  display: flex;
+  gap: var(--space-2xl);
+  font-size: var(--text-sm);
+}
+
+.stats-bar__value {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.stats-bar__label {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+/* ─── Stream Output ─── */
+
+.stream-output {
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  max-height: 500px;
+  overflow-y: auto;
+  padding: var(--space-xs);
+}
+
+.stream-stats {
+  margin-bottom: var(--space-lg);
+  padding: var(--space-md);
+  background: var(--surface-raised);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
 /* ─── Empty State ─── */
 
 .empty-state {
@@ -571,6 +615,39 @@ body {
 }
 
 .data-table tr:hover td { background: var(--surface-raised); }
+
+/* Tasteful staggered entrance for table rows. Delays are capped at the first
+   ~12 rows so large tables don't feel sluggish; later rows just fade in together. */
+.data-table--animated tbody tr {
+  animation: fadeInStagger 0.28s ease-out both;
+}
+.data-table--animated tbody tr:nth-child(1) { animation-delay: 0.01s; }
+.data-table--animated tbody tr:nth-child(2) { animation-delay: 0.02s; }
+.data-table--animated tbody tr:nth-child(3) { animation-delay: 0.03s; }
+.data-table--animated tbody tr:nth-child(4) { animation-delay: 0.04s; }
+.data-table--animated tbody tr:nth-child(5) { animation-delay: 0.05s; }
+.data-table--animated tbody tr:nth-child(6) { animation-delay: 0.06s; }
+.data-table--animated tbody tr:nth-child(7) { animation-delay: 0.07s; }
+.data-table--animated tbody tr:nth-child(8) { animation-delay: 0.08s; }
+.data-table--animated tbody tr:nth-child(9) { animation-delay: 0.09s; }
+.data-table--animated tbody tr:nth-child(10) { animation-delay: 0.10s; }
+.data-table--animated tbody tr:nth-child(11) { animation-delay: 0.11s; }
+.data-table--animated tbody tr:nth-child(n+12) { animation-delay: 0.12s; }
+
+/* Respect reduced-motion: disable row stagger + decorative animations. */
+@media (prefers-reduced-motion: reduce) {
+  .data-table--animated tbody tr { animation: none; }
+  .main, .modal, .modal-backdrop, .popover { animation: none; }
+}
+
+/* Consistent toolbar for the table tabs (filters + actions row). */
+.tab-toolbar {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-lg);
+}
 
 /* ─── Popover ─── */
 

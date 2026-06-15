@@ -1,10 +1,10 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS } from '../shared/config.js';
+import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { runDedupBatch } from '../shared/dedup.js';
 import { fetchArticleBodies } from '../shared/scoring.js';
 
@@ -43,10 +43,7 @@ async function loadCachedResults() {
 function render() {
   if (!_container) return;
   _container.textContent = '';
-  const stickySection = h('div', { class: 'main__sticky' });
-  const scrollSection = h('div', { class: 'main__scroll' });
-  _container.appendChild(stickySection);
-  _container.appendChild(scrollSection);
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
   const pairs = getState('dedup.pairs') || [];
   const running = getState('dedup.running');
@@ -55,13 +52,13 @@ function render() {
   const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
 
   const cloudMulti = multiSelect('dedup-cloud-filter', 'Cloud',
-    [{ value: 'Industry', label: 'Industry' }, { value: 'Revenue', label: 'Revenue' }],
+    CLOUDS.map(c => ({ value: c, label: c })),
     _filterCloud,
     (sel) => { _filterCloud = sel; render(); }
   );
 
   const filteredPtOptions = _filterCloud.length
-    ? ptOptions.filter(pt => _filterCloud.some(c => pt.toLowerCase().startsWith(c.toLowerCase())))
+    ? ptOptions.filter(pt => _filterCloud.includes(getCloudFromPt(pt)))
     : ptOptions;
 
   const ptMulti = multiSelect('dedup-pt-filter', 'Product & Topic',
@@ -78,14 +75,14 @@ function render() {
   detectBtn.addEventListener('click', detectDuplicates);
 
   let scopedArticles = articles;
-  if (_filterCloud.length) scopedArticles = scopedArticles.filter(a => _filterCloud.some(c => (a.topicName || '').toLowerCase().startsWith(c.toLowerCase())));
+  if (_filterCloud.length) scopedArticles = scopedArticles.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
   if (_filterPt.length) scopedArticles = scopedArticles.filter(a => _filterPt.includes(a.topicName));
   const batchCount = Math.ceil(scopedArticles.length / DEDUP_BATCH_SIZE);
   const scopeInfo = _filterPt.length
     ? `Filtered: ${scopedArticles.length} articles in ${_filterPt.length} P&Ts, ${batchCount} batches`
     : `All P&Ts: ${scopedArticles.length} articles, ${batchCount} batches`;
 
-  const toolbar = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' } },
+  const toolbar = h('div', { class: 'tab-toolbar' },
     cloudMulti,
     ptMulti,
     h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, scopeInfo),
@@ -120,7 +117,7 @@ function render() {
 
   const displayPairs = _filterPt.length ? pairs.filter(p => _filterPt.includes(p.ptName) || _filterPt.some(pt => p.titleA?.includes(pt) || p.titleB?.includes(pt))) : pairs;
   if (displayPairs.length) {
-    const table = h('table', { class: 'data-table' },
+    const table = h('table', { class: 'data-table data-table--animated' },
       h('thead', null, h('tr', null,
         h('th', null, 'Article A'),
         h('th', null, 'Article B'),
@@ -163,7 +160,7 @@ async function clearResults() {
 async function detectDuplicates() {
   try {
     let articles = getState('kb.articles') || [];
-    if (_filterCloud.length) articles = articles.filter(a => _filterCloud.some(c => (a.topicName || '').toLowerCase().startsWith(c.toLowerCase())));
+    if (_filterCloud.length) articles = articles.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
     if (_filterPt.length) articles = articles.filter(a => _filterPt.includes(a.topicName));
     if (articles.length < 2) { toast('Need at least 2 articles in selected filters.', 'error'); return; }
 
