@@ -39,6 +39,21 @@ export async function sfPost(url, sid, body) {
   return resp.json();
 }
 
+export async function sfPatch(url, sid, body) {
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${sid}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`SF API ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  // PATCH 204 returns no body
+  if (resp.status === 204) return {};
+  return resp.json();
+}
+
 export async function sfQuery(apiBase, sid, soql) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
   const result = await sfGet(url, sid);

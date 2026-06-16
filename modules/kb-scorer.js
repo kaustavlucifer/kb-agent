@@ -784,8 +784,9 @@ async function rewriteArticle(article) {
       h('span', null, `#${article.articleNumber} — ${article.title}`),
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
         h('div', { id: 'rewrite-score', style: { display: 'flex', alignItems: 'center', gap: '6px' } }),
+        h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-compare', onClick: () => showRewriteComparison(article) }, 'Compare'),
         h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', onClick: () => generateRewrite(article, session) }, cached ? 'Regenerate' : 'Generating…'),
-        h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create in ORGCS')
+        h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create New Version in ORGCS')
       )
     ),
     streamEl
@@ -947,6 +948,52 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
   if (fullText.trim()) scoreRewrite(article, fullText);
 }
 
+async function showRewriteComparison(article) {
+  const cached = _rewriteCache[article.id];
+  if (!cached) {
+    // The regenerate button is disabled for the whole generation lifecycle.
+    const streaming = document.getElementById('rewrite-regenerate')?.disabled;
+    toast(streaming ? 'Wait for the rewrite to finish.' : 'Generate the rewrite first.', 'error');
+    return;
+  }
+  const parsed = parseRewriteSections(cached);
+
+  toast('Loading original article…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId: article.id });
+    if (!resp?.success) { toast(resp?.error || 'Failed to load original.', 'error'); return; }
+    const original = resp.article;
+
+    const field = (label, value, opts = {}) => h('div', { style: { marginBottom: '12px' } },
+      h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, label),
+      opts.markdown
+        ? renderMarkdown((value || '(empty)').slice(0, 800))
+        : h('div', { style: { fontSize: opts.bold ? '13px' : '12px', fontWeight: opts.bold ? '600' : '400', lineHeight: '1.5', color: opts.color || 'var(--text-primary)', maxHeight: opts.tall ? '200px' : 'none', overflow: opts.tall ? 'auto' : 'visible' } }, (value || '(empty)').slice(0, opts.bold ? 300 : 800))
+    );
+
+    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '600px', overflow: 'auto' } },
+      h('div', null,
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
+        field('Title', original.title, { bold: true }),
+        field('Summary', original.summary, { bold: false }),
+        field('Description', original.description, { tall: true }),
+        field('Resolution', original.resolution, { tall: true })
+      ),
+      h('div', null,
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
+        field('Title', parsed.title || article.title, { bold: true, color: 'var(--primary)' }),
+        field('Summary', parsed.summary, { bold: false }),
+        field('Description', parsed.description, { markdown: true }),
+        field('Resolution', parsed.resolution, { markdown: true })
+      )
+    );
+
+    modal(`Compare: #${article.articleNumber || ''} — ${article.title}`, body, { wide: true });
+  } catch (e) {
+    toast('Comparison failed: ' + e.message, 'error');
+  }
+}
+
 async function publishRewriteToOrgcs(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
@@ -958,7 +1005,7 @@ async function publishRewriteToOrgcs(article) {
   if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
   if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
 
-  toast('Creating draft update in ORGCS…', 'info');
+  toast('Creating new draft version in ORGCS…', 'info');
   try {
     const resp = await chrome.runtime.sendMessage({
       action: 'PUBLISH_UPDATE_DRAFT',
@@ -971,10 +1018,21 @@ async function publishRewriteToOrgcs(article) {
       }
     });
     if (resp?.success) {
-      toast('Draft version created!', 'success');
-      if (resp.url) chrome.tabs.create({ url: resp.url });
+      const actionLabel = resp.action === 'patched-draft' ? 'Existing draft updated!' : 'New draft version created!';
+      toast(actionLabel, 'success');
+      if (resp.warning) toast(resp.warning, 'warning');
+      // Replace the publish button with an explicit "Open" button instead of
+      // auto-navigating, so the user stays in context until they choose to leave.
+      // Always swap it out on success so the draft can't be created twice.
+      const publishBtn = document.getElementById('rewrite-publish');
+      if (publishBtn) {
+        const openBtn = resp.url
+          ? h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-open', onClick: () => chrome.tabs.create({ url: resp.url }) }, 'Open Draft Version ↗')
+          : h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-open', disabled: true }, 'Draft Created ✓');
+        publishBtn.replaceWith(openBtn);
+      }
     } else {
-      toast(resp?.error || 'Failed to create draft.', 'error');
+      toast(resp?.error || 'Failed to create draft version.', 'error');
     }
   } catch (e) {
     toast('Error: ' + e.message, 'error');

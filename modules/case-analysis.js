@@ -1373,7 +1373,7 @@ function renderFullRewriteCard(rewrite) {
       (() => { const key = `rewrite-${rewrite.articleId}`; const ds = (getState('case.draftScores') || {})[key]; const scoring = (getState('case.scoringInProgress') || []).includes(key); if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`); if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, streamingDots(), 'AF: scoring'); return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …'); })(),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showComparisonModal(rewrite) }, 'Compare'),
-      h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Update in ORGCS')
+      h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Create New Version in ORGCS')
     )
   );
   card.appendChild(cardHeader);
@@ -1431,7 +1431,7 @@ async function publishArticle(draft, result) {
 }
 
 async function publishUpdate(rewrite, result) {
-  toast('Creating draft update in ORGCS…', 'info');
+  toast('Creating new draft version in ORGCS…', 'info');
   try {
     const resp = await chrome.runtime.sendMessage({
       action: 'PUBLISH_UPDATE_DRAFT',
@@ -1445,13 +1445,15 @@ async function publishUpdate(rewrite, result) {
       }
     });
     if (resp?.success) {
-      toast('Draft version created!', 'success');
+      const actionLabel = resp.action === 'patched-draft' ? 'Existing draft updated!' : 'New draft version created!';
+      toast(actionLabel, 'success');
+      if (resp.warning) toast(resp.warning, 'warning');
       if (resp.url) {
         setState('case.publishedUrl', resp.url);
         renderByView();
       }
     } else {
-      toast(resp?.error || 'Failed to create draft.', 'error');
+      toast(resp?.error || 'Failed to create draft version.', 'error');
     }
   } catch (e) {
     toast('Error: ' + e.message, 'error');

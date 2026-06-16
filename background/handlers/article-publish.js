@@ -1,5 +1,5 @@
 import { detectSession } from '../../shared/auth.js';
-import { sfGet, sfPost, sanitizeId, escapeSoql } from '../../shared/api.js';
+import { sfGet, sfPost, sfPatch, sanitizeId, escapeSoql } from '../../shared/api.js';
 import { SF_API_VERSION, articleUrl } from '../../shared/config.js';
 
 const KNOWLEDGE_ARTICLE_RT_ID = '012Hx00000002oEIAQ';
@@ -174,35 +174,113 @@ export async function publishUpdateDraft(payload) {
   let source;
   try {
     source = await sfGet(
-      `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${existingId}?fields=Id,Title,UrlName,RecordTypeId,KnowledgeArticleId,Summary,Internal_Information__c`,
+      `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${existingId}?fields=Id,Title,UrlName,RecordTypeId,KnowledgeArticleId,PublishStatus,Summary,Internal_Information__c`,
       sid
     );
   } catch (e) {
     return { success: false, error: `Could not fetch existing article: ${e?.message}` };
   }
 
-  const suffix = randomLetters(8);
-  const draftUrlName = slugify(`${source.UrlName || source.Title || 'draft'}-update-${suffix}`);
-
-  const record = {
-    Title: payload.title || source.Title,
-    UrlName: draftUrlName,
-    Summary: (payload.summary || source.Summary || '').slice(0, 1000),
-    RecordTypeId: source.RecordTypeId || KNOWLEDGE_ARTICLE_RT_ID,
-    Language: 'en_US'
-  };
-
-  if (source.KnowledgeArticleId) {
-    record.KnowledgeArticleId = source.KnowledgeArticleId;
+  let masterArticleId;
+  try {
+    masterArticleId = sanitizeId(source.KnowledgeArticleId);
+  } catch {
+    return { success: false, error: 'Could not determine master article ID from the existing record.' };
   }
 
-  record['Description__c'] = sectionsToHtml(
-    (payload.sections || []).filter(s => /description|problem|symptom|context|overview/i.test(s.heading))
-  ) || sectionsToHtml(payload.sections?.slice(0, 1) || []);
+  const updates = buildArticleFields(payload, source);
 
-  record['Resolution__c'] = sectionsToHtml(
-    (payload.sections || []).filter(s => /resolution|solution|fix|steps|workaround/i.test(s.heading))
-  ) || sectionsToHtml((payload.sections || []).slice(1));
+  let ptWarning = null;
+  if (payload.taxonomyName || payload.taxonomyId) {
+    const ptResult = await resolveProductAndTopic(apiBase, sid, {
+      taxonomyName: payload.taxonomyName,
+      taxonomyId: payload.taxonomyId
+    });
+    if (ptResult.ok) updates[ptResult.fieldName] = ptResult.idToWrite;
+    else ptWarning = `Product & Topic not applied (${ptResult.reason}).`;
+  }
+
+  // If the source is already a draft, patch it in place
+  if (source.PublishStatus === 'Draft') {
+    try {
+      await sfPatch(
+        `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${existingId}`,
+        sid,
+        updates
+      );
+      return {
+        success: true,
+        id: existingId,
+        url: articleUrl(existingId),
+        masterArticleId,
+        action: 'patched-draft',
+        warning: ptWarning
+      };
+    } catch (e) {
+      return { success: false, error: e?.message || 'Draft update failed.' };
+    }
+  }
+
+  // Source is published — create a new draft version.
+  // POST goes to the masterVersions COLLECTION (no ID in path); the article to
+  // branch from is named by KnowledgeArticleId (kA0…) in the body. POSTing to
+  // .../masterVersions/{id} is rejected with METHOD_NOT_ALLOWED.
+  let newDraftId;
+  try {
+    const res = await sfPost(
+      `${apiBase}/services/data/${SF_API_VERSION}/knowledgeManagement/articleVersions/masterVersions`,
+      sid,
+      { articleId: masterArticleId }
+    );
+    newDraftId = res?.id || res?.Id;
+    if (!newDraftId) return { success: false, error: 'No draft ID returned from new-version creation.' };
+  } catch (e) {
+    return { success: false, error: `Could not create new draft version: ${e?.message}` };
+  }
+
+  // Patch the newly created draft with the updated content
+  try {
+    await sfPatch(
+      `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${newDraftId}`,
+      sid,
+      updates
+    );
+    return {
+      success: true,
+      id: newDraftId,
+      url: articleUrl(newDraftId),
+      masterArticleId,
+      action: 'new-draft-version',
+      warning: ptWarning
+    };
+  } catch (e) {
+    return { success: false, error: `Draft version created (${newDraftId}) but content update failed: ${e?.message}` };
+  }
+}
+
+function buildArticleFields(payload, source) {
+  const record = {
+    Title: payload.title || source.Title,
+    Summary: (payload.summary || source.Summary || '').slice(0, 1000)
+  };
+
+  const descriptionSections = (payload.sections || []).filter(s =>
+    /description|problem|symptom|context|overview/i.test(s.heading)
+  );
+  const resolutionSections = (payload.sections || []).filter(s =>
+    /resolution|solution|fix|steps|workaround/i.test(s.heading)
+  );
+  const otherSections = (payload.sections || []).filter(s =>
+    !descriptionSections.includes(s) && !resolutionSections.includes(s)
+  );
+
+  const descHtml = sectionsToHtml(descriptionSections) || sectionsToHtml(payload.sections?.slice(0, 1) || []);
+  const resHtml = sectionsToHtml(resolutionSections) || sectionsToHtml(otherSections);
+
+  // Only write body fields when we actually have content. Writing '' would blank
+  // the existing Description/Resolution on a title- or summary-only edit (data loss).
+  if (descHtml) record['Description__c'] = descHtml;
+  if (resHtml) record['Resolution__c'] = resHtml;
 
   const stamp = buildClaudeGenStamp({ caseNumber: payload.caseNumber });
   const existingInfo = source.Internal_Information__c || '';
@@ -210,25 +288,5 @@ export async function publishUpdateDraft(payload) {
     ? `${existingInfo}\n<hr/>\n${stamp}`
     : stamp;
 
-  if (payload.taxonomyName || payload.taxonomyId) {
-    const ptResult = await resolveProductAndTopic(apiBase, sid, {
-      taxonomyName: payload.taxonomyName,
-      taxonomyId: payload.taxonomyId
-    });
-    if (ptResult.ok) record[ptResult.fieldName] = ptResult.idToWrite;
-  }
-
-  try {
-    const res = await sfPost(`${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav`, sid, record);
-    const articleId = res?.id || res?.Id;
-    if (!articleId) return { success: false, error: 'No ID returned.' };
-    return {
-      success: true,
-      id: articleId,
-      url: articleUrl(articleId),
-      masterArticleId: source.KnowledgeArticleId || null
-    };
-  } catch (e) {
-    return { success: false, error: e?.message || 'Draft creation failed.' };
-  }
+  return record;
 }
