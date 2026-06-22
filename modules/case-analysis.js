@@ -931,6 +931,20 @@ function renderProductDocGapCard(prodDocGap) {
         h('span', { class: `pill pill--${prodDocGap.recommendation === 'DOCS_SUFFICIENT' ? 'success' : prodDocGap.recommendation === 'DOCS_NEED_UPDATE' ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, recLabel)
       ),
       h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0' } }, prodDocGap.assessment || ''),
+      (prodDocGap.targetDoc || prodDocGap.suggestedContent) ? h('div', { style: { marginTop: '8px', padding: '8px 10px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', border: '1px solid var(--border)' } },
+        prodDocGap.targetDoc ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: prodDocGap.suggestedContent ? '6px' : '0', flexWrap: 'wrap' } },
+          h('span', { style: { fontSize: '10px', fontWeight: '600', color: 'var(--text-muted)' } }, 'Doc to update:'),
+          h('a', {
+            href: prodDocGap.targetDoc.helpUrl || prodDocGap.targetDoc.url,
+            target: '_blank', rel: 'noopener',
+            style: { fontSize: '11px', color: 'var(--primary)', textDecoration: 'none', fontWeight: '500' }
+          }, `${prodDocGap.targetDoc.title}${prodDocGap.targetDoc.articleNumber ? ` (#${prodDocGap.targetDoc.articleNumber})` : ''} ↗`)
+        ) : null,
+        prodDocGap.suggestedContent ? h('div', null,
+          h('div', { style: { fontSize: '10px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '2px' } }, prodDocGap.recommendation === 'DOCS_MISSING' ? 'Suggested new content:' : 'Suggested addition:'),
+          h('div', { style: { fontSize: '11px', lineHeight: '1.5', color: 'var(--text-primary)' } }, prodDocGap.suggestedContent)
+        ) : null
+      ) : null,
       prodDocGap.owner ? h('div', { style: { marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '8px' } },
         h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)' } }, 'Recommended Owner:'),
         h('span', { class: `pill pill--${ownerColors[prodDocGap.owner] || 'neutral'}`, style: { fontSize: '10px' } }, ownerLabels[prodDocGap.owner] || prodDocGap.owner),

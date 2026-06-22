@@ -24,6 +24,14 @@ export const DEDUP_CONCURRENCY = 5;
 export const SCORE_HIGH_THRESHOLD = 80;
 export const SCORE_MID_THRESHOLD = 60;
 
+// "Good enough" gate: AGF quality at/above this means an article is already
+// well-structured enough that a rewrite/update is not worth the effort. Set to 70
+// on the basis that genuine AI rewrites now reach the high 80s/90s (~10-20% headroom).
+export const SCORE_GOOD_ENOUGH_THRESHOLD = 70;
+// Case↔article relevance at/above this means the article actually addresses the case
+// (not just the same product area). Both gates must pass to skip rework.
+export const RELEVANCE_COVERAGE_THRESHOLD = 65;
+
 export const PT_HIGH_VOLUME_CONVS = 200;
 export const PT_MID_VOLUME_CONVS = 100;
 export const PT_LOW_COVERAGE_ARTICLES = 3;

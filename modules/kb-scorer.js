@@ -4,7 +4,7 @@ import { detectSession } from '../shared/auth.js';
 import { sfGet, sfQueryAll, mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
+import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
 
 let _container = null;
@@ -398,7 +398,9 @@ function render() {
             ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '14px', padding: '2px 6px' }, title: 'View score details', onClick: () => showScoreDetail(a, scoreData) }, '👁')
             : null,
           h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, scoreData?.overall != null ? 'Rescore' : 'Score'),
-          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
+          (scoreData?.overall != null && scoreData.overall >= SCORE_GOOD_ENOUGH_THRESHOLD)
+            ? h('button', { class: 'btn btn--ghost btn--sm', disabled: true, title: `Already at AGF quality ${scoreData.overall} (≥${SCORE_GOOD_ENOUGH_THRESHOLD}) — no improvement needed` }, 'Rewrite')
+            : h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
         )
       )
     ));
@@ -766,9 +768,60 @@ async function scoreOne(article) {
 
 let _rewriteCache = {};
 
-async function rewriteArticle(article) {
+// Fetch the article body and merge it onto the meta record so scoreArticle has the
+// full content to score (the table rows only carry metadata).
+async function enrichForScore(article, session) {
+  const bodyMap = await fetchArticleBodies([article.id], session);
+  return { ...article, ...(bodyMap.get(article.id) || {}) };
+}
+
+function showNoImprovementNeeded(article, score) {
+  let close;
+  const body = h('div', null,
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' } },
+      h('div', { style: { fontSize: '28px', fontWeight: '700', color: 'var(--success)' } }, String(score)),
+      h('div', null,
+        h('div', { style: { fontSize: '13px', fontWeight: '600' } }, 'No improvement needed'),
+        h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, `#${article.articleNumber} — ${article.title}`)
+      )
+    ),
+    h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', marginBottom: '16px' } },
+      `This article already scores ${score}, at or above the good-enough threshold of ${SCORE_GOOD_ENOUGH_THRESHOLD} for Agentforce quality. A rewrite is unlikely to add enough value to justify the effort. You can rewrite anyway if you have a specific reason.`),
+    h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
+      h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); rewriteArticle(article, true); } }, 'Rewrite anyway'),
+      h('button', { class: 'btn btn--primary btn--sm', onClick: () => close() }, 'OK')
+    )
+  );
+  ({ close } = modal('Already High Quality', body));
+}
+
+async function rewriteArticle(article, forceAfterGate = false) {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); return; }
+
+  // Score-first gate: if the article hasn't been scored yet, score it before spending a
+  // rewrite. If it's already at/above the good-enough threshold, a rewrite is a waste —
+  // tell the user and let them override. `forceAfterGate` skips this on explicit override.
+  if (!forceAfterGate && !_rewriteCache[article.id]) {
+    const existing = getState('kb.scores')?.[article.id];
+    let score = existing?.overall;
+    if (score == null) {
+      toast('Scoring article before rewrite…', 'info');
+      try {
+        const result = await scoreArticle(await enrichForScore(article, session));
+        if (result.overall != null) {
+          const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
+          setState('kb.scores', scores);
+          await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+          score = result.overall;
+        }
+      } catch { /* fall through to rewrite if scoring fails */ }
+    }
+    if (score != null && score >= SCORE_GOOD_ENOUGH_THRESHOLD) {
+      showNoImprovementNeeded(article, score);
+      return;
+    }
+  }
 
   const cached = _rewriteCache[article.id];
 
@@ -926,6 +979,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
+      temperature: 0.2,
       onDelta: (chunk, full) => {
         fullText = full;
         if (throttle) return;

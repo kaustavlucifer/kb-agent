@@ -281,9 +281,9 @@ body {
   outline-offset: 2px;
 }
 
-.btn--primary { background: var(--primary); color: white; }
-.btn--primary:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 2px 4px rgba(1, 118, 211, 0.25); }
-.btn--primary:active { transform: translateY(0); box-shadow: none; }
+.btn--primary { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 140%); color: white; }
+.btn--primary:hover { filter: brightness(1.06); transform: translateY(-1px); box-shadow: 0 3px 8px rgba(1, 118, 211, 0.28); }
+.btn--primary:active { transform: translateY(0); box-shadow: none; filter: brightness(0.98); }
 .btn--secondary { background: var(--surface); color: var(--primary); border: 1px solid var(--primary); }
 .btn--secondary:hover { background: var(--primary-soft); }
 .btn--ghost { background: none; color: var(--text-secondary); }
@@ -328,9 +328,11 @@ body {
 
 .card + .card { margin-top: var(--space-lg); }
 
+.card--interactive { cursor: pointer; }
 .card--interactive:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+  transform: translateY(-2px);
+  border-color: var(--primary-soft);
 }
 
 .card--interactive:active {
@@ -571,12 +573,12 @@ body {
   border-radius: 100px;
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
-  transition: transform var(--transition-fast), filter var(--transition-fast);
+  transition: box-shadow var(--transition-fast), filter var(--transition-fast);
 }
 
 .pill:hover {
-  transform: scale(1.05);
-  filter: brightness(0.95);
+  filter: brightness(0.96) saturate(1.1);
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
 }
 
 .pill--success { background: var(--success-soft); color: var(--success); }

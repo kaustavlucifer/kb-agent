@@ -64,7 +64,7 @@ CONTEXT — HOW AGENTFORCE WORKS:
 Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
 ${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
 
-SCORING: Be STRICT. Most articles score 55-75. Score 90+ should be genuinely rare.
+SCORING: Be ACCURATE and evidence-based, not artificially harsh. Score each criterion on its own merits against the sub-rules below — award full points when the sub-rules are genuinely met, and deduct only for concrete, identifiable problems (cite them in "issues"). A well-structured, complete, product-specific article SHOULD score 90+; a typical legacy article with weak headers/title lands in the 60s-70s; only genuinely poor articles score below 55. Do not deflate a strong article toward an "average" just because high scores feel rare.
 Every criterion MUST include "passed" (what you verified passes) and "issues" (specific problems found).
 
 CRITERIA AND SUB-RULES:
@@ -137,6 +137,34 @@ export function parseScoreResponse(text, dynamicMaxes) {
   });
   const overall = Math.min(100, criteria.reduce((s, c) => s + c.score, 0));
   return { overall, criteria, error: null };
+}
+
+// Convert a generated/rewritten draft (sections-based) into the article shape the
+// scorer understands. Section bodies are wrapped in <h2> + <p> so the header,
+// scannability, and structure checks see the same HTML the published article will
+// have. This routes generated drafts through the SAME dynamic-max scorer used for
+// existing articles — so a clean text draft can legitimately redistribute the
+// media/code/table points into content and reach 90+.
+export function draftToScorable(draft) {
+  const sections = draft.sections || [];
+  const descSec = sections.find(s => /description/i.test(s.heading)) || sections[0];
+  const resSec = sections.find(s => /resolution/i.test(s.heading)) || sections[1];
+  const toHtml = (heading, body) => {
+    if (!body) return '';
+    const paras = String(body).split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+    return `<h2>${heading}</h2>` + paras.map(p => `<p>${p}</p>`).join('');
+  };
+  return {
+    title: draft.title || draft.articleTitle || '',
+    summary: draft.summary || '',
+    description: toHtml('Description', descSec?.body || ''),
+    resolution: toHtml('Resolution', resSec?.body || ''),
+    steps: '',
+    topicName: draft.topicName || '',
+    containsImage: false,
+    containsVideo: false,
+    validationStatus: draft.validationStatus || ''
+  };
 }
 
 export async function scoreArticle(article) {

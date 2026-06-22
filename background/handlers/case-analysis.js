@@ -1,12 +1,13 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl } from '../../shared/config.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
+import { scoreArticle as sharedScoreArticle, draftToScorable } from '../../shared/scoring.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
-import { GUIDE_GENERATION, GUIDE_SCORING, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
+import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];
@@ -196,7 +197,8 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
           topArticles = scored.map(s => ({
             ...candidates[s.index],
             _relevanceScore: s.score,
-            _relevanceReason: s.reason
+            _relevanceReason: s.reason,
+            _relevanceFromAI: true
           }));
           break;
         }
@@ -218,6 +220,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   const scoredArticles = topArticles.map(a => ({
     id: a.Id, title: a.Title, articleNumber: a.ArticleNumber,
     score: a._relevanceScore != null ? a._relevanceScore : null,
+    relevanceFromAI: a._relevanceFromAI === true,
     reason: a._relevanceReason || '',
     topicName: a.topicName || a.Product_And_Topic__r?.Name || '',
     publishStatus: a.publishStatus || a.PublishStatus || 'Online',
@@ -229,12 +232,44 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
-  send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
+  send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
+  // Score the AGF quality of the top relevant articles BEFORE deciding strategy. This
+  // feeds the "good enough" coverage gate (relevance AND quality) and is shown in the UI.
   const kbScoredArticles = [...scoredArticles];
+  await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal);
+  send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
-  const decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
+  // Coverage gate: if an article is BOTH relevant (≥RELEVANCE_COVERAGE_THRESHOLD) AND
+  // already well-structured (quality ≥SCORE_GOOD_ENOUGH_THRESHOLD), existing coverage is
+  // good enough — reworking it is a waste. Short-circuit to NO_ACTION.
+  // Gate ONLY on AI-derived relevance: the SOSL-rank fallback fabricates scores (top
+  // article gets 70), which would clear the relevance threshold on a number we never
+  // actually computed and produce a false NO_ACTION.
+  const wellCovered = kbScoredArticles.filter(a =>
+    a.relevanceFromAI &&
+    (a.score != null && a.score >= RELEVANCE_COVERAGE_THRESHOLD) &&
+    (a.kbScore != null && a.kbScore >= SCORE_GOOD_ENOUGH_THRESHOLD)
+  );
+
+  send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
+
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+
+  let decision;
+  if (wellCovered.length) {
+    const best = wellCovered.sort((a, b) => (b.score + b.kbScore) - (a.score + a.kbScore))[0];
+    const coveringIdx = topArticles.findIndex(t => t.Id === best.id);
+    decision = {
+      action: 'NO_ACTION',
+      confidence: 'HIGH',
+      reason: `Existing article #${best.articleNumber} already covers this case (relevance ${best.score}, AGF quality ${best.kbScore}). No rework needed.`,
+      coveringArticles: coveringIdx >= 0 ? [coveringIdx] : []
+    };
+  } else {
+    decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
+  }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
@@ -283,10 +318,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 
   if (!stopped) {
-    await Promise.all([
-      autoScoreGeneratedArticles(structured, send, signal).catch(() => {}),
-      batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal).catch(() => {})
-    ]);
+    await autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
   }
   clearInterval(keepalive);
 }
@@ -465,7 +497,8 @@ async function fetchCandidateBodies(apiBase, sid, candidates) {
 
 async function assessProductDocGap(caseRecord, caseAbstract, productDocs, signal) {
   if (!productDocs.length) return null;
-  const docsText = productDocs.slice(0, 5).map((d, i) => `${i+1}. "${d.title}"${d._relevanceScore ? ` (relevance: ${d._relevanceScore})` : ''} — ${(d.summary || '').slice(0, 300)}`).join('\n');
+  const topDocs = productDocs.slice(0, 5);
+  const docsText = topDocs.map((d, i) => `${i}. "${d.title}"${d._relevanceScore ? ` (relevance: ${d._relevanceScore})` : ''} — ${(d.summary || '').slice(0, 300)}`).join('\n');
   try {
     const resp = await callClaudeFast({
       system: `You assess whether existing product documentation adequately covers a support case scenario.
@@ -481,13 +514,24 @@ Also determine documentation OWNERSHIP — who should create/update the document
 - PRODUCT_DOCUMENTATION: UI behavior, feature limitations, setup guides, architecture explanations — owned by CX/Product Documentation team
 - BOTH: Needs both a support article (for resolution) AND a product doc update (for missing feature docs)
 
-Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs], "owner": "SUPPORT_KB"|"PRODUCT_DOCUMENTATION"|"BOTH", "ownerReason": "1 sentence why"}`,
-      messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found:\n${docsText}` }],
-      maxTokens: 350,
+When recommendation is DOCS_NEED_UPDATE: set "targetDocIndex" to the index of the SINGLE existing doc that most likely should be updated (from the list, or null if none fits), and "suggestedContent" to a concrete 1-3 sentence description of what specific content/section should be added or corrected in that doc. When DOCS_MISSING: set targetDocIndex to null and use "suggestedContent" to describe what NEW document or section should be created. When DOCS_SUFFICIENT: targetDocIndex null and suggestedContent "".
+
+Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendation": "DOCS_SUFFICIENT"|"DOCS_NEED_UPDATE"|"DOCS_MISSING", "relatedDocs": [indices of relevant docs], "targetDocIndex": <index|null>, "suggestedContent": "...", "owner": "SUPPORT_KB"|"PRODUCT_DOCUMENTATION"|"BOTH", "ownerReason": "1 sentence why"}`,
+      messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 600)}\n\nProduct Documentation found (index. title):\n${docsText}` }],
+      maxTokens: 500,
       temperature: 0,
       signal
     });
-    return extractJson(extractText(resp)) || null;
+    const parsed = extractJson(extractText(resp));
+    if (!parsed) return null;
+    // Attach the resolved target doc (title + help URL) so the UI can render a direct link
+    // without re-deriving it. targetDocIndex refers into the topDocs list shown above.
+    const ti = parsed.targetDocIndex;
+    if (ti != null && ti >= 0 && ti < topDocs.length) {
+      const td = topDocs[ti];
+      parsed.targetDoc = { title: td.title, articleNumber: td.articleNumber, url: td.url, helpUrl: td.helpUrl || '' };
+    }
+    return parsed;
   } catch { return null; }
 }
 
@@ -780,8 +824,11 @@ Then derive action:
 
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
     messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
-    maxTokens: 8000,
-    thinking: { type: 'enabled', budget_tokens: 5000 },
+    // Pure JSON output (no thinking tokens). The gaps array carries up to 6 dimensions
+    // each with finding + suggestedEdit text; 3000 risked truncating that mid-array,
+    // which silently falls back to a wrong UPDATE_EXISTING/LOW decision below.
+    maxTokens: 4500,
+    temperature: 0,
     signal
   });
   const parsed = extractJson(extractText(resp));
@@ -856,52 +903,34 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
-async function batchScoreExistingArticles(scoredArticles, candidateBodies, candidates, kbScoredArticles, send, signal) {
+// Score the AGF quality of existing relevant articles using the SAME dynamic-max
+// scorer used everywhere else (shared/scoring.js), so the number here is directly
+// comparable to generated-draft scores and to the KB-tab Score action. Each article's
+// kbScore + kbCriteria are written back into kbScoredArticles in place.
+async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal) {
   if (!scoredArticles.length) return;
-  const articlesForScoring = scoredArticles.map((sa, idx) => {
+  await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
+    if (signal?.aborted) return;
     const body = candidateBodies.get(sa.id) || {};
-    const candidate = candidates.find(c => c.Id === sa.id) || {};
-    return {
-      idx,
-      title: sa.title || body.title || candidate.Title || '',
-      summary: body.summary || candidate.Summary || '',
-      description: stripHtml(body.description || '').slice(0, 2000),
-      resolution: stripHtml(body.resolution || '').slice(0, 2000),
-      articleNumber: sa.articleNumber || '',
-      topicName: body.topicName || candidate.topicName || ''
+    const enriched = {
+      title: sa.title || body.title || '',
+      summary: body.summary || '',
+      description: body.description || '',
+      resolution: body.resolution || '',
+      steps: body.steps || '',
+      additionalResources: body.additionalResources || '',
+      topicName: body.topicName || sa.topicName || '',
+      validationStatus: sa.validationStatus || '',
+      containsImage: false,
+      containsVideo: false
     };
-  });
-
-  const articlesText = articlesForScoring.map((a, i) =>
-    `[${i}] #${a.articleNumber} "${a.title}"\nSummary: ${(a.summary || '').slice(0, 200)}\nDescription: ${a.description.slice(0, 800)}\nResolution: ${a.resolution.slice(0, 800)}`
-  ).join('\n\n');
-
-  try {
-    const resp = await callClaudeFast({
-      system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
-
-${GUIDE_SCORING}
-
-Score EACH article 0-100 for overall KB quality. Be STRICT. Most articles score 55-75.
-Consider: title specificity, summary quality, header structure, content completeness, scannability, taxonomy context.
-
-Return JSON: {"scores": [{"index": 0, "overall": 72}, {"index": 1, "overall": 65}, ...]}
-Include ALL articles.`,
-      messages: [{ role: 'user', content: `Score these ${articlesForScoring.length} articles:\n\n${articlesText}` }],
-      maxTokens: 400,
-      temperature: 0,
-      signal
-    });
-    const parsed = extractJson(extractText(resp));
-    if (parsed?.scores?.length) {
-      for (const s of parsed.scores) {
-        if (s.index >= 0 && s.index < scoredArticles.length && s.overall != null) {
-          kbScoredArticles[s.index] = { ...scoredArticles[s.index], kbScore: Math.round(s.overall) };
-        }
+    try {
+      const result = await sharedScoreArticle(enriched);
+      if (result.overall != null) {
+        kbScoredArticles[idx] = { ...scoredArticles[idx], kbScore: result.overall, kbCriteria: result.criteria };
       }
-      send({ type: 'meta', topArticles: [...kbScoredArticles] });
-    }
-  } catch {}
+    } catch {}
+  });
 }
 
 async function autoScoreGeneratedArticles(structured, send, signal) {
@@ -924,37 +953,18 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
 
   send({ type: 'meta', scoringInProgress: draftsToScore.map(d => d.key) });
 
-  const articlesText = draftsToScore.map((d, i) => {
-    const allSections = d.article.sections || [];
-    const desc = allSections.find(s => /description/i.test(s.heading))?.body || allSections[0]?.body || '';
-    const res = allSections.find(s => /resolution/i.test(s.heading))?.body || allSections[1]?.body || '';
-    return `[${i}] "${d.article.title || d.article.articleTitle || ''}"\nSummary: ${(d.article.summary || '').slice(0, 200)}\nDescription: ${desc.slice(0, 1000)}\nResolution: ${res.slice(0, 1000)}`;
-  }).join('\n\n');
-
-  try {
-    const resp = await callClaudeFast({
-      system: `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce readiness.
-
-${GUIDE_SCORING}
-
-Score EACH article 0-100 for overall KB quality. Be STRICT. Most articles score 55-75. These are AI-generated drafts so they should score higher than average (70-90) if well-structured.
-Consider: title specificity, summary quality, header structure, content completeness, scannability, taxonomy context.
-
-Return JSON: {"scores": [{"index": 0, "overall": 82, "criteria": [{"id": "title", "score": 10, "max": 12}, {"id": "summary", "score": 8, "max": 10}, {"id": "headers", "score": 9, "max": 10}, {"id": "content", "score": 16, "max": 18}, {"id": "scannability", "score": 9, "max": 10}, {"id": "taxonomy", "score": 7, "max": 8}]}, ...]}
-Include ALL articles. Only include active criteria (skip media/code/tables if not applicable).`,
-      messages: [{ role: 'user', content: `Score these ${draftsToScore.length} generated article drafts:\n\n${articlesText}` }],
-      maxTokens: 800,
-      temperature: 0,
-      signal
-    });
-    const parsed = extractJson(extractText(resp));
-    if (parsed?.scores?.length) {
-      for (const s of parsed.scores) {
-        if (s.index >= 0 && s.index < draftsToScore.length && s.overall != null) {
-          const d = draftsToScore[s.index];
-          send({ type: 'meta', draftScore: { key: d.key, score: { overall: Math.round(s.overall), criteria: s.criteria || [] } } });
-        }
+  // Score each draft through the SAME dynamic-max scorer used for existing articles
+  // (shared/scoring.js). For a clean text draft the media/code/table points are marked
+  // N/A and redistributed into content, so a well-structured draft can reach 90+ — the
+  // old ad-hoc 6-criterion prompt capped the maximum at ~68 points.
+  await mapWithConcurrency(draftsToScore, SCORE_CONCURRENCY, async (d) => {
+    if (signal?.aborted) return;
+    try {
+      const scorable = draftToScorable(d.article);
+      const result = await sharedScoreArticle(scorable);
+      if (result.overall != null) {
+        send({ type: 'meta', draftScore: { key: d.key, score: { overall: result.overall, criteria: result.criteria || [] } } });
       }
-    }
-  } catch {}
+    } catch {}
+  });
 }

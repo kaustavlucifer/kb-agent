@@ -301,6 +301,7 @@ Keep best content from both. Prefer most complete and recent steps.`;
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
+      temperature: 0.2,
       onDelta: (chunk, full) => {
         const el = document.getElementById('merge-stream');
         if (el) el.textContent = full;
