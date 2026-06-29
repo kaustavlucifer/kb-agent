@@ -205,8 +205,6 @@ async function detectDuplicates() {
       setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
     });
 
-    console.log('[KB-Agent] Dedup: found', allPairs.length, 'raw pairs from', workQueue.length, 'batches');
-
     const articleMap = new Map();
     articles.forEach(a => {
       articleMap.set(a.articleNumber, a);
@@ -224,14 +222,11 @@ async function detectDuplicates() {
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .slice(0, 30);
 
-    console.log('[KB-Agent] Dedup: enriched', enrichedPairs.length, 'pairs after filtering');
-
     setState('dedup.pairs', enrichedPairs);
     setState('dedup.running', null);
     await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
     toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
   } catch (e) {
-    console.error('[KB-Agent] Dedup detection failed:', e);
     toast('Detection failed: ' + e.message, 'error');
     setState('dedup.running', null);
   }

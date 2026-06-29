@@ -7,9 +7,7 @@ async function getToken() {
   return data.gatewayToken || null;
 }
 
-async function getModel(preferFast = false) {
-  const data = await localGet(['modelName']);
-  if (data.modelName) return data.modelName;
+function getModel(preferFast = false) {
   return preferFast ? FAST_MODEL : DEFAULT_MODEL;
 }
 
@@ -63,8 +61,6 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
-  // Capture the handler so we can remove it in finally — a reused external signal would
-  // otherwise accumulate one listener (bound to a dead controller) per call.
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
   try {
@@ -108,8 +104,6 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   if (temperature != null) body.temperature = temperature;
 
   const controller = new AbortController();
-  // Track whether *we* aborted due to stream stall vs. the caller aborting, so a stalled
-  // stream can surface a distinct error rather than masquerading as a user cancel.
   let idleAborted = false;
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
@@ -170,8 +164,6 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
       }
     }
   } catch (err) {
-    // If the read failed because the idle watchdog fired (not a caller abort), keep the
-    // text streamed so far rather than discarding it, and report a clear stall error.
     if (idleAborted) {
       const stallErr = new Error('Stream stalled (no data received within idle timeout)');
       stallErr.partialText = fullText;

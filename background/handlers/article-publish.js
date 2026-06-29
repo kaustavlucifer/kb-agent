@@ -1,9 +1,13 @@
 import { detectSession } from '../../shared/auth.js';
 import { sfGet, sfPost, sfPatch, sanitizeId, escapeSoql } from '../../shared/api.js';
 import { SF_API_VERSION, articleUrl } from '../../shared/config.js';
+import { markdownToHtml, escapeHtml } from '../../shared/markdown.js';
 
 const KNOWLEDGE_ARTICLE_RT_ID = '012Hx00000002oEIAQ';
 const CLAUDEGEN_MARKER = 'KBA-CLAUDEGEN';
+
+const TITLE_MAX = 255;
+const SUMMARY_MAX = 1000;
 
 function slugify(text) {
   return String(text || 'kb-draft')
@@ -20,10 +24,6 @@ function randomLetters(n) {
   return s;
 }
 
-function escapeHtml(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 function buildClaudeGenStamp({ caseNumber, model } = {}) {
   const ts = new Date().toISOString();
   const caseFragment = caseNumber ? ` · Case ${escapeHtml(String(caseNumber))}` : '';
@@ -36,35 +36,27 @@ function buildClaudeGenStamp({ caseNumber, model } = {}) {
 
 function sectionsToHtml(sections) {
   return (sections || []).map(s =>
-    `<h2>${escapeHtml(s.heading || 'Section')}</h2>\n${markdownToHtml(s.body || '')}`
+    `<h2>${escapeHtml(s.heading || 'Section')}</h2>\n${markdownToHtml(s.body || '', { headingBase: 3 })}`
   ).join('\n');
 }
 
-function markdownToHtml(text) {
-  const lines = String(text || '').split('\n');
-  const output = [];
-  let inList = null;
-  for (const line of lines) {
-    const isOl = /^\d+\.\s/.test(line);
-    const isUl = line.startsWith('- ');
-    if (isOl || isUl) {
-      const listType = isOl ? 'ol' : 'ul';
-      if (inList !== listType) {
-        if (inList) output.push(`</${inList}>`);
-        output.push(`<${listType}>`);
-        inList = listType;
-      }
-      const content = isOl ? line.replace(/^\d+\.\s/, '') : line.slice(2);
-      output.push(`<li>${escapeHtml(content)}</li>`);
-    } else {
-      if (inList) { output.push(`</${inList}>`); inList = null; }
-      if (line.startsWith('## ')) output.push(`<h3>${escapeHtml(line.slice(3))}</h3>`);
-      else if (line.startsWith('# ')) output.push(`<h2>${escapeHtml(line.slice(2))}</h2>`);
-      else if (line.trim()) output.push(`<p>${escapeHtml(line)}</p>`);
-    }
-  }
-  if (inList) output.push(`</${inList}>`);
-  return output.join('\n');
+const DESC_HEADING_RE = /description|problem|symptom|context|overview/i;
+const RES_HEADING_RE = /resolution|solution|fix|steps|workaround/i;
+
+function buildBodyFields(sections) {
+  const all = sections || [];
+  const descriptionSections = all.filter(s => DESC_HEADING_RE.test(s.heading || ''));
+  const resolutionSections = all.filter(s => RES_HEADING_RE.test(s.heading || ''));
+  const otherSections = all.filter(s => !descriptionSections.includes(s) && !resolutionSections.includes(s));
+
+  const descHtml = descriptionSections.length
+    ? sectionsToHtml(descriptionSections)
+    : sectionsToHtml(all.slice(0, 1));
+  const resHtml = resolutionSections.length
+    ? sectionsToHtml(resolutionSections)
+    : sectionsToHtml(otherSections);
+
+  return { descHtml, resHtml };
 }
 
 const _ptLookupCache = new Map();
@@ -112,30 +104,16 @@ export async function publishNewArticle(payload) {
   const { apiBase, sid } = session;
 
   const record = {
-    Title: payload.title || 'Untitled',
+    Title: (payload.title || 'Untitled').slice(0, TITLE_MAX),
     UrlName: slugify(payload.title) + '-' + randomLetters(6),
-    Summary: (payload.summary || '').slice(0, 1000),
+    Summary: (payload.summary || '').slice(0, SUMMARY_MAX),
     RecordTypeId: KNOWLEDGE_ARTICLE_RT_ID,
     Language: 'en_US'
   };
 
-  const descriptionSections = (payload.sections || []).filter(s =>
-    /description|problem|symptom|context|overview/i.test(s.heading)
-  );
-  const resolutionSections = (payload.sections || []).filter(s =>
-    /resolution|solution|fix|steps|workaround/i.test(s.heading)
-  );
-  const otherSections = (payload.sections || []).filter(s =>
-    !descriptionSections.includes(s) && !resolutionSections.includes(s)
-  );
-
-  record['Description__c'] = descriptionSections.length
-    ? sectionsToHtml(descriptionSections)
-    : sectionsToHtml(payload.sections?.slice(0, 1) || []);
-
-  record['Resolution__c'] = resolutionSections.length
-    ? sectionsToHtml(resolutionSections)
-    : sectionsToHtml(otherSections);
+  const { descHtml, resHtml } = buildBodyFields(payload.sections);
+  record['Description__c'] = descHtml;
+  record['Resolution__c'] = resHtml;
 
   const stamp = buildClaudeGenStamp({ caseNumber: payload.caseNumber });
   record['Internal_Information__c'] = stamp;
@@ -190,95 +168,102 @@ export async function publishUpdateDraft(payload) {
 
   const updates = buildArticleFields(payload, source);
 
-  let ptWarning = null;
-  if (payload.taxonomyName || payload.taxonomyId) {
-    const ptResult = await resolveProductAndTopic(apiBase, sid, {
-      taxonomyName: payload.taxonomyName,
-      taxonomyId: payload.taxonomyId
-    });
-    if (ptResult.ok) updates[ptResult.fieldName] = ptResult.idToWrite;
-    else ptWarning = `Product & Topic not applied (${ptResult.reason}).`;
-  }
-
-  // If the source is already a draft, patch it in place
   if (source.PublishStatus === 'Draft') {
-    try {
-      await sfPatch(
-        `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${existingId}`,
-        sid,
-        updates
-      );
-      return {
-        success: true,
-        id: existingId,
-        url: articleUrl(existingId),
-        masterArticleId,
-        action: 'patched-draft',
-        warning: ptWarning
-      };
-    } catch (e) {
-      return { success: false, error: e?.message || 'Draft update failed.' };
-    }
-  }
-
-  // Source is published — create a new draft version.
-  // POST goes to the masterVersions COLLECTION (no ID in path); the article to
-  // branch from is named by KnowledgeArticleId (kA0…) in the body. POSTing to
-  // .../masterVersions/{id} is rejected with METHOD_NOT_ALLOWED.
-  let newDraftId;
-  try {
-    const res = await sfPost(
-      `${apiBase}/services/data/${SF_API_VERSION}/knowledgeManagement/articleVersions/masterVersions`,
-      sid,
-      { articleId: masterArticleId }
-    );
-    newDraftId = res?.id || res?.Id;
-    if (!newDraftId) return { success: false, error: 'No draft ID returned from new-version creation.' };
-  } catch (e) {
-    return { success: false, error: `Could not create new draft version: ${e?.message}` };
-  }
-
-  // Patch the newly created draft with the updated content
-  try {
-    await sfPatch(
-      `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${newDraftId}`,
-      sid,
-      updates
-    );
+    const r = await patchArticleSavingContent(apiBase, sid, existingId, updates);
+    if (!r.ok) return { success: false, error: r.error || 'Draft update failed.' };
     return {
       success: true,
-      id: newDraftId,
-      url: articleUrl(newDraftId),
+      id: existingId,
+      url: articleUrl(existingId),
       masterArticleId,
-      action: 'new-draft-version',
-      warning: ptWarning
+      action: 'patched-draft',
+      warning: r.ptCleared ? STALE_PT_WARNING : null
     };
+  }
+
+  let newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+  let reusedExistingDraft = !!newDraftId;
+
+  if (!newDraftId) {
+    try {
+      const res = await sfPost(
+        `${apiBase}/services/data/${SF_API_VERSION}/knowledgeManagement/articleVersions/masterVersions`,
+        sid,
+        { articleId: masterArticleId }
+      );
+      newDraftId = res?.id || res?.Id;
+    } catch (e) {
+      newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+      if (!newDraftId) {
+        return { success: false, error: `Could not create new draft version: ${e?.message}` };
+      }
+      reusedExistingDraft = true;
+    }
+  }
+  if (!newDraftId) {
+    newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+    if (newDraftId) reusedExistingDraft = true;
+  }
+  if (!newDraftId) return { success: false, error: 'No draft ID returned from new-version creation.' };
+
+  const r = await patchArticleSavingContent(apiBase, sid, newDraftId, updates);
+  if (!r.ok) {
+    return { success: false, error: `Draft version (${newDraftId}) ready but content update failed: ${r.error}` };
+  }
+  return {
+    success: true,
+    id: newDraftId,
+    url: articleUrl(newDraftId),
+    masterArticleId,
+    action: reusedExistingDraft ? 'updated-existing-draft' : 'new-draft-version',
+    warning: [
+      reusedExistingDraft ? 'A draft already existed for this article; updated it instead of creating a new one.' : null,
+      r.ptCleared ? STALE_PT_WARNING : null
+    ].filter(Boolean).join(' ') || null
+  };
+}
+
+const STALE_PT_WARNING = 'The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the rewrite could save. Re-tag the article's Product & Topic in Salesforce.';
+
+async function patchArticleSavingContent(apiBase, sid, recordId, updates) {
+  const url = `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${recordId}`;
+  try {
+    await sfPatch(url, sid, updates);
+    return { ok: true, ptCleared: false };
   } catch (e) {
-    return { success: false, error: `Draft version created (${newDraftId}) but content update failed: ${e?.message}` };
+    const msg = e?.message || '';
+    const isStalePtFilter = /FIELD_FILTER_VALIDATION_EXCEPTION/i.test(msg) && /Product_And_Topic__c/i.test(msg);
+    if (!isStalePtFilter) return { ok: false, error: msg || 'Update failed.' };
+
+    try {
+      await sfPatch(url, sid, { ...updates, Product_And_Topic__c: null });
+      return { ok: true, ptCleared: true };
+    } catch (e2) {
+      return { ok: false, error: e2?.message || 'Update failed after clearing Product & Topic.' };
+    }
+  }
+}
+
+async function findExistingDraftId(apiBase, sid, masterArticleId) {
+  try {
+    const safeMaster = escapeSoql(masterArticleId);
+    const q = `SELECT Id FROM Knowledge__kav WHERE KnowledgeArticleId = '${safeMaster}' AND PublishStatus = 'Draft' LIMIT 1`;
+    const data = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`, sid);
+    const row = (data?.records || [])[0];
+    return row?.Id ? sanitizeId(row.Id) : null;
+  } catch {
+    return null;
   }
 }
 
 function buildArticleFields(payload, source) {
   const record = {
-    Title: payload.title || source.Title,
-    Summary: (payload.summary || source.Summary || '').slice(0, 1000)
+    Title: (payload.title || source.Title || '').slice(0, TITLE_MAX),
+    Summary: (payload.summary || source.Summary || '').slice(0, SUMMARY_MAX)
   };
 
-  const descriptionSections = (payload.sections || []).filter(s =>
-    /description|problem|symptom|context|overview/i.test(s.heading)
-  );
-  const resolutionSections = (payload.sections || []).filter(s =>
-    /resolution|solution|fix|steps|workaround/i.test(s.heading)
-  );
-  const otherSections = (payload.sections || []).filter(s =>
-    !descriptionSections.includes(s) && !resolutionSections.includes(s)
-  );
+  const { descHtml, resHtml } = buildBodyFields(payload.sections);
 
-  const descHtml = sectionsToHtml(descriptionSections) || sectionsToHtml(payload.sections?.slice(0, 1) || []);
-  const resHtml = sectionsToHtml(resolutionSections) || sectionsToHtml(otherSections);
-
-  // Only write body fields when we actually have content. Writing '' would blank
-  // the existing Description/Resolution on a title- or summary-only edit (data loss).
   if (descHtml) record['Description__c'] = descHtml;
   if (resHtml) record['Resolution__c'] = resHtml;
 

@@ -1,7 +1,7 @@
 import { h, chip, toast } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS } from '../shared/config.js';
+import { STORAGE_KEYS, applySettings } from '../shared/config.js';
 
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
@@ -15,6 +15,11 @@ let _tabContent = null;
 let _tabGen = 0;
 
 async function init() {
+  try {
+    const s = await localGet([STORAGE_KEYS.SETTINGS]);
+    applySettings(s[STORAGE_KEYS.SETTINGS]);
+  } catch {}
+
   const hashTab = location.hash.replace('#', '');
   const validTab = TABS.find(t => t.id === hashTab);
   setState('app.activeTab', validTab ? hashTab : 'case-analysis');

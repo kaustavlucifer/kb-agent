@@ -139,12 +139,6 @@ export function parseScoreResponse(text, dynamicMaxes) {
   return { overall, criteria, error: null };
 }
 
-// Convert a generated/rewritten draft (sections-based) into the article shape the
-// scorer understands. Section bodies are wrapped in <h2> + <p> so the header,
-// scannability, and structure checks see the same HTML the published article will
-// have. This routes generated drafts through the SAME dynamic-max scorer used for
-// existing articles — so a clean text draft can legitimately redistribute the
-// media/code/table points into content and reach 90+.
 export function draftToScorable(draft) {
   const sections = draft.sections || [];
   const descSec = sections.find(s => /description/i.test(s.heading)) || sections[0];
@@ -184,13 +178,7 @@ const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
 export async function fetchArticleBodies(articleIds, session) {
   const bodyMap = new Map();
-  // Filter to valid SF IDs first. soqlIdList -> sanitizeId throws on a single bad ID,
-  // and because each query covers a whole batch that would silently drop ~50 articles'
-  // bodies (they'd then score as empty). Drop only the offending IDs instead.
   const validIds = articleIds.filter(id => SF_ID_RE.test(id));
-  if (validIds.length !== articleIds.length) {
-    console.warn(`[KB-Agent] fetchArticleBodies: skipped ${articleIds.length - validIds.length} invalid article ID(s).`);
-  }
   const batches = [];
   for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
   for (const batch of batches) {
@@ -202,9 +190,6 @@ export async function fetchArticleBodies(articleIds, session) {
         bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
       }
     } catch (e) {
-      // Best-effort: a failed batch leaves those articles without bodies (scored as empty).
-      // Surface the cause (e.g. session expiry) instead of hiding it.
-      console.warn(`[KB-Agent] fetchArticleBodies: batch of ${batch.length} failed: ${e.message}`);
     }
   }
   return bodyMap;

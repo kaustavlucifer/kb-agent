@@ -443,7 +443,6 @@ function renderStreaming() {
     }
   }
 
-  // Render in-progress streaming for articles being processed
   for (const [articleId, deltaText] of Object.entries(suggestionDeltas)) {
     if (!deltaText) continue;
     let progressCard = mainEl.querySelector(`#sug-progress-${articleId}`);
@@ -472,7 +471,6 @@ function renderStreaming() {
     }
   }
 
-  // Render draft streaming (for CREATE_NEW)
   if (streamText) {
     let draftEl = mainEl.querySelector('#stream-draft');
     if (!draftEl) {
@@ -494,7 +492,6 @@ function renderStreaming() {
     }
   }
 
-  // Show/hide loading indicator
   const hasActiveStreams = Object.keys(suggestionDeltas).length > 0 || streamText;
   let loadingEl = mainEl.querySelector('#stream-loading');
   if (hasActiveStreams && !loadingEl) {
@@ -724,7 +721,6 @@ function renderResult() {
   );
   main.appendChild(actionPill);
 
-  // AI Case Summary
   const caseSummary = getState('case.caseSummary');
   if (caseSummary) {
     const summaryContent = renderMarkdown(caseSummary);
@@ -966,44 +962,42 @@ async function showComparisonModal(rewrite) {
     const descSection = rewriteSections.find(s => /description/i.test(s.heading));
     const resSection = rewriteSections.find(s => /resolution/i.test(s.heading));
 
-    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '600px', overflow: 'auto' } },
+    const labelEl = (text) => h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, text);
+    const scrollBox = (child) => h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } }, child);
+    const htmlBox = (html) => {
+      const el = h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } });
+      el.innerHTML = html || '<span style="color:var(--text-muted)">(empty)</span>';
+      return el;
+    };
+    const mdOrEmpty = (text) => (text || '').trim() ? renderMarkdown(text) : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
+
+    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
       h('div', null,
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
         h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Title'),
+          labelEl('Title'),
           h('div', { style: { fontSize: '13px', fontWeight: '600' } }, original.title || '(no title)')
         ),
         h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Summary'),
-          h('div', { style: { fontSize: '12px', lineHeight: '1.5' } }, (original.summary || '(empty)').slice(0, 300))
+          labelEl('Summary'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, original.summary || '(empty)')
         ),
-        h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Description'),
-          h('div', { style: { fontSize: '12px', lineHeight: '1.5', maxHeight: '200px', overflow: 'auto' } }, (original.description || '(empty)').slice(0, 800))
-        ),
-        h('div', null,
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Resolution'),
-          h('div', { style: { fontSize: '12px', lineHeight: '1.5', maxHeight: '200px', overflow: 'auto' } }, (original.resolution || '(empty)').slice(0, 800))
-        )
+        h('div', { style: { marginBottom: '12px' } }, labelEl('Description'), htmlBox(original.descriptionHtml)),
+        h('div', { style: { marginBottom: '12px' } }, labelEl('Resolution'), htmlBox(original.resolutionHtml)),
+        original.stepsHtml ? h('div', null, labelEl('Steps'), htmlBox(original.stepsHtml)) : null
       ),
       h('div', null,
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
         h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Title'),
+          labelEl('Title'),
           h('div', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--primary)' } }, rewrite.title || '(no title)')
         ),
         h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Summary'),
-          h('div', { style: { fontSize: '12px', lineHeight: '1.5' } }, (rewrite.summary || '(empty)').slice(0, 300))
+          labelEl('Summary'),
+          h('div', { style: { fontSize: '12px', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, rewrite.summary || '(empty)')
         ),
-        h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Description'),
-          renderMarkdown((descSection?.body || '(empty)').slice(0, 800))
-        ),
-        h('div', null,
-          h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, 'Resolution'),
-          renderMarkdown((resSection?.body || '(empty)').slice(0, 800))
-        )
+        h('div', { style: { marginBottom: '12px' } }, labelEl('Description'), scrollBox(mdOrEmpty(descSection?.body))),
+        h('div', null, labelEl('Resolution'), scrollBox(mdOrEmpty(resSection?.body)))
       )
     );
 
@@ -1208,7 +1202,6 @@ function renderSidebarQuality(structured) {
   if (!isCollapsed) {
     const body = h('div', { style: { fontSize: '11px' } });
 
-    // Score bar
     const barOuter = h('div', { style: { width: '100%', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' } });
     barOuter.appendChild(h('div', { style: { width: `${readinessScore}%`, height: '100%', background: scoreColor, borderRadius: '3px', transition: 'width 0.3s' } }));
     body.appendChild(barOuter);
@@ -1572,8 +1565,6 @@ function refineRewrite(rewrite) {
         rewrite.title = newTitle || rewrite.title;
         rewrite.summary = newSummary || rewrite.summary;
         if (newSections.length) rewrite.sections = newSections;
-        // Invalidate the stale Agentforce-readiness score for this draft — the content
-        // just changed, so the old score no longer applies.
         const refKey = rewrite.articleId ? `rewrite-${rewrite.articleId}` : 'new-draft';
         const draftScores = { ...(getState('case.draftScores') || {}) };
         if (refKey in draftScores) {
@@ -1675,7 +1666,6 @@ async function triggerUpdateForArticle(article) {
   }
 
   toast('Generating rewrite (streaming)…', 'info');
-  // Use the streaming suggestion-delta pattern
   setState('case.view', 'streaming');
   setState('case.suggestionDeltas', { [article.id]: '' });
 
@@ -1902,13 +1892,11 @@ function startAnalysis(caseId, isRetry = false) {
         setState('case.view', 'result');
       } else if (_retryCount < MAX_AUTO_RETRIES) {
         _retryCount++;
-        console.warn(`[KB-Agent] Port disconnected at "${lastStep}" (${disconnectReason}). Auto-retrying (${_retryCount}/${MAX_AUTO_RETRIES})…`);
         toast(`Connection dropped at "${lastStep}". Retrying…`, 'info');
         setTimeout(() => {
           if (gen === _analysisGen) startAnalysis(caseId, true);
         }, 1500);
       } else {
-        console.error(`[KB-Agent] Port disconnected at "${lastStep}" after ${_retryCount} retry. Reason: ${disconnectReason}`);
         toast(`Analysis failed — disconnected at "${lastStep}" (${disconnectReason}). Try again.`, 'error');
         setState('case.view', 'idle');
       }

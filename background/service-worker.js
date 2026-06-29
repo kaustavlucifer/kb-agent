@@ -2,7 +2,7 @@ import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js'
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
-import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION } from '../shared/config.js';
+import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, applySettings } from '../shared/config.js';
 import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
@@ -12,17 +12,30 @@ import { handleDedup, handleMerge } from './handlers/dedup.js';
 import { publishNewArticle, publishUpdateDraft } from './handlers/article-publish.js';
 import { checkGusConnection } from './handlers/gus-enrichment.js';
 
+let _settingsReady = (async () => {
+  try {
+    const data = await localGet([STORAGE_KEYS.SETTINGS]);
+    applySettings(data[STORAGE_KEYS.SETTINGS]);
+  } catch {}
+})();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[STORAGE_KEYS.SETTINGS]) {
+    applySettings(changes[STORAGE_KEYS.SETTINGS].newValue);
+  }
+});
+
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  handleMessage(msg).then(sendResponse).catch(e => sendResponse({ error: e.message }));
+  _settingsReady.then(() => handleMessage(msg)).then(sendResponse).catch(e => sendResponse({ error: e.message }));
   return true;
 });
 
 chrome.runtime.onConnect.addListener((port) => {
-  handlePort(port);
+  _settingsReady.then(() => handlePort(port));
 });
 
 async function handleMessage(msg) {
@@ -125,7 +138,7 @@ async function fetchArticlePreview(articleId) {
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
   try {
-    const soql = `SELECT Id, Title, Summary, ArticleNumber, Description__c, Resolution__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
+    const soql = `SELECT Id, Title, Summary, ArticleNumber, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (!records.length) return { success: false, error: 'Article not found' };
     const r = records[0];
@@ -138,8 +151,10 @@ async function fetchArticlePreview(articleId) {
         articleNumber: r.ArticleNumber || '',
         descriptionHtml: r.Description__c || '',
         resolutionHtml: r.Resolution__c || '',
+        stepsHtml: r.Steps__c || '',
         description: stripHtml(r.Description__c || ''),
-        resolution: stripHtml(r.Resolution__c || '')
+        resolution: stripHtml(r.Resolution__c || ''),
+        steps: stripHtml(r.Steps__c || '')
       }
     };
   } catch (e) {
@@ -280,11 +295,9 @@ function handlePort(port) {
 
 (async () => {
   try {
-    // Skip if data is still fresh (avoids re-fetching on every SW restart)
     const cached = await localGet([STORAGE_KEYS.ALL_ARTICLES_AT]);
     const cachedAt = cached[STORAGE_KEYS.ALL_ARTICLES_AT] || 0;
     if (Date.now() - cachedAt < CACHE_TTL_MS) {
-      console.log('[KB-Agent] Preloaded articles still fresh, skipping fetch.');
       return;
     }
 
@@ -311,8 +324,6 @@ function handlePort(port) {
       [STORAGE_KEYS.ALL_ARTICLES]: allArticles,
       [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now()
     });
-    console.log(`[KB-Agent] Preloaded ${allArticles.length} articles (${tier1.length} validated, ${tier2Only.length} other).`);
   } catch (e) {
-    console.warn('[KB-Agent] Preload failed:', e.message);
   }
 })();

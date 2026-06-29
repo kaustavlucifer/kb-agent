@@ -1,3 +1,5 @@
+import { parseInline, parseBlocks } from './markdown.js';
+
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   if (attrs) {
@@ -100,8 +102,6 @@ export function emptyState(icon, text) {
   );
 }
 
-// Standard tab layout: a non-scrolling sticky header region + a scrolling body.
-// Returns both sections AND appends them to the container in order.
 export function stickyScrollLayout(container) {
   const sticky = h('div', { class: 'main__sticky' });
   const scroll = h('div', { class: 'main__scroll' });
@@ -110,8 +110,6 @@ export function stickyScrollLayout(container) {
   return { sticky, scroll };
 }
 
-// Sortable-table state factory. Encapsulates the col/dir toggle + arrow indicator
-// that every table tab re-implemented identically.
 export function createSorter(defaultCol, defaultDir = 'asc') {
   let col = defaultCol;
   let dir = defaultDir;
@@ -124,7 +122,6 @@ export function createSorter(defaultCol, defaultDir = 'asc') {
     },
     set(c, d) { col = c; dir = d; },
     indicator(c) { return col === c ? (dir === 'asc' ? ' ↑' : ' ↓') : ''; },
-    // Compares two values for the active direction. Caller supplies the accessor.
     compare(va, vb) {
       if (va < vb) return dir === 'asc' ? -1 : 1;
       if (va > vb) return dir === 'asc' ? 1 : -1;
@@ -133,8 +130,6 @@ export function createSorter(defaultCol, defaultDir = 'asc') {
   };
 }
 
-// A row of big-number / small-label stat blocks. `stats` is an array of
-// { value, label, color? } — color is a CSS value (e.g. 'var(--success)').
 export function statsBar(stats) {
   return h('div', { class: 'card stats-bar' },
     h('div', { class: 'stats-bar__row' },
@@ -146,10 +141,6 @@ export function statsBar(stats) {
   );
 }
 
-// Streaming-output modal shell. Opens a modal with a scrollable stream area and a
-// "Copy" action, and hands back the stream element + helpers so callers can pump
-// deltas in (from streamClaude or a port) without re-implementing the shell.
-// onClose is invoked when the modal closes (use it to disconnect ports).
 export function streamingModal(title, { header = null, onClose } = {}) {
   const stream = h('div', { class: 'stream-output' });
   stream.appendChild(spinner('md'));
@@ -167,7 +158,6 @@ export function streamingModal(title, { header = null, onClose } = {}) {
     ...ref,
     stream,
     getRaw: () => raw,
-    // Replace the stream content with rendered markdown for the given full text.
     renderFull(text, { scroll = false } = {}) {
       raw = text;
       stream.textContent = '';
@@ -183,96 +173,75 @@ export function streamingModal(title, { header = null, onClose } = {}) {
 }
 
 export function renderInlineFormatting(text) {
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
-  if (parts.length === 1) return document.createTextNode(text);
+  const tokens = parseInline(text);
+  if (tokens.length === 1 && tokens[0].type === 'text') return document.createTextNode(tokens[0].text);
   const span = h('span', null);
-  for (const part of parts) {
-    if (part.startsWith('**') && part.endsWith('**')) {
-      span.appendChild(h('strong', { style: { fontWeight: '600' } }, part.slice(2, -2)));
-    } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
-      span.appendChild(h('em', null, part.slice(1, -1)));
-    } else if (part.startsWith('`') && part.endsWith('`')) {
-      span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, part.slice(1, -1)));
-    } else if (part) {
-      span.appendChild(document.createTextNode(part));
+  for (const t of tokens) {
+    switch (t.type) {
+      case 'bold': span.appendChild(h('strong', { style: { fontWeight: '600' } }, t.text)); break;
+      case 'italic': span.appendChild(h('em', null, t.text)); break;
+      case 'code': span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, t.text)); break;
+      case 'link': {
+        const safeHref = /^(https?:|mailto:)/i.test(t.href) ? t.href : '#';
+        span.appendChild(h('a', { href: safeHref, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)' } }, t.text));
+        break;
+      }
+      default: span.appendChild(document.createTextNode(t.text));
     }
   }
   return span;
 }
 
+const CODE_PRE_STYLE = { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' };
+
 export function renderMarkdown(text) {
   if (!text) return h('span', null, '');
-  const lines = text.split('\n');
   const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
-  let inCodeBlock = false;
-  let codeLines = [];
-  let codeLang = '';
-  let inTable = false;
-  let tableRows = [];
-
-  function flushTable() {
-    if (!tableRows.length) return;
-    const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
-    const headerRow = tableRows[0];
-    const separatorIdx = tableRows.findIndex(r => /^[\s|:-]+$/.test(r.replace(/\|/g, '').replace(/[-:]/g, '')));
-    const dataStart = separatorIdx >= 0 ? separatorIdx + 1 : 1;
-    if (headerRow) {
-      const cells = headerRow.split('|').map(c => c.trim()).filter(Boolean);
-      table.appendChild(h('thead', null, h('tr', null, ...cells.map(c => h('th', { style: { fontSize: '11px', padding: '6px 8px' } }, renderInlineFormatting(c))))));
-    }
-    const tbody = h('tbody', null);
-    for (let i = dataStart; i < tableRows.length; i++) {
-      const cells = tableRows[i].split('|').map(c => c.trim()).filter(Boolean);
-      if (cells.length) tbody.appendChild(h('tr', null, ...cells.map(c => h('td', { style: { fontSize: '11px', padding: '5px 8px' } }, renderInlineFormatting(c)))));
-    }
-    table.appendChild(tbody);
-    container.appendChild(table);
-    tableRows = [];
-    inTable = false;
-  }
-
-  for (const line of lines) {
-    if (!inCodeBlock && /^```(\w*)/.test(line)) {
-      if (inTable) flushTable();
-      inCodeBlock = true;
-      codeLang = line.match(/^```(\w*)/)[1] || '';
-      codeLines = [];
-      continue;
-    }
-    if (inCodeBlock) {
-      if (line.startsWith('```')) {
-        const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
-        if (codeLang) {
-          pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, codeLang));
-        }
-        pre.appendChild(h('code', null, codeLines.join('\n')));
-        container.appendChild(pre);
-        inCodeBlock = false;
-        codeLines = [];
-        codeLang = '';
-      } else {
-        codeLines.push(line);
+  for (const b of parseBlocks(text)) {
+    switch (b.type) {
+      case 'hr':
+        container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
+        break;
+      case 'heading': {
+        if (b.level >= 3) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, renderInlineFormatting(b.text)));
+        else if (b.level === 2) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, renderInlineFormatting(b.text)));
+        else container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, renderInlineFormatting(b.text)));
+        break;
       }
-      continue;
+      case 'list':
+        b.items.forEach((it, idx) => {
+          const marker = b.ordered ? `${idx + 1}. ` : '• ';
+          container.appendChild(h('div', { style: { paddingLeft: '12px' } }, marker, renderInlineFormatting(it)));
+        });
+        break;
+      case 'code': {
+        const pre = h('pre', { style: CODE_PRE_STYLE });
+        if (b.lang) pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, b.lang));
+        pre.appendChild(h('code', null, b.code));
+        container.appendChild(pre);
+        break;
+      }
+      case 'table': {
+        const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
+        table.appendChild(h('thead', null, h('tr', null, ...b.header.map(c => h('th', { style: { fontSize: '11px', padding: '6px 8px' } }, renderInlineFormatting(c))))));
+        const tbody = h('tbody', null);
+        for (const row of b.rows) tbody.appendChild(h('tr', null, ...row.map(c => h('td', { style: { fontSize: '11px', padding: '5px 8px' } }, renderInlineFormatting(c)))));
+        table.appendChild(tbody);
+        container.appendChild(table);
+        break;
+      }
+      case 'paragraph': {
+        const lines = b.text.split('\n');
+        const p = h('p', { style: { margin: '4px 0' } });
+        lines.forEach((ln, idx) => {
+          if (idx > 0) p.appendChild(h('br'));
+          p.appendChild(renderInlineFormatting(ln));
+        });
+        container.appendChild(p);
+        break;
+      }
     }
-    if (line.trim().startsWith('|')) { inTable = true; tableRows.push(line.trim()); continue; }
-    if (inTable) flushTable();
-    if (/^---+$/.test(line.trim())) container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
-    else if (line.startsWith('### ')) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, line.slice(4)));
-    else if (line.startsWith('## ')) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, line.slice(3)));
-    else if (line.startsWith('# ')) container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, line.slice(2)));
-    else if (line.startsWith('- ') || line.startsWith('* ')) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting('• ' + line.slice(2))));
-    else if (/^\d+\.\s/.test(line)) container.appendChild(h('div', { style: { paddingLeft: '12px' } }, renderInlineFormatting(line)));
-    else if (line.trim()) container.appendChild(h('p', { style: { margin: '4px 0' } }, renderInlineFormatting(line)));
   }
-
-  if (inTable) flushTable();
-  if (inCodeBlock && codeLines.length) {
-    const pre = h('pre', { style: { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } });
-    pre.appendChild(h('code', null, codeLines.join('\n')));
-    container.appendChild(pre);
-  }
-
   return container;
 }
 

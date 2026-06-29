@@ -21,7 +21,6 @@ export async function handleAnalyze(port, msg) {
   const signal = abortController.signal;
   let stopped = false;
 
-  // Keepalive ping every 25s to prevent Chrome from killing the service worker mid-analysis
   const keepalive = setInterval(() => {
     try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
   }, 25_000);
@@ -50,20 +49,15 @@ export async function handleAnalyze(port, msg) {
 
   send({ type: 'progress', step: 1, label: 'Fetching case + comments' });
 
-  // Guard rail field discovery first (fast, cached), then case fetch with extra fields
   const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
   const extraFields = getGuardRailExtraFields(guardRailFields);
   const caseFields = `Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
   if (!caseRecord || !caseRecord.Id) { clearInterval(keepalive); send({ type: 'error', error: 'Case not found.' }); return; }
 
-  // Check bypass setting
   const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
   const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
 
-  // Fail closed: if the Case describe call failed we cannot evaluate the guard rail,
-  // so block analysis rather than silently sending a potentially-restricted case to the
-  // AI gateway. An explicit bypass setting still overrides this.
   if (!bypassEnabled && guardRailFields.describeFailed) {
     clearInterval(keepalive);
     send({ type: 'error', error: 'Could not verify case guard-rail fields (Case describe failed). Analysis blocked for safety. Retry, or enable bypass in options if you have authorization.' });
@@ -145,7 +139,6 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
   const candidates = soslResults.slice(0, 15);
 
-  // Fetch full bodies for candidates
   const candidateBodies = await fetchCandidateBodies(session.apiBase, session.sid, candidates);
 
   const articleDetailsForAI = candidates.map((a, i) => {
@@ -233,20 +226,12 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
-  // Score the AGF quality of the top relevant articles BEFORE deciding strategy. This
-  // feeds the "good enough" coverage gate (relevance AND quality) and is shown in the UI.
   const kbScoredArticles = [...scoredArticles];
   await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
-  // Coverage gate: if an article is BOTH relevant (≥RELEVANCE_COVERAGE_THRESHOLD) AND
-  // already well-structured (quality ≥SCORE_GOOD_ENOUGH_THRESHOLD), existing coverage is
-  // good enough — reworking it is a waste. Short-circuit to NO_ACTION.
-  // Gate ONLY on AI-derived relevance: the SOSL-rank fallback fabricates scores (top
-  // article gets 70), which would clear the relevance threshold on a number we never
-  // actually computed and produce a false NO_ACTION.
   const wellCovered = kbScoredArticles.filter(a =>
     a.relevanceFromAI &&
     (a.score != null && a.score >= RELEVANCE_COVERAGE_THRESHOLD) &&
@@ -439,7 +424,6 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
     }
   };
 
-  // Run SOSL queries concurrently (3 at a time)
   await mapWithConcurrency(uniqueQueries, 3, async (q) => {
     if (results.length >= 20) return;
     try {
@@ -450,7 +434,6 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
     } catch {}
   });
 
-  // Broaden if too few results
   if (results.length < 5 && ptPatterns.length) {
     await mapWithConcurrency(uniqueQueries.slice(0, 3), 3, async (q) => {
       if (results.length >= 15) return;
@@ -524,8 +507,6 @@ Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendati
     });
     const parsed = extractJson(extractText(resp));
     if (!parsed) return null;
-    // Attach the resolved target doc (title + help URL) so the UI can render a direct link
-    // without re-deriving it. targetDocIndex refers into the topDocs list shown above.
     const ti = parsed.targetDocIndex;
     if (ti != null && ti >= 0 && ti < topDocs.length) {
       const td = topDocs[ti];
@@ -577,13 +558,11 @@ async function setCachedProductDocs(cacheKey, articles) {
 async function searchProductDocs(apiBase, sid, queries, casePt, caseContext) {
   const { urlPatterns } = getProductDocsConfig(casePt);
 
-  // Phase 1+2: SOSL keyword search + SOQL pattern search in parallel
   const [soslDocs, patternDocs] = await Promise.all([
     searchProductDocsSosl(apiBase, sid, queries),
     urlPatterns.length ? searchProductDocsByPattern(apiBase, sid, urlPatterns) : Promise.resolve([])
   ]);
 
-  // Phase 3: Merge and deduplicate
   const seen = new Set();
   const merged = [];
   for (const d of [...soslDocs, ...patternDocs]) {
@@ -594,7 +573,6 @@ async function searchProductDocs(apiBase, sid, queries, casePt, caseContext) {
 
   if (!merged.length) return [];
 
-  // Phase 4: AI relevance scoring against case context
   const scored = await scoreProductDocsRelevance(merged, caseContext);
   return scored;
 }
@@ -824,9 +802,6 @@ Then derive action:
 
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
     messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
-    // Pure JSON output (no thinking tokens). The gaps array carries up to 6 dimensions
-    // each with finding + suggestedEdit text; 3000 risked truncating that mid-array,
-    // which silently falls back to a wrong UPDATE_EXISTING/LOW decision below.
     maxTokens: 4500,
     temperature: 0,
     signal
@@ -903,10 +878,6 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
-// Score the AGF quality of existing relevant articles using the SAME dynamic-max
-// scorer used everywhere else (shared/scoring.js), so the number here is directly
-// comparable to generated-draft scores and to the KB-tab Score action. Each article's
-// kbScore + kbCriteria are written back into kbScoredArticles in place.
 async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal) {
   if (!scoredArticles.length) return;
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
@@ -953,10 +924,6 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
 
   send({ type: 'meta', scoringInProgress: draftsToScore.map(d => d.key) });
 
-  // Score each draft through the SAME dynamic-max scorer used for existing articles
-  // (shared/scoring.js). For a clean text draft the media/code/table points are marked
-  // N/A and redistributed into content, so a well-structured draft can reach 90+ — the
-  // old ad-hoc 6-criterion prompt capped the maximum at ~68 points.
   await mapWithConcurrency(draftsToScore, SCORE_CONCURRENCY, async (d) => {
     if (signal?.aborted) return;
     try {

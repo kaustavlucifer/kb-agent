@@ -82,6 +82,7 @@ export function unmount() {
   _unsubs = [];
   _container = null;
   if (_renderTimer) { clearTimeout(_renderTimer); _renderTimer = null; }
+  if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; }
 }
 
 function handleFocusArticle(articleId) {
@@ -90,7 +91,6 @@ function handleFocusArticle(articleId) {
   const article = articles.find(a => a.id === articleId);
 
   if (!article) {
-    // Article might not be loaded yet — try from scores alone
     if (scores[articleId]?.overall != null) {
       const stub = { id: articleId, articleNumber: '?', title: 'Article' };
       showScoreDetail(stub, scores[articleId]);
@@ -98,7 +98,6 @@ function handleFocusArticle(articleId) {
     return;
   }
 
-  // Clear all filters so article is visible in the table
   _filterText = '';
   _filterCloud = [];
   _filterPt = [];
@@ -108,7 +107,6 @@ function handleFocusArticle(articleId) {
   _page = 0;
   render();
 
-  // Show the score detail modal
   if (scores[article.id]?.overall != null) {
     showScoreDetail(article, scores[article.id]);
   } else {
@@ -131,9 +129,6 @@ function debouncedRender() {
   }, 100);
 }
 
-// kb.scoring transitions (null → active, active → null) must do a FULL render so the
-// progress-bar card and disabled "Scoring…" button are drawn/removed. The cheap
-// in-place path only handles per-article increments while scoring stays active.
 function onScoringChange(scoring) {
   const isScoring = !!scoring;
   if (isScoring !== _wasScoring) {
@@ -150,7 +145,6 @@ function updateScoreCellsInPlace() {
   const scoringIds = getState('kb.scoringIds') || [];
   const scoring = getState('kb.scoring');
 
-  // Update progress bar
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
     const progressLabel = document.getElementById('kb-scoring-label');
@@ -161,7 +155,6 @@ function updateScoreCellsInPlace() {
     if (barLabel) barLabel.textContent = `${pct}%`;
   }
 
-  // Update individual score cells in the table using data-article-id
   const rows = _container.querySelectorAll('.data-table tbody tr[data-article-id]');
   rows.forEach(row => {
     const articleId = row.getAttribute('data-article-id');
@@ -189,7 +182,6 @@ function updateScoreCellsInPlace() {
     }
   });
 
-  // Force full re-render every 10 completions to sync stats bar
   if (scoring && scoring.done % 10 === 0 && scoring.done > 0) {
     setTimeout(render, 50);
   }
@@ -341,8 +333,6 @@ function render() {
   });
 
   const ind = (col) => _sorter.indicator(col);
-  // Animate row entrance only when not actively scoring — scoring triggers periodic
-  // re-renders, and re-animating rows each time would flicker.
   const table = h('table', { class: scoring ? 'data-table' : 'data-table data-table--animated' },
     h('thead', null, h('tr', null,
       h('th', { style: { width: '70px', cursor: 'pointer' }, onClick: () => { toggleKbSort('articleNumber'); } }, '#' + ind('articleNumber')),
@@ -546,8 +536,6 @@ async function scoreAll() {
   const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
   const scores = { ...existingScores };
   const inFlight = new Set();
-  // Derive progress from `scores` rather than a counter so retries can't double-count
-  // or push `done` past `total` (see scoring retry pass below).
   const countDone = () => toScore.filter(a => scores[a.id]?.overall != null).length;
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
@@ -567,7 +555,6 @@ async function scoreAll() {
     setState('kb.scoring', { done: countDone(), total: toScore.length });
   });
 
-  // Retry failed articles once
   const failed = toScore.filter(a => scores[a.id]?.overall == null);
   if (failed.length) {
     await new Promise(r => setTimeout(r, 2000));
@@ -598,8 +585,6 @@ async function scoreAll() {
 
 function renderCriterionRow(c, limit = 2) {
   if (c.na) return null;
-  // limit caps how many bullet items show per cell (the live-streaming view stays
-  // compact with 2; the detail modal passes Infinity to show everything).
   const colorPill = `pill pill--${c.score >= c.max * 0.8 ? 'success' : c.score >= c.max * 0.5 ? 'warning' : 'error'}`;
   const bulletCell = (items, color) => h('td', { style: { fontSize: '11px', maxWidth: '200px' } },
     (items || []).length
@@ -673,9 +658,13 @@ async function scoreOne(article) {
     )
   );
 
-  modal(`Score: ${article.articleNumber}`, bodyEl, { wide: true });
+  const abort = new AbortController();
+  let closed = false;
+  modal(`Score: ${article.articleNumber}`, bodyEl, {
+    wide: true,
+    onClose: () => { closed = true; abort.abort(); }
+  });
 
-  // Mark the table row as scoring so it shows a spinner like batch scoring does.
   const markScoring = (on) => {
     const ids = new Set(getState('kb.scoringIds') || []);
     if (on) ids.add(article.id); else ids.delete(article.id);
@@ -697,7 +686,9 @@ async function scoreOne(article) {
       maxTokens: 2200,
       temperature: 0.1,
       model: SCORING_MODEL,
+      signal: abort.signal,
       onDelta: (chunk, full) => {
+        if (closed) return;
         const parsed = tryExtractCriteria(full);
         if (parsed.length > renderedCount) {
           for (let i = renderedCount; i < parsed.length; i++) {
@@ -756,6 +747,7 @@ async function scoreOne(article) {
     setState('kb.scores', scores);
     await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
   } catch (e) {
+    if (closed || e.name === 'AbortError') return;
     const progressEl = document.getElementById('score-progress');
     if (progressEl) {
       progressEl.textContent = '';
@@ -767,9 +759,8 @@ async function scoreOne(article) {
 }
 
 let _rewriteCache = {};
+let _rewriteAbort = null;
 
-// Fetch the article body and merge it onto the meta record so scoreArticle has the
-// full content to score (the table rows only carry metadata).
 async function enrichForScore(article, session) {
   const bodyMap = await fetchArticleBodies([article.id], session);
   return { ...article, ...(bodyMap.get(article.id) || {}) };
@@ -795,42 +786,25 @@ function showNoImprovementNeeded(article, score) {
   ({ close } = modal('Already High Quality', body));
 }
 
+function setRewriteStatus(streamEl, message) {
+  if (!streamEl) return;
+  streamEl.textContent = '';
+  streamEl.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } },
+    spinner('sm'),
+    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, message)
+  ));
+}
+
 async function rewriteArticle(article, forceAfterGate = false) {
-  const session = await detectSession();
-  if (!session.sid) { toast('No SF session.', 'error'); return; }
-
-  // Score-first gate: if the article hasn't been scored yet, score it before spending a
-  // rewrite. If it's already at/above the good-enough threshold, a rewrite is a waste —
-  // tell the user and let them override. `forceAfterGate` skips this on explicit override.
-  if (!forceAfterGate && !_rewriteCache[article.id]) {
-    const existing = getState('kb.scores')?.[article.id];
-    let score = existing?.overall;
-    if (score == null) {
-      toast('Scoring article before rewrite…', 'info');
-      try {
-        const result = await scoreArticle(await enrichForScore(article, session));
-        if (result.overall != null) {
-          const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
-          setState('kb.scores', scores);
-          await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
-          score = result.overall;
-        }
-      } catch { /* fall through to rewrite if scoring fails */ }
-    }
-    if (score != null && score >= SCORE_GOOD_ENOUGH_THRESHOLD) {
-      showNoImprovementNeeded(article, score);
-      return;
-    }
-  }
-
   const cached = _rewriteCache[article.id];
 
   const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } });
-  if (cached) {
-    streamEl.appendChild(renderMarkdown(cached));
-  } else {
-    streamEl.appendChild(spinner('md'));
-  }
+  if (cached) streamEl.appendChild(renderMarkdown(cached));
+  else setRewriteStatus(streamEl, 'Preparing rewrite…');
+
+  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', disabled: !cached, onClick: () => generateRewrite(article, _rwSession) }, cached ? 'Regenerate' : 'Working…');
+
+  let _rwSession = null;
 
   const content = h('div', null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
@@ -838,26 +812,63 @@ async function rewriteArticle(article, forceAfterGate = false) {
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
         h('div', { id: 'rewrite-score', style: { display: 'flex', alignItems: 'center', gap: '6px' } }),
         h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-compare', onClick: () => showRewriteComparison(article) }, 'Compare'),
-        h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', onClick: () => generateRewrite(article, session) }, cached ? 'Regenerate' : 'Generating…'),
+        regenBtn,
         h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create New Version in ORGCS')
       )
     ),
     streamEl
   );
 
-  modal('Rewrite Article', content, { wide: true });
+  let closed = false;
+  const ref = modal('Rewrite Article', content, {
+    wide: true,
+    onClose: () => { closed = true; if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; } }
+  });
 
   if (cached) {
-    // Show the cached score if we already scored this rewrite this session.
     const cachedScore = _rewriteScoreCache[article.id];
     if (cachedScore) renderRewriteScore(article, cachedScore);
-  } else {
-    generateRewrite(article, session);
+    return;
   }
+
+  const session = await detectSession();
+  if (closed) return;
+  if (!session.sid) {
+    setRewriteStatus(streamEl, '');
+    streamEl.textContent = '';
+    streamEl.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, 'No Salesforce session.'));
+    return;
+  }
+  _rwSession = session;
+
+  if (!forceAfterGate) {
+    const existing = getState('kb.scores')?.[article.id];
+    let score = existing?.overall;
+    if (score == null) {
+      setRewriteStatus(streamEl, 'Scoring this article before rewrite…');
+      try {
+        const result = await scoreArticle(await enrichForScore(article, session));
+        if (closed) return;
+        if (result.overall != null) {
+          const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
+          setState('kb.scores', scores);
+          await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+          score = result.overall;
+        }
+      } catch {}
+    }
+    if (closed) return;
+    if (score != null && score >= SCORE_GOOD_ENOUGH_THRESHOLD) {
+      ref.close();
+      showNoImprovementNeeded(article, score);
+      return;
+    }
+  }
+
+  if (closed) return;
+  generateRewrite(article, session);
 }
 
-// Parse the streamed "## TITLE/SUMMARY/DESCRIPTION/RESOLUTION" markdown into an
-// article-shaped object the scorer understands.
 function parseRewriteSections(text) {
   const titleMatch = text.match(/##\s*TITLE\s*\n([^\n]+)/i);
   const summaryMatch = text.match(/##\s*SUMMARY\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
@@ -881,8 +892,6 @@ async function scoreRewrite(article, fullText) {
     scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Scoring…'));
   }
   const parsed = parseRewriteSections(fullText);
-  // Markdown ## headers become HTML <h2> in the real article, so the scorer's
-  // header/scannability checks see proper structure. We hand it the rewritten body.
   const headerHtml = (label, text) => text ? `<h2>${label}</h2>${text.split('\n').map(l => `<p>${l}</p>`).join('')}` : '';
   const enriched = {
     ...article,
@@ -921,11 +930,14 @@ function renderRewriteScore(article, result) {
 }
 
 async function generateRewrite(article, session) {
+  if (_rewriteAbort) _rewriteAbort.abort();
+  const abort = new AbortController();
+  _rewriteAbort = abort;
+
   const regenBtn = document.getElementById('rewrite-regenerate');
   if (regenBtn) { regenBtn.disabled = true; regenBtn.textContent = 'Generating…'; }
   const el = document.getElementById('rewrite-stream');
   if (el) { el.textContent = ''; el.appendChild(spinner('md')); }
-  // Clear any prior score for this article — it no longer matches the new draft.
   delete _rewriteScoreCache[article.id];
   const scoreEl = document.getElementById('rewrite-score');
   if (scoreEl) scoreEl.textContent = '';
@@ -936,8 +948,6 @@ async function generateRewrite(article, session) {
   const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
   const steps = stripHtml(body.steps || '').slice(0, 1500);
 
-  // This prompt is deliberately aligned with shared/scoring.js criteria so the
-  // rewritten article scores well on the same rubric used by the Score action.
   const system = `You are an expert technical writer rewriting Salesforce Knowledge Articles to maximize Agentforce (AGF) RAG retrieval and consumption quality.
 
 HOW AGENTFORCE RETRIEVES CONTENT (optimize for this):
@@ -974,38 +984,42 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
   let fullText = '';
   let throttle = null;
+  const isStale = () => _rewriteAbort !== abort || abort.signal.aborted;
   try {
     await streamClaude({
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
       temperature: 0.2,
+      signal: abort.signal,
       onDelta: (chunk, full) => {
         fullText = full;
-        if (throttle) return;
+        if (throttle || isStale()) return;
         throttle = setTimeout(() => { throttle = null; }, 150);
         const el = document.getElementById('rewrite-stream');
         if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
     });
+    if (isStale()) return;
     _rewriteCache[article.id] = fullText;
     const el = document.getElementById('rewrite-stream');
     if (el) { el.textContent = ''; el.appendChild(renderMarkdown(fullText)); }
   } catch (e) {
+    if (isStale() || e.name === 'AbortError') return;
     const el = document.getElementById('rewrite-stream');
     if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
     if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
     return;
+  } finally {
+    if (_rewriteAbort === abort) _rewriteAbort = null;
   }
   if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
-  // Score the freshly generated article so the user sees its quality immediately.
   if (fullText.trim()) scoreRewrite(article, fullText);
 }
 
 async function showRewriteComparison(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) {
-    // The regenerate button is disabled for the whole generation lifecycle.
     const streaming = document.getElementById('rewrite-regenerate')?.disabled;
     toast(streaming ? 'Wait for the rewrite to finish.' : 'Generate the rewrite first.', 'error');
     return;
@@ -1018,27 +1032,41 @@ async function showRewriteComparison(article) {
     if (!resp?.success) { toast(resp?.error || 'Failed to load original.', 'error'); return; }
     const original = resp.article;
 
-    const field = (label, value, opts = {}) => h('div', { style: { marginBottom: '12px' } },
-      h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, label),
-      opts.markdown
-        ? renderMarkdown((value || '(empty)').slice(0, 800))
-        : h('div', { style: { fontSize: opts.bold ? '13px' : '12px', fontWeight: opts.bold ? '600' : '400', lineHeight: '1.5', color: opts.color || 'var(--text-primary)', maxHeight: opts.tall ? '200px' : 'none', overflow: opts.tall ? 'auto' : 'visible' } }, (value || '(empty)').slice(0, opts.bold ? 300 : 800))
-    );
+    const field = (label, value, opts = {}) => {
+      let contentEl;
+      if (opts.html != null) {
+        contentEl = h('div', { class: 'kb-compare-html', style: { fontSize: '12px', lineHeight: '1.5' } });
+        contentEl.innerHTML = opts.html || '<span style="color:var(--text-muted)">(empty)</span>';
+      } else if (opts.markdown) {
+        contentEl = (value || '').trim()
+          ? renderMarkdown(value)
+          : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
+      } else {
+        contentEl = h('div', { style: { fontSize: opts.bold ? '13px' : '12px', fontWeight: opts.bold ? '600' : '400', lineHeight: '1.5', color: opts.color || 'var(--text-primary)', whiteSpace: 'pre-wrap' } }, value || '(empty)');
+      }
+      return h('div', { style: { marginBottom: '12px' } },
+        h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, label),
+        opts.tall
+          ? h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px' } }, contentEl)
+          : contentEl
+      );
+    };
 
-    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '600px', overflow: 'auto' } },
+    const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
       h('div', null,
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
         field('Title', original.title, { bold: true }),
         field('Summary', original.summary, { bold: false }),
-        field('Description', original.description, { tall: true }),
-        field('Resolution', original.resolution, { tall: true })
+        field('Description', null, { html: original.descriptionHtml, tall: true }),
+        field('Resolution', null, { html: original.resolutionHtml, tall: true }),
+        original.stepsHtml ? field('Steps', null, { html: original.stepsHtml, tall: true }) : null
       ),
       h('div', null,
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
         field('Title', parsed.title || article.title, { bold: true, color: 'var(--primary)' }),
         field('Summary', parsed.summary, { bold: false }),
-        field('Description', parsed.description, { markdown: true }),
-        field('Resolution', parsed.resolution, { markdown: true })
+        field('Description', parsed.description, { markdown: true, tall: true }),
+        field('Resolution', parsed.resolution, { markdown: true, tall: true })
       )
     );
 
@@ -1072,12 +1100,11 @@ async function publishRewriteToOrgcs(article) {
       }
     });
     if (resp?.success) {
-      const actionLabel = resp.action === 'patched-draft' ? 'Existing draft updated!' : 'New draft version created!';
+      const actionLabel = (resp.action === 'patched-draft' || resp.action === 'updated-existing-draft')
+        ? 'Existing draft updated!'
+        : 'New draft version created!';
       toast(actionLabel, 'success');
       if (resp.warning) toast(resp.warning, 'warning');
-      // Replace the publish button with an explicit "Open" button instead of
-      // auto-navigating, so the user stays in context until they choose to leave.
-      // Always swap it out on success so the draft can't be created twice.
       const publishBtn = document.getElementById('rewrite-publish');
       if (publishBtn) {
         const openBtn = resp.url

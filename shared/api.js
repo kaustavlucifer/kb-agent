@@ -49,7 +49,6 @@ export async function sfPatch(url, sid, body) {
     const text = await resp.text().catch(() => '');
     throw new Error(`SF API ${resp.status}: ${text.slice(0, 200)}`);
   }
-  // PATCH 204 returns no body
   if (resp.status === 204) return {};
   return resp.json();
 }
