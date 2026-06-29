@@ -223,7 +223,7 @@ export async function publishUpdateDraft(payload) {
   };
 }
 
-const STALE_PT_WARNING = 'The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the rewrite could save. Re-tag the article's Product & Topic in Salesforce.';
+const STALE_PT_WARNING = "The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the rewrite could save. Re-tag the article's Product & Topic in Salesforce.";
 
 async function patchArticleSavingContent(apiBase, sid, recordId, updates) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${recordId}`;
