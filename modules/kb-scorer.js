@@ -148,11 +148,23 @@ function updateScoreCellsInPlace() {
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
     const progressLabel = document.getElementById('kb-scoring-label');
-    if (progressLabel) progressLabel.textContent = `Scoring: ${scoring.done} / ${scoring.total}`;
+    if (progressLabel) progressLabel.textContent = `Scoring: ${scoring.done} / ${scoring.total}${scoring.retrying ? ` (retrying ${scoring.retrying})` : ''}`;
     const bar = _container.querySelector('#kb-scoring-card .progress__fill');
     if (bar) bar.style.width = `${pct}%`;
     const barLabel = _container.querySelector('#kb-scoring-card .progress__label');
     if (barLabel) barLabel.textContent = `${pct}%`;
+    const activeEl = document.getElementById('kb-scoring-active');
+    if (activeEl) {
+      const articles = getState('kb.articles') || [];
+      const activeNumbers = scoringIds
+        .map(id => articles.find(a => a.id === id)?.articleNumber)
+        .filter(Boolean);
+      activeEl.textContent = '';
+      if (activeNumbers.length) {
+        activeEl.appendChild(spinner('sm'));
+        activeEl.appendChild(h('span', null, `Scoring now: ${activeNumbers.join(', ')}`));
+      }
+    }
   }
 
   const rows = _container.querySelectorAll('.data-table tbody tr[data-article-id]');
@@ -162,6 +174,7 @@ function updateScoreCellsInPlace() {
     const scoreData = scores[articleId];
     const overall = scoreData?.overall;
     const isBeingScored = scoringIds.includes(articleId);
+    row.style.background = isBeingScored ? 'var(--primary-subtle, rgba(0,112,210,0.08))' : '';
 
     const scoreTd = row.querySelectorAll('td')[5];
     if (!scoreTd) return;
@@ -280,12 +293,22 @@ function render() {
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
+    const scoringIds = getState('kb.scoringIds') || [];
+    const activeNumbers = scoringIds
+      .map(id => articles.find(a => a.id === id)?.articleNumber)
+      .filter(Boolean);
     stickySection.appendChild(h('div', { id: 'kb-scoring-card', class: 'card', style: { marginTop: '8px', padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-        h('span', { id: 'kb-scoring-label' }, `Scoring: ${scoring.done} / ${scoring.total}`),
+        h('span', { id: 'kb-scoring-label' }, scoring.phase === 'fetching' ? 'Fetching article bodies…' : `Scoring: ${scoring.done} / ${scoring.total}${scoring.retrying ? ` (retrying ${scoring.retrying})` : ''}`),
         h('span', null, `${pct}%`)
       ),
-      progressBar(pct, 'default', true)
+      progressBar(pct, 'default', true),
+      h('div', { id: 'kb-scoring-active', style: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', fontSize: '11px', color: 'var(--text-muted)', minHeight: '16px' } },
+        ...(scoring.phase === 'fetching'
+          ? [spinner('sm'), h('span', null, 'Loading content from Salesforce…')]
+          : activeNumbers.length
+            ? [spinner('sm'), h('span', null, `Scoring now: ${activeNumbers.join(', ')}`)]
+            : []))
     ));
   }
 
@@ -370,7 +393,7 @@ function render() {
     ) : h('span', { style: { color: 'var(--text-muted)', fontSize: '10px' } }, '—');
 
     const artUrl = articleUrl(a.id);
-    tbody.appendChild(h('tr', { 'data-article-id': a.id },
+    tbody.appendChild(h('tr', { 'data-article-id': a.id, style: isBeingScored ? { background: 'var(--primary-subtle, rgba(0,112,210,0.08))' } : {} },
       h('td', { style: { fontFamily: 'var(--font-mono)', fontSize: '11px' } },
         h('a', { href: artUrl, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)', textDecoration: 'none' } }, a.articleNumber || '')
       ),
@@ -529,11 +552,12 @@ async function scoreAll() {
   const toScore = pageArticles.filter(a => existingScores[a.id]?.overall == null);
   if (!toScore.length) { toast('All articles on this page already scored.', 'info'); return; }
 
-  setState('kb.scoring', { done: 0, total: toScore.length });
+  setState('kb.scoring', { done: 0, total: toScore.length, phase: 'fetching' });
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
 
   const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
+  setState('kb.scoring', { done: 0, total: toScore.length });
   const scores = { ...existingScores };
   const inFlight = new Set();
   const countDone = () => toScore.filter(a => scores[a.id]?.overall != null).length;

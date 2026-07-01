@@ -2,7 +2,7 @@ export const GATEWAY_BASE = 'https://eng-ai-model-gateway.sfproxy.devx-preprod.a
 
 export let DEFAULT_MODEL = 'claude-sonnet-4-6';
 export let FAST_MODEL = 'claude-sonnet-4-6';
-export let SCORING_MODEL = 'claude-sonnet-4-6';
+export let SCORING_MODEL = 'claude-haiku-4-5-20251001';
 
 export const SF_API_VERSION = 'v62.0';
 export const ANTHROPIC_VERSION = '2023-06-01';
@@ -84,7 +84,7 @@ export const SETTINGS_SCHEMA = [
     help: 'Model used to draft new articles and rewrite existing ones. Quality matters most here — Opus produces the strongest prose; Haiku is fastest.'
   },
   {
-    key: 'modelScoring', kind: 'model', binding: 'SCORING_MODEL', default: 'claude-sonnet-4-6',
+    key: 'modelScoring', kind: 'model', binding: 'SCORING_MODEL', default: 'claude-haiku-4-5-20251001',
     label: 'Scoring & duplicate detection',
     help: 'Model used to score articles against the AGF rubric and to compare articles for duplicates. Runs many times per batch, so faster models noticeably speed up bulk scoring.'
   },
