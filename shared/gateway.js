@@ -1,4 +1,4 @@
-import { GATEWAY_BASE, ANTHROPIC_VERSION, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS } from './config.js';
+import { GATEWAY_BASE, ANTHROPIC_VERSION, ANTHROPIC_CACHE_BETA, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS } from './config.js';
 import { localGet } from './storage.js';
 import { acquireSlot } from './rate-limiter.js';
 
@@ -11,12 +11,19 @@ function getModel(preferFast = false) {
   return preferFast ? FAST_MODEL : DEFAULT_MODEL;
 }
 
-function buildHeaders(token) {
-  return {
+function buildHeaders(token, cache = false) {
+  const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${token}`,
     'anthropic-version': ANTHROPIC_VERSION
   };
+  if (cache) headers['anthropic-beta'] = ANTHROPIC_CACHE_BETA;
+  return headers;
+}
+
+function buildSystemField(system, cache) {
+  if (!cache) return system;
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
 }
 
 export async function pingGateway(token) {
@@ -40,7 +47,7 @@ export async function pingGateway(token) {
   }
 }
 
-export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, signal }) {
+export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, cache, signal }) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
   const t = token || await getToken();
@@ -51,7 +58,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
     max_tokens: maxTokens || 2048,
     messages
   };
-  if (system) body.system = system;
+  if (system) body.system = buildSystemField(system, cache);
   if (thinking) {
     body.thinking = thinking;
     body.temperature = 1;
@@ -66,7 +73,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
   try {
     const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
       method: 'POST',
-      headers: buildHeaders(t),
+      headers: buildHeaders(t, cache),
       body: JSON.stringify(body),
       signal: controller.signal
     });
@@ -88,7 +95,7 @@ export async function callClaudeFast(opts) {
 
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
-export async function streamClaude({ system, messages, maxTokens, model, token, temperature, onDelta, onDone, onError, signal }) {
+export async function streamClaude({ system, messages, maxTokens, model, token, temperature, cache, onDelta, onDone, onError, signal }) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
   const t = token || await getToken();
@@ -100,7 +107,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
     stream: true,
     messages
   };
-  if (system) body.system = system;
+  if (system) body.system = buildSystemField(system, cache);
   if (temperature != null) body.temperature = temperature;
 
   const controller = new AbortController();
@@ -110,7 +117,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
 
   const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
     method: 'POST',
-    headers: buildHeaders(t),
+    headers: buildHeaders(t, cache),
     body: JSON.stringify(body),
     signal: controller.signal
   }).catch(err => {

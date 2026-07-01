@@ -6,6 +6,7 @@ export let SCORING_MODEL = 'claude-sonnet-4-6';
 
 export const SF_API_VERSION = 'v62.0';
 export const ANTHROPIC_VERSION = '2023-06-01';
+export const ANTHROPIC_CACHE_BETA = 'prompt-caching-2024-07-31';
 
 export const TOP_K = 5;
 export const SOSL_PER_QUERY = 10;

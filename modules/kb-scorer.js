@@ -686,6 +686,7 @@ async function scoreOne(article) {
       maxTokens: 2200,
       temperature: 0.1,
       model: SCORING_MODEL,
+      cache: true,
       signal: abort.signal,
       onDelta: (chunk, full) => {
         if (closed) return;

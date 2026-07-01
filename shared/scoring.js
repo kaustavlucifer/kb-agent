@@ -61,33 +61,32 @@ CONTEXT — HOW AGENTFORCE WORKS:
 - Product & Topic tags are NOT yet used by RAG — product name must appear in body text
 - Title is prepended to every chunk, so it directly affects all retrieval
 
-Dynamic max points per criterion are provided. TOTAL MUST EQUAL 100.
-${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : ''}
+Dynamic max points per criterion and any N/A criteria are provided in the user message. TOTAL MUST EQUAL 100.
 
 SCORING: Be ACCURATE and evidence-based, not artificially harsh. Score each criterion on its own merits against the sub-rules below — award full points when the sub-rules are genuinely met, and deduct only for concrete, identifiable problems (cite them in "issues"). A well-structured, complete, product-specific article SHOULD score 90+; a typical legacy article with weak headers/title lands in the 60s-70s; only genuinely poor articles score below 55. Do not deflate a strong article toward an "average" just because high scores feel rare.
 Every criterion MUST include "passed" (what you verified passes) and "issues" (specific problems found).
 
-CRITERIA AND SUB-RULES:
+CRITERIA AND SUB-RULES (max points per criterion given in the user message):
 
-title(max ${m.title}): ≤60 chars, front-loaded keywords, specific product name included, no question format, matches article intent, symptom-based for troubleshooting articles.
+title: ≤60 chars, front-loaded keywords, specific product name included, no question format, matches article intent, symptom-based for troubleshooting articles.
 
-summary(max ${m.summary}): ≤170 chars, uses DIFFERENT words than title, includes synonyms/keywords not in title, specifies audience if applicable, includes exact error text for error articles.
+summary: ≤170 chars, uses DIFFERENT words than title, includes synonyms/keywords not in title, specifies audience if applicable, includes exact error text for error articles.
 
-headers(max ${m.headers}): Uses proper <h1>-<h6> tags (NOT bold text), descriptive of section content, logical hierarchy, sections under each header ≤512 tokens (~2048 chars), intent keywords in headers. Bold-as-header is a CRITICAL failure.
+headers: Uses proper <h1>-<h6> tags (NOT bold text), descriptive of section content, logical hierarchy, sections under each header ≤512 tokens (~2048 chars), intent keywords in headers. Bold-as-header is a CRITICAL failure.
 
-content(max ${m.content}): Description explains WHAT question is answered and WHY. Resolution has context paragraph. Real-life examples with Salesforce-format data (not xxxxx placeholders). Uncommon acronyms/abbreviations explained. Present tense. Conversational tone. Complete problem/environment/cause/resolution. No speculative statements. Each section self-contained (readable in isolation as a chunk).
+content: Description explains WHAT question is answered and WHY. Resolution has context paragraph. Real-life examples with Salesforce-format data (not xxxxx placeholders). Uncommon acronyms/abbreviations explained. Present tense. Conversational tone. Complete problem/environment/cause/resolution. No speculative statements. Each section self-contained (readable in isolation as a chunk).
 
-scannability(max ${m.scannability}): Multiple article sections used (Description + Resolution + Steps). Short paragraphs (3-5 sentences). Bulleted/numbered lists for steps. No wall-of-text. FAQs have descriptive headers per item. Long articles broken into distinct sections. No multi-intent FAQ articles.
+scannability: Multiple article sections used (Description + Resolution + Steps). Short paragraphs (3-5 sentences). Bulleted/numbered lists for steps. No wall-of-text. FAQs have descriptive headers per item. Long articles broken into distinct sections. No multi-intent FAQ articles.
 
-media(max ${m.media}): All informative images have descriptive alt text. Key info from screenshots ALSO written as text. Steps shown visually ALSO described in text. No screenshot-only solutions.
+media: All informative images have descriptive alt text. Key info from screenshots ALSO written as text. Steps shown visually ALSO described in text. No screenshot-only solutions.
 
-code(max ${m.code}): Every code block has a text explanation of what it does, its purpose, inputs, and expected output. Solution is understandable WITHOUT reading the code. Code supplements text, not replaces it.
+code: Every code block has a text explanation of what it does, its purpose, inputs, and expected output. Solution is understandable WITHOUT reading the code. Code supplements text, not replaces it.
 
-tables(max ${m.tables}): Text-only content (NO checkmarks ✓, circles ●, icons, emojis). Built with in-article table editor (not pasted from external sources). Descriptive column headers. Reasonable width (≤5 columns preferred).
+tables: Text-only content (NO checkmarks ✓, circles ●, icons, emojis). Built with in-article table editor (not pasted from external sources). Descriptive column headers. Reasonable width (≤5 columns preferred).
 
-links(max ${m.links}): Additional Resources section populated with relevant links. Smart links for internal articles. Descriptive link text (not "click here"). No internal-only URLs (orgcs.lightning.force.com). No broken links. Article is self-contained (links supplement, don't replace content).
+links: Additional Resources section populated with relevant links. Smart links for internal articles. Descriptive link text (not "click here"). No internal-only URLs (orgcs.lightning.force.com). No broken links. Article is self-contained (links supplement, don't replace content).
 
-taxonomy(max ${m.taxonomy}): Product name appears explicitly in body text (not just in P&T tag). Uses specific product+feature together ("Tableau Prep Flows" not "Flows"). Edition/cloud specified if applicable. P&T tag aligns with article content.
+taxonomy: Product name appears explicitly in body text (not just in P&T tag). Uses specific product+feature together ("Tableau Prep Flows" not "Flows"). Edition/cloud specified if applicable. P&T tag aligns with article content.
 
 Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`;
 
@@ -99,6 +98,7 @@ Validation: ${article.validationStatus || 'Not Validated'}
 Flags: ${flags.join(', ') || 'none'}
 Links: RAW_URLs=${rawUrls.length}, ANCHORED=${linkAnchors.length}, INTERNAL=${internalUrls.length}
 Dynamic Maxes: ${Object.entries(m).map(([k, v]) => `${k}=${v}`).join(', ')}
+${naSet.size ? `N/A CRITERIA (score 0, set "na": true): ${[...naSet].join(', ')}` : 'N/A CRITERIA: none'}
 
 SUMMARY (${(article.summary || '').length} chars):
 ${article.summary || '(empty)'}
@@ -168,7 +168,8 @@ export async function scoreArticle(article) {
     messages: [{ role: 'user', content: user }],
     maxTokens: 2200,
     temperature: 0.1,
-    model: SCORING_MODEL
+    model: SCORING_MODEL,
+    cache: true
   });
   const text = extractText(resp);
   return parseScoreResponse(text, maxes);

@@ -110,7 +110,8 @@ Return the FULL rewritten article. Use EXACTLY these 4 fields.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
       messages: [{ role: 'user', content: `EXISTING ARTICLE:\n${articleBody}\n\nCASE CONTEXT:\nSubject: ${caseSubject || ''}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nError: ${caseAbstract?.errorSignature || ''}` }],
       maxTokens: 3000,
-      temperature: 0.2
+      temperature: 0.2,
+      cache: true
     });
     const text = extractText(resp);
     const parsed = extractJson(text);
@@ -183,7 +184,8 @@ ${GUIDE_STYLE}${focusInstruction}
 Return ONLY the improved text, no JSON wrapping or explanation.`,
       messages: [{ role: 'user', content: `Section Title: ${title}\n\nContent to refine:\n${content}` }],
       maxTokens: 2000,
-      temperature: 0.2
+      temperature: 0.2,
+      cache: true
     });
     const refined = extractText(resp);
     return { success: true, refined };

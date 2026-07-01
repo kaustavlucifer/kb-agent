@@ -723,6 +723,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
         messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${body.additionalResources ? '\nEXISTING REFERENCE LINKS:\n' + stripHtml(body.additionalResources).slice(0, 500) : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
         maxTokens: 3000,
         temperature: 0.2,
+        cache: true,
         signal,
         onDelta: (chunk) => {
           send({ type: 'suggestion-delta', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, chunk });
@@ -842,6 +843,7 @@ Return JSON: {"title":"...","summary":"...","sections":[{"heading":"Description"
     messages: [{ role: 'user', content: `Case: ${caseRecord.Subject}\nProduct: ${abstract?.product || intents.product || ''}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nTopology: ${abstract?.configurationTopology || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentText}${refLinks ? '\n\nREFERENCE LINKS FROM RELATED ARTICLES:\n' + refLinks : ''}` }],
     maxTokens: FINAL_MAX_TOKENS,
     temperature: 0.2,
+    cache: true,
     signal,
     onDelta: (chunk) => { send({ type: 'delta', chunk }); }
   });
