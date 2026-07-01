@@ -54,39 +54,58 @@ export function buildScoringPrompt(article) {
 Score this article for how well it will be RETRIEVED and CONSUMED by Agentforce's RAG pipeline.
 
 CONTEXT — HOW AGENTFORCE WORKS:
-- Articles are split into chunks (max 512 tokens each) at header boundaries (section-aware chunking)
-- Only the TOP 5 chunks from 195k+ content pieces are selected via hybrid search (exact + vector)
+- Customer input is tokenized by the Planner Service, then Data Cloud finds the closest chunks via hybrid search (1:1 keyword match + vector similarity), producing a confidence score
+- Articles are split into chunks (max 512 tokens each) at header boundaries (section-aware chunking) BEFORE vectorization — header tags define the split points and convey topic hierarchy
+- Only the TOP 5 chunks from 2M+ content pieces are selected; the article competes against every other content type, so each chunk must be self-contained and keyword-rich
 - Videos, screenshots, file attachments are IGNORED — only text and alt-text are indexed
 - Code blocks are poorly consumed — text explanations alongside code are essential
-- Product & Topic tags are NOT yet used by RAG — product name must appear in body text
+- Product & Topic tags are NOT yet used by RAG — the product name must appear in body text, paired with the feature term ("Tableau Prep Flows", not just "Flows")
 - Title is prepended to every chunk, so it directly affects all retrieval
+- Content is retrieved best when phrased conversationally and in complete sentences that mirror how a customer would ask the question
 
 Dynamic max points per criterion and any N/A criteria are provided in the user message. TOTAL MUST EQUAL 100.
 
 SCORING: Be ACCURATE and evidence-based, not artificially harsh. Score each criterion on its own merits against the sub-rules below — award full points when the sub-rules are genuinely met, and deduct only for concrete, identifiable problems (cite them in "issues"). A well-structured, complete, product-specific article SHOULD score 90+; a typical legacy article with weak headers/title lands in the 60s-70s; only genuinely poor articles score below 55. Do not deflate a strong article toward an "average" just because high scores feel rare.
 Every criterion MUST include "passed" (what you verified passes) and "issues" (specific problems found).
 
+STRONG SIGNALS OF A POORLY-PERFORMING ARTICLE (weight these heavily when present):
+- Title is generic or names the solution instead of the observed behavior/symptom
+- Structure relies on bold sentences instead of real header tags (breaks chunking)
+- Screenshot- or graphic-heavy with no text/alt-text describing what to do or enter
+- One giant section instead of Description + Resolution split by headers
+- Resolution lists steps with no summary paragraph explaining their intent
+- Link-heavy or reference-heavy content that offloads the actual answer to other pages
+- A single article bundling many unrelated FAQ intents
+- Tables that carry meaning only through visual indicators, or pasted from external sources
+- Product/feature name absent from the body text (present only in the P&T tag)
+
 CRITERIA AND SUB-RULES (max points per criterion given in the user message):
 
-title: ≤60 chars, front-loaded keywords, specific product name included, no question format, matches article intent, symptom-based for troubleshooting articles.
+title: ≤60 chars, keywords front-loaded (searchable feature/task names first), specific product name included, no question format, matches article intent. Describes the ISSUE BEHAVIOR, not the solution. If the article is scoped to a segment/edition/mode, the title says so. GOOD: "Lead History report displays no results", "Create a Case Assignment Rule for Customer Portal", "Salesforce.org Trial Extensions for Nonprofits". BAD: "Enabling Field History Tracking to populate a report" (states the solution), "Troubleshooting Flows" (not product-specific), "How to use Assignment Rules to automatically assign a Case..." (keyword buried, over-length).
 
-summary: ≤170 chars, uses DIFFERENT words than title, includes synonyms/keywords not in title, specifies audience if applicable, includes exact error text for error articles.
+summary: ≤170 chars, uses DIFFERENT words than title (distinct, not a restatement), includes synonyms/keywords not in title, specifies audience if applicable, includes exact error text for error articles. GOOD (title "Disable Chatter" → summary "Learn how to turn off Chatter features for your entire Salesforce org."). The summary is shown to customers in help-site search AND used by Agentforce for retrieval, so it must add searchable terms, not echo the title.
 
-headers: Uses proper <h1>-<h6> tags (NOT bold text), descriptive of section content, logical hierarchy, sections under each header ≤512 tokens (~2048 chars), intent keywords in headers. Bold-as-header is a CRITICAL failure.
+headers: Uses proper <h1>-<h6> tags (NOT bold sentences), descriptive of section content, logical hierarchy, sections under each header ≤512 tokens (~2048 chars), intent keywords in each header. Chunking splits ONLY on real header tags — a bolded sentence does not create a chunk boundary, so bold-as-header is a CRITICAL failure. Test: reading the headers alone should reveal what the article covers and how it is organized. Reference/convention headings (e.g. "Signature", "Return Value") may repeat and that is acceptable.
 
-content: Description explains WHAT question is answered and WHY. Resolution has context paragraph. Real-life examples with Salesforce-format data (not xxxxx placeholders). Uncommon acronyms/abbreviations explained. Present tense. Conversational tone. Complete problem/environment/cause/resolution. No speculative statements. Each section self-contained (readable in isolation as a chunk).
+content: Description explains WHAT question is answered and WHY (root-cause context, when/where/how the issue occurs). Resolution opens with a summary paragraph stating what the steps accomplish and the intent behind them — never jump straight into steps assuming the Description is enough. Most important information first (readers scan in an "F" shape and drop off). Real-life Salesforce examples with realistic-format data (not xxxxx placeholders) when the topic is complex or confusing. Uncommon acronyms/abbreviations defined on first use (BDR = Business Development Representative; API needs no definition). Simple present tense. Conversational, complete sentences that echo how a customer phrases the question. Complete problem/environment/cause/resolution. Original content, not copied from external sources. No speculative statements. Each section self-contained (readable in isolation as a chunk).
 
-scannability: Multiple article sections used (Description + Resolution + Steps). Short paragraphs (3-5 sentences). Bulleted/numbered lists for steps. No wall-of-text. FAQs have descriptive headers per item. Long articles broken into distinct sections. No multi-intent FAQ articles.
+scannability: Multiple article sections used (Description + Resolution + Steps) rather than one dumped block — Agentforce delivers multi-section content better. Short scannable paragraphs (3-5 sentences). Bulleted/numbered lists for steps. Most important info first. No wall-of-text. FAQ items each carry a descriptive, intent-bearing header (e.g. "How to fix Problem 123 when it shows behavior xyz") — intent in the heading is what Agentforce matches on. Large multi-intent FAQs are consumed poorly; each Q&A should be specific and stand alone. Long articles broken into distinct headed sections.
 
-media: All informative images have descriptive alt text. Key info from screenshots ALSO written as text. Steps shown visually ALSO described in text. No screenshot-only solutions.
+media: All informative images have descriptive alt text (the image itself is never served to the customer via Agentforce, but its alt text IS chunked and vectorized — so annotate every image). Key info from screenshots ALSO written as text. Steps shown visually ALSO described in text (a screenshot of a field with no text saying what to enter is a failure). No screenshot-only or attachment-only solutions.
 
-code: Every code block has a text explanation of what it does, its purpose, inputs, and expected output. Solution is understandable WITHOUT reading the code. Code supplements text, not replaces it.
+code: Agentforce consumes code blocks poorly — raw code alone yields unstructured text, incomplete solutions, or "I can't answer". Every code block needs a succinct plain-text description of what it does, its purpose, inputs, and expected output, so the solution is understandable WITHOUT reading the code. Standalone, runnable samples preferred. Code supplements text, never replaces it.
 
-tables: Text-only content (NO checkmarks ✓, circles ●, icons, emojis). Built with in-article table editor (not pasted from external sources). Descriptive column headers. Reasonable width (≤5 columns preferred).
+tables: Text-only content (NO checkmarks ✓, circles ●, icons, emojis as data — a row response needs words, not symbols). Built with the in-article table editor, NOT pasted from Google Sheets or web pages (external paste carries redundant tags that bloat the chunk). Descriptive column headers. Reasonable width (≤5 columns preferred). No images inside tables.
 
-links: Additional Resources section populated with relevant links. Smart links for internal articles. Descriptive link text (not "click here"). No internal-only URLs (orgcs.lightning.force.com). No broken links. Article is self-contained (links supplement, don't replace content).
+links: Additional Resources section populated with relevant links (this section IS used by Agentforce for citations). Descriptive hyperlink TEXT, never raw exposed URLs ("See 'Postmaster Tools' on Gmail Support" not the bare URL; name the external site). No internal-only URLs (orgcs.lightning.force.com, help URLs behind login). No broken links. Article is self-contained (links supplement, don't replace content).
 
-taxonomy: Product name appears explicitly in body text (not just in P&T tag). Uses specific product+feature together ("Tableau Prep Flows" not "Flows"). Edition/cloud specified if applicable. P&T tag aligns with article content.
+taxonomy: Product name appears explicitly in body text (not just in P&T tag, which RAG does not yet read). Uses specific product+feature together ("Tableau Prep Flows" not "Flows"; "MuleSoft APIs" not "APIs"). Edition/cloud/mode specified if the article is scoped to one. P&T tag reflects the BEST-FIT product and topic — not over-tagged with every possible association (less is more; over-tagging clutters retrieval). Example of correct restraint: for "Image Attachments not Rendering in Social Customer Service Case Feed", tag Products {Marketing Cloud, Social Studio} + Topics {Customer Service, Customer Engagement, Social Media} — NOT also {Marketing, Digital Marketing, Technology, Development, Apex}, which are loose associations, not the article's essence.
+
+CALIBRATION — apply this judgment:
+- A behavior-based, product-specific title that a customer would actually search ("Lead History report displays no results") scores full title points; a solution-named or generic title ("Enabling Field History Tracking...", "Troubleshooting Flows") is docked hard even if the body is good.
+- Real header tags with intent keywords that summarize the article when read alone = full headers points; bold sentences doing a header's job = near-zero, because chunking never sees them.
+- A Resolution that opens by stating what the steps accomplish and why, then numbers them, beats a bare step list even when the steps are correct — the intent paragraph is what Agentforce matches a question against.
+- Undefined uncommon acronyms, xxxxx placeholder data, "contact support" as a step, and internal orgcs URLs are each concrete, citable deductions — never overlook them.
 
 Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`;
 

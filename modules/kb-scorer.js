@@ -954,6 +954,20 @@ function renderRewriteScore(article, result) {
   }, String(overall)));
 }
 
+function buildScoreDiagnostics(result) {
+  if (!result || !Array.isArray(result.criteria)) return '';
+  const weak = result.criteria.filter(c => !c.na && c.score < c.max);
+  if (!weak.length) return '';
+  const lines = weak
+    .sort((a, b) => (a.score / a.max) - (b.score / b.max))
+    .map(c => {
+      const problems = [...(c.issues || []), ...(c.suggestions || [])].filter(Boolean);
+      if (!problems.length) return `- ${c.label} (${c.score}/${c.max}): below max — strengthen this criterion.`;
+      return `- ${c.label} (${c.score}/${c.max}): ${problems.join('; ')}`;
+    });
+  return `THIS ARTICLE SCORED ${result.overall}/100. Fix these specific, already-diagnosed weaknesses (lowest-scoring first) as your top priority — do not regress the criteria that already pass:\n${lines.join('\n')}`;
+}
+
 async function generateRewrite(article, session) {
   if (_rewriteAbort) _rewriteAbort.abort();
   const abort = new AbortController();
@@ -997,11 +1011,13 @@ Preserve all technical accuracy from the original. Output EXACTLY these four sec
 ## DESCRIPTION
 ## RESOLUTION`;
 
+  const diagnostics = buildScoreDiagnostics(getState('kb.scores')?.[article.id]);
+
   const user = `Rewrite this article:
 Title: ${article.title}
 Product & Topic: ${article.topicName || '(none)'}
 Validation: ${article.validationStatus || 'Not Validated'}
-
+${diagnostics ? `\n${diagnostics}\n` : ''}
 CURRENT SUMMARY: ${article.summary || '(empty)'}
 CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}

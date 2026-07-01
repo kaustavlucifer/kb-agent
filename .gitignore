@@ -3,5 +3,6 @@
 node_modules/
 dist/
 .claude/
+.fastcontext/
 extras/
 Known_Issue__c-06_06_2026.csv
