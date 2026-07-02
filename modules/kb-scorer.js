@@ -1131,6 +1131,7 @@ REWRITE RULES (each maps to a scored criterion — satisfy ALL):
 5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does.
 6. SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists, no wall-of-text. Each section must read as a self-contained chunk.
 7. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
+8. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
 
 Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
 ## TITLE
