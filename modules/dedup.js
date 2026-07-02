@@ -4,9 +4,10 @@ import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_BATCH_SIZE, DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { runDedupBatch } from '../shared/dedup.js';
+import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS, CLOUDS, getCloudFromPt } from '../shared/config.js';
+import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup.js';
 import { fetchArticleBodies } from '../shared/scoring.js';
+import { estimateDedup, fmtUsd } from '../shared/cost.js';
 
 let _container = null;
 let _unsubs = [];
@@ -77,7 +78,9 @@ function render() {
   let scopedArticles = articles;
   if (_filterCloud.length) scopedArticles = scopedArticles.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
   if (_filterPt.length) scopedArticles = scopedArticles.filter(a => _filterPt.includes(a.topicName));
-  const batchCount = Math.ceil(scopedArticles.length / DEDUP_BATCH_SIZE);
+  const workQueue = buildDedupWorkQueue(scopedArticles);
+  const batchCount = workQueue.length;
+  const est = batchCount && !running ? estimateDedup(workQueue.map(w => w.batch)) : null;
   const scopeInfo = _filterPt.length
     ? `Filtered: ${scopedArticles.length} articles in ${_filterPt.length} P&Ts, ${batchCount} batches`
     : `All P&Ts: ${scopedArticles.length} articles, ${batchCount} batches`;
@@ -86,6 +89,10 @@ function render() {
     cloudMulti,
     ptMulti,
     h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, scopeInfo),
+    est ? h('span', {
+      style: { fontSize: '11px', color: 'var(--text-muted)', alignSelf: 'center' },
+      title: `${est.calls} calls · ~${est.inputTokens.toLocaleString()} in / ~${est.outputTokens.toLocaleString()} out tokens at current scoring model`
+    }, `est. ~${fmtUsd(est.costUsd)}`) : null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
       running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),
@@ -167,40 +174,30 @@ async function detectDuplicates() {
     const session = await detectSession();
     if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-    const ptGroups = new Map();
-    for (const a of articles) {
-      const pt = a.topicName || '__other__';
-      if (!ptGroups.has(pt)) ptGroups.set(pt, []);
-      ptGroups.get(pt).push(a);
-    }
-
-    const workQueue = [];
-    for (const [ptName, ptArticles] of ptGroups) {
-      if (ptArticles.length < 2) continue;
-      for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
-        workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
-      }
-    }
-
+    const workQueue = buildDedupWorkQueue(articles);
     if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
 
     setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
 
     const bodyIds = articles.map(a => a.id);
     const bodyMap = await fetchArticleBodies(bodyIds, session);
+    const bodyFetchFailures = bodyMap.failedIds?.size || 0;
 
     const allPairs = [];
     let done = 0;
+    let incompleteBatches = 0;
 
     await mapWithConcurrency(workQueue, DEDUP_CONCURRENCY, async (item) => {
       setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
       const enriched = item.batch.map(a => ({
         ...a,
         description: bodyMap.get(a.id)?.description || '',
-        resolution: bodyMap.get(a.id)?.resolution || ''
+        resolution: bodyMap.get(a.id)?.resolution || '',
+        steps: bodyMap.get(a.id)?.steps || ''
       }));
-      const pairs = await runDedupBatch(enriched);
+      const { pairs, incomplete } = await runDedupBatch(enriched);
       allPairs.push(...pairs);
+      if (incomplete) incompleteBatches++;
       done++;
       setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
     });
@@ -211,8 +208,7 @@ async function detectDuplicates() {
       articleMap.set(String(a.articleNumber), a);
     });
 
-    const enrichedPairs = allPairs
-      .filter(p => p.confidence >= 0.85)
+    const enrichedPairs = dedupePairs(allPairs.filter(p => p.confidence >= 0.85))
       .map(p => ({
         ...p,
         ptName: articleMap.get(String(p.articleA))?.topicName || '',
@@ -225,7 +221,14 @@ async function detectDuplicates() {
     setState('dedup.pairs', enrichedPairs);
     setState('dedup.running', null);
     await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
-    toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
+    if (incompleteBatches || bodyFetchFailures) {
+      const reasons = [];
+      if (incompleteBatches) reasons.push(`${incompleteBatches} batch(es) truncated`);
+      if (bodyFetchFailures) reasons.push(`${bodyFetchFailures} article bodies failed to load`);
+      toast(`Found ${enrichedPairs.length} duplicate pairs. ${reasons.join(', ')} — some duplicates may be missing. Re-run to retry.`, 'warning');
+    } else {
+      toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
+    }
   } catch (e) {
     toast('Detection failed: ' + e.message, 'error');
     setState('dedup.running', null);
@@ -235,8 +238,8 @@ async function detectDuplicates() {
 
 async function showMerge(pair) {
   const articles = getState('kb.articles') || [];
-  const artA = articles.find(a => a.articleNumber === pair.articleA);
-  const artB = articles.find(a => a.articleNumber === pair.articleB);
+  const artA = articles.find(a => String(a.articleNumber) === String(pair.articleA));
+  const artB = articles.find(a => String(a.articleNumber) === String(pair.articleB));
 
   const streamEl = h('div', { id: 'merge-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
   const content = h('div', null,

@@ -1,37 +1,29 @@
 import { streamClaude } from '../../shared/gateway.js';
 import { stripHtml } from '../../shared/api.js';
-import { DEDUP_BATCH_SIZE, MAX_BODY_CHARS } from '../../shared/config.js';
-import { runDedupBatch } from '../../shared/dedup.js';
+import { MAX_BODY_CHARS } from '../../shared/config.js';
+import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../../shared/dedup.js';
 
 export async function handleDedup(port, msg) {
   const articles = msg.articles || [];
   if (articles.length < 2) { port.postMessage({ type: 'done', pairs: [] }); return; }
 
-  const ptGroups = new Map();
-  for (const a of articles) {
-    const pt = a.topicName || '__other__';
-    if (!ptGroups.has(pt)) ptGroups.set(pt, []);
-    ptGroups.get(pt).push(a);
-  }
-
-  const workQueue = [];
-  for (const [ptName, ptArticles] of ptGroups) {
-    if (ptArticles.length < 2) continue;
-    for (let i = 0; i < ptArticles.length; i += DEDUP_BATCH_SIZE) {
-      workQueue.push({ ptName, batch: ptArticles.slice(i, i + DEDUP_BATCH_SIZE) });
-    }
-  }
+  const workQueue = buildDedupWorkQueue(articles);
 
   const allPairs = [];
   let done = 0;
+  let incompleteBatches = 0;
   for (const item of workQueue) {
-    const pairs = await runDedupBatch(item.batch);
+    const { pairs, incomplete } = await runDedupBatch(item.batch);
     allPairs.push(...pairs);
+    if (incomplete) incompleteBatches++;
     done++;
     port.postMessage({ type: 'progress', done, total: workQueue.length, ptName: item.ptName });
   }
 
-  port.postMessage({ type: 'done', pairs: allPairs.filter(p => p.confidence >= 0.85).slice(0, 30) });
+  const finalPairs = dedupePairs(allPairs.filter(p => p.confidence >= 0.85))
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+    .slice(0, 30);
+  port.postMessage({ type: 'done', pairs: finalPairs, incompleteBatches });
 }
 
 export async function handleMerge(port, msg) {
