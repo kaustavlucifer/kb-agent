@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KB Agent",
-  "version": "2.9.2",
+  "version": "2.9.3",
   "description": "AI-powered KB quality management for Industry & Revenue Cloud — case analysis, article generation, scoring, Known Issues integration, and Agentforce readiness.",
   "permissions": [
     "storage",

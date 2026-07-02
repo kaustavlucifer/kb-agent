@@ -36,7 +36,7 @@ function buildClaudeGenStamp({ caseNumber, model } = {}) {
 
 function sectionsToHtml(sections) {
   return (sections || []).map(s =>
-    `<h2>${escapeHtml(s.heading || 'Section')}</h2>\n${markdownToHtml(s.body || '', { headingBase: 3 })}`
+    markdownToHtml(s.body || '', { headingBase: 1 })
   ).join('\n');
 }
 
