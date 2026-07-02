@@ -863,6 +863,7 @@ async function scoreOne(article) {
 
 let _rewriteCache = {};
 let _rewriteAbort = null;
+let _rewriteRefineApplied = {};
 
 async function enrichForScore(article, session) {
   const bodyMap = await fetchArticleBodies([article.id], session);
@@ -872,6 +873,33 @@ async function enrichForScore(article, session) {
 function showRefineInput() {
   const el = document.getElementById('rewrite-refine');
   if (el) el.style.display = '';
+}
+
+function renderAppliedRefine(article) {
+  const host = document.getElementById('rewrite-applied');
+  if (!host) return;
+  host.textContent = '';
+  const applied = _rewriteRefineApplied[article.id];
+  if (!applied) { host.style.display = 'none'; return; }
+  host.style.display = '';
+  host.appendChild(h('div', {
+    style: {
+      display: 'flex', gap: '8px', alignItems: 'flex-start',
+      padding: '8px 10px', marginBottom: '12px', borderRadius: '6px',
+      background: 'var(--primary-soft)', border: '1px solid var(--border)'
+    }
+  },
+    h('div', { style: { flex: '1', minWidth: '0' } },
+      h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '3px', textTransform: 'uppercase', letterSpacing: '0.03em' } }, 'Applied as context'),
+      h('div', { style: { fontSize: '12px', color: 'var(--text-primary)', lineHeight: '1.5', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, applied)
+    ),
+    h('button', {
+      class: 'btn btn--ghost btn--sm',
+      title: 'Remove these instructions and stop applying them on regenerate',
+      style: { padding: '2px 6px', lineHeight: '1', flexShrink: '0' },
+      onClick: () => { delete _rewriteRefineApplied[article.id]; renderAppliedRefine(article); }
+    }, '✕')
+  ));
 }
 
 function setRewriteStatus(streamEl, message) {
@@ -912,6 +940,7 @@ async function rewriteArticle(article) {
         h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create New Version in ORGCS')
       )
     ),
+    h('div', { id: 'rewrite-applied', style: { display: 'none' } }),
     refineInput,
     streamEl
   );
@@ -921,6 +950,8 @@ async function rewriteArticle(article) {
     wide: true,
     onClose: () => { closed = true; if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; } }
   });
+
+  renderAppliedRefine(article);
 
   if (cached) {
     showRefineInput();
@@ -1108,7 +1139,15 @@ Preserve all technical accuracy from the original. Output EXACTLY these four sec
 ## RESOLUTION`;
 
   const diagnostics = buildScoreDiagnostics(getState('kb.scores')?.[article.id]);
-  const refine = (document.getElementById('rewrite-refine')?.value || '').trim().slice(0, 1000);
+  const refineInput = document.getElementById('rewrite-refine');
+  const typed = (refineInput?.value || '').trim().slice(0, 1000);
+  if (typed) {
+    const prior = _rewriteRefineApplied[article.id];
+    _rewriteRefineApplied[article.id] = (prior ? `${prior}\n${typed}` : typed).slice(-2000);
+    if (refineInput) refineInput.value = '';
+    renderAppliedRefine(article);
+  }
+  const refine = _rewriteRefineApplied[article.id] || '';
 
   const user = `Rewrite this article:
 Title: ${article.title}
