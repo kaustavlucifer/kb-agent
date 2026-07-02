@@ -1,6 +1,6 @@
 import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, soqlIdList } from './api.js';
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
-import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, SCORING_MODEL } from './config.js';
+import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, SCORING_MODEL, SCORING_MAX_TOKENS } from './config.js';
 import { SCORING_CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
 
 export { SCORING_CRITERIA, computeDynamicMaxes };
@@ -180,12 +180,12 @@ export function draftToScorable(draft) {
   };
 }
 
-export async function scoreArticle(article) {
+export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS) {
   const { system, user, maxes } = buildScoringPrompt(article);
   const resp = await callClaudeFast({
     system,
     messages: [{ role: 'user', content: user }],
-    maxTokens: 2200,
+    maxTokens,
     temperature: 0.1,
     model: SCORING_MODEL,
     cache: true
@@ -198,19 +198,29 @@ const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
 export async function fetchArticleBodies(articleIds, session) {
   const bodyMap = new Map();
+  const failedIds = new Set();
   const validIds = articleIds.filter(id => SF_ID_RE.test(id));
   const batches = [];
   for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
+  const runBatch = async (batch) => {
+    const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
+    const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+    const result = await sfGet(url, session.sid);
+    for (const r of (result.records || [])) {
+      bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
+    }
+  };
   for (const batch of batches) {
     try {
-      const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
-      const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, session.sid);
-      for (const r of (result.records || [])) {
-        bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
-      }
+      await runBatch(batch);
     } catch (e) {
+      try {
+        await runBatch(batch);
+      } catch (e2) {
+        batch.forEach(id => failedIds.add(id));
+      }
     }
   }
+  bodyMap.failedIds = failedIds;
   return bodyMap;
 }

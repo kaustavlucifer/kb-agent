@@ -4,8 +4,9 @@ import { detectSession } from '../shared/auth.js';
 import { sfGet, sfQueryAll, mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
+import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
+import { estimateScoring, fmtUsd } from '../shared/cost.js';
 
 let _container = null;
 let _unsubs = [];
@@ -121,7 +122,7 @@ function debouncedRender() {
   if (_renderTimer) return;
   _renderTimer = setTimeout(() => {
     _renderTimer = null;
-    if (getState('kb.scoring') && _container?.querySelector('.data-table') && _sorter.col !== 'score') {
+    if (getState('kb.scoring') && _container?.querySelector('.data-table')) {
       updateScoreCellsInPlace();
     } else {
       render();
@@ -149,6 +150,8 @@ function updateScoreCellsInPlace() {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
     const progressLabel = document.getElementById('kb-scoring-label');
     if (progressLabel) progressLabel.textContent = `Scoring: ${scoring.done} / ${scoring.total}${scoring.retrying ? ` (retrying ${scoring.retrying})` : ''}`;
+    const pctLabel = document.getElementById('kb-scoring-pct');
+    if (pctLabel) pctLabel.textContent = `${pct}%`;
     const bar = _container.querySelector('#kb-scoring-card .progress__fill');
     if (bar) bar.style.width = `${pct}%`;
     const barLabel = _container.querySelector('#kb-scoring-card .progress__label');
@@ -194,10 +197,6 @@ function updateScoreCellsInPlace() {
       scoreTd.appendChild(h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—'));
     }
   });
-
-  if (scoring && scoring.done % 10 === 0 && scoring.done > 0) {
-    setTimeout(render, 50);
-  }
 }
 
 function render() {
@@ -272,10 +271,20 @@ function render() {
   const totalPages = Math.ceil(filtered.length / _pageSize) || 1;
   if (_page >= totalPages) _page = Math.max(0, totalPages - 1);
   const pageStart = _page * _pageSize;
-  const pageArticleCount = Math.min(_pageSize, filtered.length - pageStart);
-  const scoreBtnLabel = scoring ? 'Scoring…' : `Score Page (${pageArticleCount})`;
-  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !pageArticleCount || !!scoring }, scoreBtnLabel);
+  const pageItemsForCount = filtered.slice(pageStart, pageStart + _pageSize);
+  const unscoredPageItems = pageItemsForCount.filter(a => scores[a.id]?.overall == null);
+  const unscoredOnPage = unscoredPageItems.length;
+  const scoreBtnLabel = scoring ? 'Scoring…' : `Score Page (${unscoredOnPage})`;
+  const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !unscoredOnPage || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
+
+  const scoreEst = unscoredOnPage && !scoring ? estimateScoring(unscoredPageItems) : null;
+  const estHint = scoreEst
+    ? h('span', {
+        style: { fontSize: '11px', color: 'var(--text-muted)', alignSelf: 'center' },
+        title: `${scoreEst.calls} calls · ~${scoreEst.inputTokens.toLocaleString()} in / ~${scoreEst.outputTokens.toLocaleString()} out tokens at current scoring model`
+      }, `est. ~${fmtUsd(scoreEst.costUsd)}`)
+    : null;
 
   const filtersRow = h('div', { class: 'tab-toolbar' },
     searchInput,
@@ -284,7 +293,8 @@ function render() {
     scoreMulti,
     valMulti,
     publishMulti,
-    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'center' } },
+      estHint,
       refreshBtn,
       scoreBtn
     )
@@ -300,7 +310,7 @@ function render() {
     stickySection.appendChild(h('div', { id: 'kb-scoring-card', class: 'card', style: { marginTop: '8px', padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
         h('span', { id: 'kb-scoring-label' }, scoring.phase === 'fetching' ? 'Fetching article bodies…' : `Scoring: ${scoring.done} / ${scoring.total}${scoring.retrying ? ` (retrying ${scoring.retrying})` : ''}`),
-        h('span', null, `${pct}%`)
+        h('span', { id: 'kb-scoring-pct' }, `${pct}%`)
       ),
       progressBar(pct, 'default', true),
       h('div', { id: 'kb-scoring-active', style: { display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', fontSize: '11px', color: 'var(--text-muted)', minHeight: '16px' } },
@@ -335,25 +345,6 @@ function render() {
     scrollSection.appendChild(emptyState('📄', 'No articles loaded. Click Refresh to fetch from Salesforce.'));
     return;
   }
-
-  const sortCol = _sorter.col;
-  filtered.sort((a, b) => {
-    let va, vb;
-    if (sortCol === 'score') {
-      va = scores[a.id]?.overall ?? -1;
-      vb = scores[b.id]?.overall ?? -1;
-    } else if (sortCol === 'agfHits') {
-      va = _agfHits?.[a.articleNumber]?.agfHits ?? 0;
-      vb = _agfHits?.[b.articleNumber]?.agfHits ?? 0;
-    } else if (sortCol === 'lastPublished') {
-      va = a.lastPublished || '';
-      vb = b.lastPublished || '';
-    } else {
-      va = (a[sortCol] || '').toLowerCase();
-      vb = (b[sortCol] || '').toLowerCase();
-    }
-    return _sorter.compare(va, vb);
-  });
 
   const ind = (col) => _sorter.indicator(col);
   const table = h('table', { class: scoring ? 'data-table' : 'data-table data-table--animated' },
@@ -399,7 +390,10 @@ function render() {
       ),
       h('td', null,
         h('div', { style: { fontSize: '12px', fontWeight: '500' } }, a.title || ''),
-        a.validationStatus ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, a.validationStatus) : null
+        h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' } },
+          a.publishStatus ? h('span', { class: `pill pill--${a.publishStatus === 'Online' ? 'success' : a.publishStatus === 'Draft' ? 'warning' : 'neutral'}`, style: { fontSize: '9px', padding: '1px 5px' } }, a.publishStatus) : null,
+          a.validationStatus ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, a.validationStatus) : null
+        )
       ),
       h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, a.topicName || ''),
       h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, pubDate),
@@ -408,12 +402,15 @@ function render() {
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px' } },
           scoreData?.overall != null
-            ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '14px', padding: '2px 6px' }, title: 'View score details', onClick: () => showScoreDetail(a, scoreData) }, '👁')
-            : null,
-          h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, scoreData?.overall != null ? 'Rescore' : 'Score'),
-          (scoreData?.overall != null && scoreData.overall >= SCORE_GOOD_ENOUGH_THRESHOLD)
-            ? h('button', { class: 'btn btn--ghost btn--sm', disabled: true, title: `Already at AGF quality ${scoreData.overall} (≥${SCORE_GOOD_ENOUGH_THRESHOLD}) — no improvement needed` }, 'Rewrite')
-            : h('button', { class: 'btn btn--ghost btn--sm', onClick: () => rewriteArticle(a) }, 'Rewrite')
+            ? h('button', { class: 'btn btn--ghost btn--sm', title: 'View score details and rescore', onClick: () => showScoreDetail(a, scoreData) }, 'Score')
+            : h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, 'Score'),
+          h('button', {
+            class: 'btn btn--ghost btn--sm',
+            title: (scoreData?.overall != null && scoreData.overall >= SCORE_GOOD_ENOUGH_THRESHOLD)
+              ? `Already at AGF quality ${scoreData.overall} (≥${SCORE_GOOD_ENOUGH_THRESHOLD}) — rewrite only if you have a specific reason`
+              : 'Rewrite this article to improve AGF quality',
+            onClick: () => rewriteArticle(a)
+          }, 'Rewrite')
         )
       )
     ));
@@ -435,13 +432,18 @@ function render() {
 
 function showScoreDetail(article, scoreData) {
   if (!scoreData?.criteria) return;
+  let close;
+
   const body = h('div', null,
-    h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '16px' } },
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', gap: '12px' } },
       h('div', null,
         h('div', { style: { fontSize: '14px', fontWeight: '600' } }, article.title),
         h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, `#${article.articleNumber}`)
       ),
-      h('div', { style: { fontSize: '24px', fontWeight: '700', color: scoreData.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : scoreData.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(scoreData.overall))
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+        h('div', { style: { fontSize: '24px', fontWeight: '700', color: scoreData.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : scoreData.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(scoreData.overall)),
+        h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); scoreOne(article); } }, 'Rescore')
+      )
     )
   );
 
@@ -462,7 +464,7 @@ function showScoreDetail(article, scoreData) {
   });
   body.appendChild(criteriaTable);
 
-  modal(`Score: ${article.articleNumber}`, body, { wide: true });
+  ({ close } = modal(`Score: ${article.articleNumber}`, body, { wide: true }));
 }
 
 async function loadArticles(forceLive = false) {
@@ -540,6 +542,24 @@ function getFilteredArticles() {
       return false;
     });
   });
+  const sortCol = _sorter.col;
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (sortCol === 'score') {
+      va = scores[a.id]?.overall ?? -1;
+      vb = scores[b.id]?.overall ?? -1;
+    } else if (sortCol === 'agfHits') {
+      va = _agfHits?.[a.articleNumber]?.agfHits ?? 0;
+      vb = _agfHits?.[b.articleNumber]?.agfHits ?? 0;
+    } else if (sortCol === 'lastPublished') {
+      va = a.lastPublished || '';
+      vb = b.lastPublished || '';
+    } else {
+      va = (a[sortCol] || '').toLowerCase();
+      vb = (b[sortCol] || '').toLowerCase();
+    }
+    return _sorter.compare(va, vb);
+  });
   return filtered;
 }
 
@@ -558,51 +578,55 @@ async function scoreAll() {
 
   const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
   setState('kb.scoring', { done: 0, total: toScore.length });
-  const scores = { ...existingScores };
+  const batchResults = {};
   const inFlight = new Set();
-  const countDone = () => toScore.filter(a => scores[a.id]?.overall != null).length;
+  const settled = () => toScore.filter(a => batchResults[a.id]?.overall != null).length;
+  const commit = (id, result) => {
+    batchResults[id] = result;
+    const cur = getState('kb.scores') || {};
+    setState('kb.scores', { ...cur, [id]: result });
+  };
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
     inFlight.add(article.id);
     setState('kb.scoringIds', [...inFlight]);
     const body = bodyMap.get(article.id) || {};
     const enriched = { ...article, ...body };
+    let result;
     try {
-      const result = await scoreArticle(enriched);
-      scores[article.id] = result;
+      result = await scoreArticle(enriched);
     } catch (e) {
-      scores[article.id] = { overall: null, criteria: [], error: e.message };
+      result = { overall: null, criteria: [], error: e.message };
     }
     inFlight.delete(article.id);
+    commit(article.id, result);
     setState('kb.scoringIds', [...inFlight]);
-    setState('kb.scores', { ...scores });
-    setState('kb.scoring', { done: countDone(), total: toScore.length });
+    setState('kb.scoring', { done: settled(), total: toScore.length });
   });
 
-  const failed = toScore.filter(a => scores[a.id]?.overall == null);
+  const failed = toScore.filter(a => batchResults[a.id]?.overall == null);
   if (failed.length) {
+    setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
     await new Promise(r => setTimeout(r, 2000));
-    setState('kb.scoring', { done: countDone(), total: toScore.length, retrying: failed.length });
     await mapWithConcurrency(failed, 2, async (article) => {
       inFlight.add(article.id);
       setState('kb.scoringIds', [...inFlight]);
       const body = bodyMap.get(article.id) || {};
       const enriched = { ...article, ...body };
       try {
-        const result = await scoreArticle(enriched);
-        scores[article.id] = result;
+        const result = await scoreArticle(enriched, SCORING_RETRY_MAX_TOKENS);
+        commit(article.id, result);
       } catch {}
       inFlight.delete(article.id);
       setState('kb.scoringIds', [...inFlight]);
-      setState('kb.scores', { ...scores });
-      setState('kb.scoring', { done: countDone(), total: toScore.length, retrying: failed.length });
+      setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
     });
   }
 
-  await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+  await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: getState('kb.scores') || {} });
   setState('kb.scoring', null);
   setState('kb.scoringIds', []);
-  const successCount = toScore.filter(a => scores[a.id]?.overall != null).length;
+  const successCount = toScore.filter(a => batchResults[a.id]?.overall != null).length;
   const stillFailed = toScore.length - successCount;
   toast(`Scored ${successCount}/${toScore.length} articles.${stillFailed ? ` ${stillFailed} failed.` : ''}`, stillFailed ? 'warning' : 'success');
 }
@@ -631,9 +655,18 @@ function tryExtractCriteria(text) {
   const results = [];
   let depth = 0;
   let objStart = -1;
+  let inString = false;
+  let escaped = false;
   for (let i = startIdx; i < text.length; i++) {
     const ch = text[i];
-    if (ch === '{') { if (depth === 1) objStart = i; depth++; }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; }
+    else if (ch === '{') { if (depth === 1) objStart = i; depth++; }
     else if (ch === '}') {
       depth--;
       if (depth === 1 && objStart >= 0) {
@@ -701,13 +734,39 @@ async function scoreOne(article) {
   const enriched = { ...article, ...body };
   const { system, user, maxes } = buildScoringPrompt(enriched);
 
-  let renderedCount = 0;
+  const setProgress = (text, mode) => {
+    const progressEl = document.getElementById('score-progress');
+    if (!progressEl) return;
+    progressEl.textContent = '';
+    progressEl.style.display = 'flex';
+    if (mode === 'spin') {
+      progressEl.appendChild(spinner('sm'));
+      progressEl.appendChild(h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, text));
+    } else {
+      progressEl.appendChild(h('span', { style: { color: mode, fontSize: '12px' } }, text));
+    }
+  };
 
-  try {
+  const resetCriteriaRows = () => {
+    const ctbody = document.getElementById('score-criteria-body');
+    if (!ctbody) return;
+    ctbody.textContent = '';
+    CRITERIA.forEach(c => ctbody.appendChild(h('tr', { id: `score-row-${c.id}` },
+      h('td', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, c.label),
+      h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '…')),
+      h('td', null, ''),
+      h('td', null, ''),
+      h('td', null, '')
+    )));
+  };
+
+  const attempt = async (maxTokens) => {
+    let renderedCount = 0;
+    resetCriteriaRows();
     const fullText = await streamClaude({
       system,
       messages: [{ role: 'user', content: user }],
-      maxTokens: 2200,
+      maxTokens,
       temperature: 0.1,
       model: SCORING_MODEL,
       cache: true,
@@ -744,14 +803,37 @@ async function scoreOne(article) {
         }
       }
     });
+    return parseScoreResponse(fullText, maxes);
+  };
 
-    const result = parseScoreResponse(fullText, maxes);
+  const budgets = [SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS];
+
+  try {
+    let result = null;
+    for (let i = 0; i < budgets.length; i++) {
+      if (i > 0) setProgress('Response was incomplete — retrying with a larger budget…', 'spin');
+      try {
+        result = await attempt(budgets[i]);
+      } catch (e) {
+        if (closed || e.name === 'AbortError') return;
+        if (i === budgets.length - 1) throw e;
+        result = null;
+        continue;
+      }
+      if (closed) return;
+      if (result.overall != null) break;
+    }
+
+    if (!result || result.overall == null) {
+      setProgress('Scoring could not complete after retry. Try Rescore again.', 'var(--error)');
+      return;
+    }
 
     const progressEl = document.getElementById('score-progress');
     if (progressEl) progressEl.style.display = 'none';
 
     const ctbody = document.getElementById('score-criteria-body');
-    if (ctbody && result.criteria) {
+    if (ctbody) {
       ctbody.textContent = '';
       result.criteria.forEach(c => {
         const row = renderCriterionRow(c);
@@ -761,7 +843,7 @@ async function scoreOne(article) {
 
     const overallEl = document.getElementById('score-overall');
     const overallVal = document.getElementById('score-overall-value');
-    if (overallEl && overallVal && result.overall != null) {
+    if (overallEl && overallVal) {
       overallEl.style.display = 'block';
       const color = result.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : result.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)';
       overallVal.style.color = color;
@@ -773,11 +855,7 @@ async function scoreOne(article) {
     await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
   } catch (e) {
     if (closed || e.name === 'AbortError') return;
-    const progressEl = document.getElementById('score-progress');
-    if (progressEl) {
-      progressEl.textContent = '';
-      progressEl.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, 'Error: ' + e.message));
-    }
+    setProgress('Error: ' + e.message, 'var(--error)');
   } finally {
     markScoring(false);
   }
@@ -791,24 +869,9 @@ async function enrichForScore(article, session) {
   return { ...article, ...(bodyMap.get(article.id) || {}) };
 }
 
-function showNoImprovementNeeded(article, score) {
-  let close;
-  const body = h('div', null,
-    h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' } },
-      h('div', { style: { fontSize: '28px', fontWeight: '700', color: 'var(--success)' } }, String(score)),
-      h('div', null,
-        h('div', { style: { fontSize: '13px', fontWeight: '600' } }, 'No improvement needed'),
-        h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, `#${article.articleNumber} — ${article.title}`)
-      )
-    ),
-    h('p', { style: { fontSize: '12px', lineHeight: '1.5', color: 'var(--text-secondary)', marginBottom: '16px' } },
-      `This article already scores ${score}, at or above the good-enough threshold of ${SCORE_GOOD_ENOUGH_THRESHOLD} for Agentforce quality. A rewrite is unlikely to add enough value to justify the effort. You can rewrite anyway if you have a specific reason.`),
-    h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
-      h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); rewriteArticle(article, true); } }, 'Rewrite anyway'),
-      h('button', { class: 'btn btn--primary btn--sm', onClick: () => close() }, 'OK')
-    )
-  );
-  ({ close } = modal('Already High Quality', body));
+function showRefineInput() {
+  const el = document.getElementById('rewrite-refine');
+  if (el) el.style.display = '';
 }
 
 function setRewriteStatus(streamEl, message) {
@@ -820,7 +883,7 @@ function setRewriteStatus(streamEl, message) {
   ));
 }
 
-async function rewriteArticle(article, forceAfterGate = false) {
+async function rewriteArticle(article) {
   const cached = _rewriteCache[article.id];
 
   const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } });
@@ -830,6 +893,14 @@ async function rewriteArticle(article, forceAfterGate = false) {
   const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', disabled: !cached, onClick: () => generateRewrite(article, _rwSession) }, cached ? 'Regenerate' : 'Working…');
 
   let _rwSession = null;
+
+  const refineInput = h('textarea', {
+    id: 'rewrite-refine',
+    class: 'input',
+    rows: '2',
+    placeholder: 'Optional: extra instructions for the rewrite (e.g. "keep the SOQL example", "target admins", "shorten the resolution"). Applied when you regenerate.',
+    style: { width: '100%', marginBottom: '12px', fontSize: '12px', resize: 'vertical', display: 'none' }
+  });
 
   const content = h('div', null,
     h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' } },
@@ -841,16 +912,18 @@ async function rewriteArticle(article, forceAfterGate = false) {
         h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-publish', onClick: () => publishRewriteToOrgcs(article) }, 'Create New Version in ORGCS')
       )
     ),
+    refineInput,
     streamEl
   );
 
   let closed = false;
-  const ref = modal('Rewrite Article', content, {
+  modal('Rewrite Article', content, {
     wide: true,
     onClose: () => { closed = true; if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; } }
   });
 
   if (cached) {
+    showRefineInput();
     const cachedScore = _rewriteScoreCache[article.id];
     if (cachedScore) renderRewriteScore(article, cachedScore);
     return;
@@ -866,28 +939,39 @@ async function rewriteArticle(article, forceAfterGate = false) {
   }
   _rwSession = session;
 
-  if (!forceAfterGate) {
-    const existing = getState('kb.scores')?.[article.id];
-    let score = existing?.overall;
-    if (score == null) {
-      setRewriteStatus(streamEl, 'Scoring this article before rewrite…');
-      try {
-        const result = await scoreArticle(await enrichForScore(article, session));
-        if (closed) return;
-        if (result.overall != null) {
-          const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
-          setState('kb.scores', scores);
-          await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
-          score = result.overall;
-        }
-      } catch {}
-    }
-    if (closed) return;
-    if (score != null && score >= SCORE_GOOD_ENOUGH_THRESHOLD) {
-      ref.close();
-      showNoImprovementNeeded(article, score);
-      return;
-    }
+  const existing = getState('kb.scores')?.[article.id];
+  let score = existing?.overall;
+  if (score == null) {
+    setRewriteStatus(streamEl, 'Scoring this article before rewrite…');
+    try {
+      const result = await scoreArticle(await enrichForScore(article, session));
+      if (closed) return;
+      if (result.overall != null) {
+        const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
+        setState('kb.scores', scores);
+        await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+        score = result.overall;
+      }
+    } catch {}
+  }
+  if (closed) return;
+  if (score != null && score >= SCORE_GOOD_ENOUGH_THRESHOLD) {
+    showRefineInput();
+    regenBtn.disabled = false;
+    regenBtn.textContent = 'Regenerate';
+    streamEl.textContent = '';
+    streamEl.appendChild(h('div', { style: { padding: '4px 0' } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' } },
+        h('div', { style: { fontSize: '22px', fontWeight: '700', color: 'var(--success)' } }, String(score)),
+        h('div', null,
+          h('div', { style: { fontSize: '13px', fontWeight: '600' } }, 'Already high quality'),
+          h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' } },
+            `This article scores ${score}, at or above the good-enough threshold of ${SCORE_GOOD_ENOUGH_THRESHOLD}. A rewrite may add little value — but you can add instructions above and rewrite anyway.`)
+        )
+      ),
+      h('button', { class: 'btn btn--secondary btn--sm', onClick: () => generateRewrite(article, session) }, 'Rewrite anyway')
+    ));
+    return;
   }
 
   if (closed) return;
@@ -928,10 +1012,12 @@ async function scoreRewrite(article, fullText) {
   };
   try {
     const result = await scoreArticle(enriched);
+    if (_rewriteCache[article.id] !== fullText) return;
     result.title = enriched.title;
     _rewriteScoreCache[article.id] = result;
     renderRewriteScore(article, result);
   } catch (e) {
+    if (_rewriteCache[article.id] !== fullText) return;
     if (scoreEl) {
       scoreEl.textContent = '';
       scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, 'Score failed'));
@@ -981,6 +1067,16 @@ async function generateRewrite(article, session) {
   const scoreEl = document.getElementById('rewrite-score');
   if (scoreEl) scoreEl.textContent = '';
 
+  if (!session?.sid) {
+    session = await detectSession();
+    if (_rewriteAbort !== abort || abort.signal.aborted) return;
+    if (!session.sid) {
+      if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'No Salesforce session.')); }
+      if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+      return;
+    }
+  }
+
   const bodyMap = await fetchArticleBodies([article.id], session);
   const body = bodyMap.get(article.id) || {};
   const desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
@@ -1012,12 +1108,13 @@ Preserve all technical accuracy from the original. Output EXACTLY these four sec
 ## RESOLUTION`;
 
   const diagnostics = buildScoreDiagnostics(getState('kb.scores')?.[article.id]);
+  const refine = (document.getElementById('rewrite-refine')?.value || '').trim().slice(0, 1000);
 
   const user = `Rewrite this article:
 Title: ${article.title}
 Product & Topic: ${article.topicName || '(none)'}
 Validation: ${article.validationStatus || 'Not Validated'}
-${diagnostics ? `\n${diagnostics}\n` : ''}
+${diagnostics ? `\n${diagnostics}\n` : ''}${refine ? `\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rewrite rule above): ${refine}\n` : ''}
 CURRENT SUMMARY: ${article.summary || '(empty)'}
 CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
@@ -1055,7 +1152,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
     if (_rewriteAbort === abort) _rewriteAbort = null;
   }
   if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
-  if (fullText.trim()) scoreRewrite(article, fullText);
+  if (fullText.trim()) { showRefineInput(); scoreRewrite(article, fullText); }
 }
 
 async function showRewriteComparison(article) {
