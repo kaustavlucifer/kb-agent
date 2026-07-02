@@ -58,12 +58,14 @@ export function parseBlocks(md) {
   while (i < lines.length) {
     const line = lines[i];
 
-    const fence = line.match(/^```(\w*)\s*$/);
+    const fence = line.match(/^(\s*)```([^\s`]*)\s*$/);
     if (fence) {
-      const lang = fence[1] || '';
+      const indent = fence[1];
+      const lang = fence[2] || '';
+      const stripIndent = new RegExp(`^\\s{0,${indent.length}}`);
       const code = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i].replace(stripIndent, '')); i++; }
       i++;
       blocks.push({ type: 'code', lang, code: code.join('\n') });
       continue;
@@ -107,7 +109,7 @@ export function parseBlocks(md) {
     const para = [line];
     i++;
     while (i < lines.length && lines[i].trim() &&
-      !/^```/.test(lines[i]) &&
+      !/^\s*```/.test(lines[i]) &&
       !/^(#{1,6})\s+/.test(lines[i]) &&
       !/^\s*---+\s*$/.test(lines[i]) &&
       !/^\s*[-*]\s+/.test(lines[i]) &&
