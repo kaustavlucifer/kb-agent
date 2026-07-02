@@ -140,6 +140,15 @@ body {
 .chip--disconnected { border-color: var(--error-border); background: var(--error-soft); color: var(--error); }
 .chip--pending .chip__dot { background: var(--warning); animation: pulse 1.2s infinite; }
 .chip--pending { border-color: var(--warning-border); background: var(--warning-soft); color: var(--warning); }
+.chip--neutral .chip__dot { background: var(--primary); }
+.chip--neutral { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+.header__cost {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+.header__cost + .header__status { margin-left: var(--space-md); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

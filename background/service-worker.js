@@ -1,5 +1,6 @@
 import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
+import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, applySettings } from '../shared/config.js';
@@ -20,9 +21,11 @@ let _settingsReady = (async () => {
 })();
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes[STORAGE_KEYS.SETTINGS]) {
+  if (area !== 'local') return;
+  if (changes[STORAGE_KEYS.SETTINGS]) {
     applySettings(changes[STORAGE_KEYS.SETTINGS].newValue);
   }
+  onCostStorageChange(changes);
 });
 
 chrome.action.onClicked.addListener(() => {
@@ -30,7 +33,9 @@ chrome.action.onClicked.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  _settingsReady.then(() => handleMessage(msg)).then(sendResponse).catch(e => sendResponse({ error: e.message }));
+  _settingsReady.then(() => handleMessage(msg))
+    .then(result => flushCost().then(() => sendResponse(result)))
+    .catch(e => flushCost().then(() => sendResponse({ error: e.message })));
   return true;
 });
 
@@ -263,9 +268,11 @@ function handlePort(port) {
   });
 
   const wrap = (fn) => (msg) => {
-    fn(guardedPort, msg).catch(e => {
-      if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
-    });
+    fn(guardedPort, msg)
+      .catch(e => {
+        if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
+      })
+      .finally(() => { flushCost(); });
   };
 
   switch (port.name) {
@@ -280,9 +287,11 @@ function handlePort(port) {
       break;
     case 'kba-coverage-stream':
       port.onMessage.addListener((msg) => {
-        analyzePtCoverage(msg, guardedPort).catch(e => {
-          if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
-        });
+        analyzePtCoverage(msg, guardedPort)
+          .catch(e => {
+            if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
+          })
+          .finally(() => { flushCost(); });
       });
       break;
     case 'kbs-dedup':

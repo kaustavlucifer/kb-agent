@@ -1,6 +1,7 @@
 import { GATEWAY_BASE, ANTHROPIC_VERSION, ANTHROPIC_CACHE_BETA, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS } from './config.js';
 import { localGet } from './storage.js';
 import { acquireSlot } from './rate-limiter.js';
+import { recordUsage, usageFromResponse } from './cost.js';
 
 async function getToken() {
   const data = await localGet(['gatewayToken']);
@@ -82,7 +83,9 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
       const retryAfter = resp.headers.get('retry-after');
       throw Object.assign(new Error(`Gateway ${resp.status}: ${text.slice(0, 200)}`), { status: resp.status, retryAfter });
     }
-    return resp.json();
+    const data = await resp.json();
+    recordUsage(data.model || m, usageFromResponse(data));
+    return data;
   } finally {
     clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
@@ -144,6 +147,8 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let streamModel = m;
+  const streamUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   let idleTimer = setTimeout(() => { idleAborted = true; controller.abort(); }, STREAM_IDLE_TIMEOUT_MS);
 
   try {
@@ -166,6 +171,14 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
           if (event.type === 'content_block_delta' && event.delta?.text) {
             fullText += event.delta.text;
             if (onDelta) onDelta(event.delta.text, fullText);
+          } else if (event.type === 'message_start' && event.message) {
+            streamModel = event.message.model || streamModel;
+            const u = event.message.usage || {};
+            streamUsage.inputTokens = u.input_tokens || 0;
+            streamUsage.cacheReadTokens = u.cache_read_input_tokens || 0;
+            streamUsage.cacheCreationTokens = u.cache_creation_input_tokens || 0;
+          } else if (event.type === 'message_delta' && event.usage) {
+            streamUsage.outputTokens = event.usage.output_tokens || streamUsage.outputTokens;
           }
         } catch {}
       }
@@ -184,6 +197,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
     if (signal) signal.removeEventListener('abort', onAbort);
   }
 
+  recordUsage(streamModel, streamUsage);
   if (onDone) onDone(fullText);
   return fullText;
 }

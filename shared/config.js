@@ -17,9 +17,27 @@ export const CLAUDE_TIMEOUT_MS = 90_000;
 export let SCORE_CONCURRENCY = 8;
 export const BODY_FETCH_BATCH_SIZE = 50;
 export const MAX_BODY_CHARS = 4000;
+export const SCORING_MAX_TOKENS = 4000;
+export const SCORING_RETRY_MAX_TOKENS = 6000;
 
 export const DEDUP_BATCH_SIZE = 20;
 export const DEDUP_CONCURRENCY = 5;
+export const DEDUP_MAX_TOKENS = 4000;
+export const DEDUP_BODY_CHARS = 2000;
+
+export const MODEL_PRICING = {
+  'claude-haiku-4-5-20251001': { in: 1.0, out: 5.0 },
+  'claude-sonnet-4-6': { in: 3.0, out: 15.0 },
+  'claude-opus-4-7': { in: 15.0, out: 75.0 },
+  'claude-opus-4-8': { in: 15.0, out: 75.0 }
+};
+export const CACHE_READ_MULTIPLIER = 0.1;
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+export const CHARS_PER_TOKEN = 3.7;
+export const SCORING_SYSTEM_CHARS = 9473;
+export const SCORING_EST_OUTPUT_TOKENS = 1200;
+export const DEDUP_SYSTEM_CHARS = 1126;
+export const DEDUP_EST_OUTPUT_INPUT_RATIO = 0.05;
 
 
 export let SCORE_HIGH_THRESHOLD = 80;
@@ -68,7 +86,9 @@ export const STORAGE_KEYS = {
   RECENT_CASES: 'recentCases',
   BYPASS_GUARD_RAILS: 'bypassGuardRails',
   AUTH_CACHE: 'authCache',
-  SETTINGS: 'kba_settings'
+  SETTINGS: 'kba_settings',
+  COST_TOTALS_UI: 'kba_cost_totals_ui',
+  COST_TOTALS_SW: 'kba_cost_totals_sw'
 };
 
 export const MODEL_CHOICES = [

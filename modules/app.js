@@ -1,7 +1,8 @@
-import { h, chip, toast } from '../shared/ui.js';
+import { h, chip, toast, modal } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS, applySettings } from '../shared/config.js';
+import { STORAGE_KEYS, applySettings, MODEL_PRICING } from '../shared/config.js';
+import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../shared/cost.js';
 
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
@@ -30,6 +31,11 @@ async function init() {
     setState('app.connections', cached[STORAGE_KEYS.AUTH_CACHE]);
   }
 
+  setState('app.cost', await getCostTotals());
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local') onCostStorageChange(changes);
+  });
+
   render();
   checkConnections();
 
@@ -57,6 +63,64 @@ function render() {
 
   subscribe('app.activeTab', (tabId) => activateTab(tabId));
   subscribe('app.connections', () => updateConnectionChips());
+  subscribe('app.cost', () => updateCostChip());
+  updateCostChip();
+}
+
+function updateCostChip() {
+  const container = document.getElementById('cost-chip');
+  if (!container) return;
+  container.textContent = '';
+  const cost = getState('app.cost');
+  const total = cost?.costUsd || 0;
+  const el = chip('neutral', fmtUsd(total), {
+    title: `${(cost?.calls || 0).toLocaleString()} AI calls this session — click for a breakdown`,
+    onClick: showCostDetail
+  });
+  el.style.cursor = 'pointer';
+  container.appendChild(el);
+}
+
+function showCostDetail() {
+  const cost = getState('app.cost') || {};
+  const byModel = cost.byModel || {};
+  const rows = Object.entries(byModel)
+    .sort((a, b) => (b[1].costUsd || 0) - (a[1].costUsd || 0))
+    .map(([model, v]) => h('tr', null,
+      h('td', { style: { fontSize: '12px' } }, MODEL_PRICING[model] ? model.replace(/-\d{8}$/, '') : model),
+      h('td', { style: { textAlign: 'right', fontSize: '12px' } }, (v.calls || 0).toLocaleString()),
+      h('td', { style: { textAlign: 'right', fontSize: '12px' } }, ((v.inputTokens || 0) + (v.cacheReadTokens || 0) + (v.cacheCreationTokens || 0)).toLocaleString()),
+      h('td', { style: { textAlign: 'right', fontSize: '12px' } }, (v.outputTokens || 0).toLocaleString()),
+      h('td', { style: { textAlign: 'right', fontSize: '12px', fontWeight: '600' } }, fmtUsd(v.costUsd || 0))
+    ));
+
+  const table = h('table', { class: 'data-table' },
+    h('thead', null, h('tr', null,
+      h('th', null, 'Model'),
+      h('th', { style: { textAlign: 'right' } }, 'Calls'),
+      h('th', { style: { textAlign: 'right' } }, 'Input tok'),
+      h('th', { style: { textAlign: 'right' } }, 'Output tok'),
+      h('th', { style: { textAlign: 'right' } }, 'Cost')
+    )),
+    h('tbody', null, ...(rows.length ? rows : [h('tr', null, h('td', { colspan: '5', style: { textAlign: 'center', color: 'var(--text-muted)', padding: '16px' } }, 'No AI usage recorded yet.'))]))
+  );
+
+  const content = h('div', null,
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '12px' } },
+      h('div', { style: { fontSize: '24px', fontWeight: '700' } }, fmtUsd(cost.costUsd || 0)),
+      h('div', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, `${(cost.calls || 0).toLocaleString()} calls · ${(cost.outputTokens || 0).toLocaleString()} output tokens`)
+    ),
+    table,
+    h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '10px' } },
+      'Actual cost from gateway-reported token usage at public Anthropic list prices. Cache reads bill at ~0.1×.')
+  );
+
+  modal('AI Cost — this session', content, {
+    primaryAction: {
+      label: 'Reset',
+      handler: async () => { await resetCostTotals(); toast('Cost counter reset.', 'success'); }
+    }
+  });
 }
 
 function buildHeader() {
@@ -73,6 +137,7 @@ function buildHeader() {
       h('div', { class: 'header__title' }, 'KB Agent')
     ),
     buildTabs(),
+    h('div', { class: 'header__cost', id: 'cost-chip' }),
     h('div', { class: 'header__status', id: 'connection-chips' }),
     settingsBtn
   );
