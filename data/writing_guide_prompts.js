@@ -2,16 +2,17 @@ export const GUIDE_GENERATION = `AGENTFORCE KB WRITING RULES — follow strictly
 
 TITLE: Must be specific to the product AND the exact issue. Include product name, error text, or scenario. Example: "Troubleshooting Tableau Prep Flows" not "Troubleshooting Flows". If the article is specific to a customer segment, include that (e.g. "Salesforce.org Trial Extensions for Nonprofits").
 
-SUMMARY: 2-4 sentences covering problem context and resolution approach. Used by Agentforce for retrieval but not directly shown to customers on the help portal.
+SUMMARY: 2-4 sentences carrying the intent — WHAT problem/question the article resolves and WHY — plus the resolution approach. This is where the "this article addresses…" intent statement belongs, NOT the Description. Do NOT name a target audience or role ("for developers", "scoped for admins/architects" is jargon — omit it). Used by Agentforce for retrieval but not directly shown to customers on the help portal.
 
 HEADERS: Use H2/H3 header tags to break content into logical sections. NEVER use bold text as a substitute for headers. Agentforce chunking uses header tags to split articles into structured pieces for Data Cloud vectorization. Poor headers = poor chunking = poor retrieval.
 
-DESCRIPTION SECTION: State the problem, symptoms, and context clearly. Explain WHY this happens — root cause context helps the LLM form better answers. Include the product name with feature terms to avoid ambiguity across clouds (e.g. "Revenue Cloud Billing Schedules" not just "Billing Schedules").
+DESCRIPTION SECTION: Open directly with the problem, symptoms, and context — do NOT open with a meta sentence such as "This article addresses…" or "This article is scoped for…" (that intent belongs in the Summary). Explain WHY this happens — root cause context helps the LLM form better answers. Include the product name with feature terms to avoid ambiguity across clouds (e.g. "Revenue Cloud Billing Schedules" not just "Billing Schedules").
 
 RESOLUTION SECTION: Begin with a brief statement of what the steps accomplish. Then provide numbered steps. After code blocks, always add a plain-text explanation of what the code does — Agentforce does not consume code blocks well in isolation.
 
 GENERAL RULES:
 - Explain acronyms and abbreviations (BDR = Business Development Representative). API does not need explanation.
+- Write in impersonal, product-facing voice. Avoid pronouns where possible — no first-person ("I", "we", "our") and no second-person ("you", "your"). Use imperative mood for steps ("Open Setup") and noun/passive phrasing for descriptions ("The report displays no results").
 - Use simple present tense.
 - Give real-life Salesforce examples when information is complex.
 - Tables must use text, NOT visual indicators (checkmarks, circles). Tables with text work for both full-table and single-row responses.

@@ -955,6 +955,7 @@ async function rewriteArticle(article) {
 
   if (cached) {
     showRefineInput();
+    renderEditableRewrite(article);
     const cachedScore = _rewriteScoreCache[article.id];
     if (cachedScore) renderRewriteScore(article, cachedScore);
     return;
@@ -1020,6 +1021,47 @@ function parseRewriteSections(text) {
     description: descMatch?.[1]?.trim() || '',
     resolution: resMatch?.[1]?.trim() || ''
   };
+}
+
+function serializeRewriteSections({ title, summary, description, resolution }) {
+  return `## TITLE\n${title || ''}\n\n## SUMMARY\n${summary || ''}\n\n## DESCRIPTION\n${description || ''}\n\n## RESOLUTION\n${resolution || ''}`;
+}
+
+function renderEditableRewrite(article) {
+  const el = document.getElementById('rewrite-stream');
+  if (!el) return;
+  const parsed = parseRewriteSections(_rewriteCache[article.id] || '');
+  el.textContent = '';
+
+  const fields = {};
+  const commit = () => {
+    _rewriteCache[article.id] = serializeRewriteSections({
+      title: fields.title.value.trim(),
+      summary: fields.summary.value.trim(),
+      description: fields.description.value.trim(),
+      resolution: fields.resolution.value.trim()
+    });
+  };
+
+  const makeField = (key, label, value, rows) => {
+    const input = rows === 1
+      ? h('input', { type: 'text', class: 'input', style: { width: '100%', fontSize: '13px', fontWeight: '600' } })
+      : h('textarea', { class: 'input', rows: String(rows), style: { width: '100%', fontSize: '12px', lineHeight: '1.6', resize: 'vertical', fontFamily: 'var(--font-mono)' } });
+    input.value = value || '';
+    input.addEventListener('input', commit);
+    fields[key] = input;
+    return h('div', { style: { marginBottom: '14px' } },
+      h('label', { style: { display: 'block', fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
+      input
+    );
+  };
+
+  el.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '10px' } },
+    'Edit any section inline. Changes are used when you publish to ORGCS, and are sent as the current article state if you regenerate.'));
+  el.appendChild(makeField('title', 'Title', parsed.title || article.title, 1));
+  el.appendChild(makeField('summary', 'Summary', parsed.summary, 2));
+  el.appendChild(makeField('description', 'Description', parsed.description, 10));
+  el.appendChild(makeField('resolution', 'Resolution', parsed.resolution, 14));
 }
 
 let _rewriteScoreCache = {};
@@ -1108,11 +1150,25 @@ async function generateRewrite(article, session) {
     }
   }
 
-  const bodyMap = await fetchArticleBodies([article.id], session);
-  const body = bodyMap.get(article.id) || {};
-  const desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
-  const res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
-  const steps = stripHtml(body.steps || '').slice(0, 1500);
+  const priorRewrite = _rewriteCache[article.id] ? parseRewriteSections(_rewriteCache[article.id]) : null;
+  const fromEdited = !!(priorRewrite && (priorRewrite.description || priorRewrite.resolution || priorRewrite.summary));
+
+  let currentTitle, currentSummary, desc, res, steps;
+  if (fromEdited) {
+    currentTitle = priorRewrite.title || article.title;
+    currentSummary = priorRewrite.summary || '';
+    desc = priorRewrite.description.slice(0, MAX_BODY_CHARS);
+    res = priorRewrite.resolution.slice(0, MAX_BODY_CHARS);
+    steps = '';
+  } else {
+    const bodyMap = await fetchArticleBodies([article.id], session);
+    const body = bodyMap.get(article.id) || {};
+    currentTitle = article.title;
+    currentSummary = article.summary || '';
+    desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
+    res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
+    steps = stripHtml(body.steps || '').slice(0, 1500);
+  }
 
   const system = `You are an expert technical writer rewriting Salesforce Knowledge Articles to maximize Agentforce (AGF) RAG retrieval and consumption quality.
 
@@ -1125,13 +1181,14 @@ HOW AGENTFORCE RETRIEVES CONTENT (optimize for this):
 
 REWRITE RULES (each maps to a scored criterion — satisfy ALL):
 1. TITLE: ≤60 chars, front-load keywords, include the specific product name, no question format, symptom-based for troubleshooting.
-2. SUMMARY: ≤170 chars, use DIFFERENT words/synonyms than the title, specify the audience, include exact error text for error articles.
+2. SUMMARY: ≤170 chars, use DIFFERENT words/synonyms than the title. This is where the intent statement belongs — state WHAT question or problem the article resolves and WHY it matters, and include exact error text for error articles. Do NOT name a target audience or role (never "for developers", "for admins", "scoped for architects", etc.).
 3. HEADERS: Use ## for each section (renders as <h2>) — NEVER bold text as a header. Make headers descriptive with intent keywords. Keep each section ≤~2000 chars; split with ### if longer.
-4. DESCRIPTION: Open with an intent paragraph stating WHAT question this answers and WHY. Explain uncommon acronyms. Present tense. Include the customer's likely phrasing. State the product name explicitly.
+4. DESCRIPTION: Open directly with the problem, symptom, or observed behavior — do NOT open with a meta sentence such as "This article addresses…", "This article explains…", or "This article is scoped for…". Explain WHY it happens (root-cause context: when, where, and how it occurs). Explain uncommon acronyms. Present tense. State the product name explicitly. Do NOT describe the intended audience, reader role, or who the article is "for".
 5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does.
 6. SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists, no wall-of-text. Each section must read as a self-contained chunk.
-7. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
-8. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
+7. VOICE: Write in impersonal, product-facing documentation language. Avoid pronouns wherever possible — no first-person ("I", "we", "our") and no second-person ("you", "your"). Prefer imperative mood for steps ("Open Setup", not "You open Setup") and noun/passive phrasing for descriptions ("The report displays no results", not "You will see no results"). Do NOT address the reader directly or reference "the customer".
+8. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
+9. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
 
 Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
 ## TITLE
@@ -1151,11 +1208,11 @@ Preserve all technical accuracy from the original. Output EXACTLY these four sec
   const refine = _rewriteRefineApplied[article.id] || '';
 
   const user = `Rewrite this article:
-Title: ${article.title}
+Title: ${currentTitle}
 Product & Topic: ${article.topicName || '(none)'}
 Validation: ${article.validationStatus || 'Not Validated'}
-${diagnostics ? `\n${diagnostics}\n` : ''}${refine ? `\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rewrite rule above): ${refine}\n` : ''}
-CURRENT SUMMARY: ${article.summary || '(empty)'}
+${fromEdited ? 'The content below is the CURRENT working version (a prior rewrite with any manual edits applied). Treat it as the article state to improve — preserve the edits unless a rewrite rule or the instructions below require changing them.\n' : ''}${diagnostics ? `\n${diagnostics}\n` : ''}${refine ? `\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rewrite rule above): ${refine}\n` : ''}
+CURRENT SUMMARY: ${currentSummary || '(empty)'}
 CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
@@ -1180,8 +1237,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
     });
     if (isStale()) return;
     _rewriteCache[article.id] = fullText;
-    const el = document.getElementById('rewrite-stream');
-    if (el) { el.textContent = ''; el.appendChild(renderMarkdown(fullText)); }
+    renderEditableRewrite(article);
   } catch (e) {
     if (isStale() || e.name === 'AbortError') return;
     const el = document.getElementById('rewrite-stream');
