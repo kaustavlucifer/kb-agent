@@ -7,6 +7,7 @@ import { localGet, localSet } from '../shared/storage.js';
 import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
+import { markdownToHtml, htmlToMarkdown } from '../shared/markdown.js';
 
 let _container = null;
 let _unsubs = [];
@@ -1010,58 +1011,131 @@ async function rewriteArticle(article) {
   generateRewrite(article, session);
 }
 
+const REWRITE_SECTION_MARKER = /^##\s+(TITLE|SUMMARY|DESCRIPTION|RESOLUTION)\s*$/i;
+
 function parseRewriteSections(text) {
-  const titleMatch = text.match(/##\s*TITLE\s*\n([^\n]+)/i);
-  const summaryMatch = text.match(/##\s*SUMMARY\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-  const descMatch = text.match(/##\s*DESCRIPTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-  const resMatch = text.match(/##\s*RESOLUTION\s*\n([\s\S]*?)(?=\n##\s|\n*$)/i);
-  return {
-    title: titleMatch?.[1]?.trim() || '',
-    summary: summaryMatch?.[1]?.trim() || '',
-    description: descMatch?.[1]?.trim() || '',
-    resolution: resMatch?.[1]?.trim() || ''
-  };
+  const out = { title: '', summary: '', description: '', resolution: '' };
+  const lines = String(text || '').split('\n');
+  let current = null;
+  const buffers = { title: [], summary: [], description: [], resolution: [] };
+  for (const line of lines) {
+    const marker = line.match(REWRITE_SECTION_MARKER);
+    if (marker) {
+      current = marker[1].toLowerCase();
+      continue;
+    }
+    if (current) buffers[current].push(line);
+  }
+  out.title = buffers.title.join('\n').trim();
+  out.summary = buffers.summary.join('\n').trim();
+  out.description = buffers.description.join('\n').trim();
+  out.resolution = buffers.resolution.join('\n').trim();
+  return out;
 }
 
 function serializeRewriteSections({ title, summary, description, resolution }) {
   return `## TITLE\n${title || ''}\n\n## SUMMARY\n${summary || ''}\n\n## DESCRIPTION\n${description || ''}\n\n## RESOLUTION\n${resolution || ''}`;
 }
 
+function currentRewriteSections(article) {
+  const parsed = parseRewriteSections(_rewriteCache[article.id] || '');
+  return { ...parsed, title: parsed.title || article.title };
+}
+
 function renderEditableRewrite(article) {
   const el = document.getElementById('rewrite-stream');
   if (!el) return;
-  const parsed = parseRewriteSections(_rewriteCache[article.id] || '');
   el.textContent = '';
 
-  const fields = {};
-  const commit = () => {
-    _rewriteCache[article.id] = serializeRewriteSections({
-      title: fields.title.value.trim(),
-      summary: fields.summary.value.trim(),
-      description: fields.description.value.trim(),
-      resolution: fields.resolution.value.trim()
-    });
-  };
-
-  const makeField = (key, label, value, rows) => {
-    const input = rows === 1
-      ? h('input', { type: 'text', class: 'input', style: { width: '100%', fontSize: '13px', fontWeight: '600' } })
-      : h('textarea', { class: 'input', rows: String(rows), style: { width: '100%', fontSize: '12px', lineHeight: '1.6', resize: 'vertical', fontFamily: 'var(--font-mono)' } });
-    input.value = value || '';
-    input.addEventListener('input', commit);
-    fields[key] = input;
-    return h('div', { style: { marginBottom: '14px' } },
-      h('label', { style: { display: 'block', fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
-      input
-    );
-  };
-
   el.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '10px' } },
-    'Edit any section inline. Changes are used when you publish to ORGCS, and are sent as the current article state if you regenerate.'));
-  el.appendChild(makeField('title', 'Title', parsed.title || article.title, 1));
-  el.appendChild(makeField('summary', 'Summary', parsed.summary, 2));
-  el.appendChild(makeField('description', 'Description', parsed.description, 10));
-  el.appendChild(makeField('resolution', 'Resolution', parsed.resolution, 14));
+    'Each section renders with full formatting. Click Edit to change a section inline — changes are used when you publish to ORGCS, and are sent as the current article state if you regenerate.'));
+
+  el.appendChild(renderRewriteSection(article, 'title', 'Title', { plain: true }));
+  el.appendChild(renderRewriteSection(article, 'summary', 'Summary', { plain: true }));
+  el.appendChild(renderRewriteSection(article, 'description', 'Description', { rows: 12 }));
+  el.appendChild(renderRewriteSection(article, 'resolution', 'Resolution', { rows: 16 }));
+}
+
+function commitRewriteSection(article, key, value) {
+  const sections = currentRewriteSections(article);
+  sections[key] = value.trim();
+  _rewriteCache[article.id] = serializeRewriteSections(sections);
+}
+
+function renderRewriteSection(article, key, label, opts = {}) {
+  const wrap = h('div', { style: { marginBottom: '14px' } });
+
+  const buildView = () => {
+    const value = currentRewriteSections(article)[key] || '';
+    const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
+      h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
+      h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => swapToEdit() }, 'Edit')
+    );
+    const body = opts.plain
+      ? h('div', { style: { fontSize: opts.bold === false ? '12px' : '13px', fontWeight: key === 'title' ? '600' : '400', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, value || '(empty)')
+      : (value.trim() ? renderMarkdown(value) : h('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '(empty)'));
+    wrap.textContent = '';
+    wrap.appendChild(header);
+    wrap.appendChild(body);
+  };
+
+  const swapToEdit = () => {
+    const value = currentRewriteSections(article)[key] || '';
+
+    if (opts.plain) {
+      const input = key === 'title'
+        ? h('input', { type: 'text', class: 'input', style: { width: '100%', fontSize: '13px', fontWeight: '600' } })
+        : h('textarea', { class: 'input', rows: String(opts.rows || 2), style: { width: '100%', fontSize: '12px', lineHeight: '1.6', resize: 'vertical' } });
+      input.value = value;
+      const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { commitRewriteSection(article, key, input.value); buildView(); } }, 'Done');
+      const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
+      wrap.textContent = '';
+      wrap.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
+        h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
+        h('div', { style: { display: 'flex', gap: '6px' } }, cancel, done)
+      ));
+      wrap.appendChild(input);
+      input.focus();
+      return;
+    }
+
+    const editor = h('div', {
+      class: 'kb-richtext',
+      contenteditable: 'true',
+      style: { minHeight: `${(opts.rows || 8) * 20}px`, maxHeight: '360px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '12px', lineHeight: '1.6', outline: 'none' }
+    });
+    editor.innerHTML = markdownToHtml(value, { headingBase: 1 });
+
+    const exec = (cmd, arg) => { editor.focus(); try { document.execCommand('styleWithCSS', false, false); } catch {} document.execCommand(cmd, false, arg); };
+    const toolBtn = (labelTxt, cmd, arg, title) => h('button', { class: 'btn btn--ghost btn--sm', title: title || labelTxt, style: { padding: '2px 8px', fontSize: '12px', minWidth: '28px', fontWeight: cmd === 'bold' ? '700' : '400', fontStyle: cmd === 'italic' ? 'italic' : 'normal' }, onMouseDown: (e) => { e.preventDefault(); exec(cmd, arg); } }, labelTxt);
+    const linkBtn = h('button', { class: 'btn btn--ghost btn--sm', title: 'Insert link', style: { padding: '2px 8px', fontSize: '11px' }, onMouseDown: (e) => { e.preventDefault(); const url = prompt('Link URL:'); if (url) exec('createLink', url); } }, '🔗');
+
+    const toolbar = h('div', { style: { display: 'flex', gap: '2px', flexWrap: 'wrap', marginBottom: '6px', padding: '4px', background: 'var(--surface-subtle, rgba(0,0,0,0.03))', borderRadius: 'var(--radius-xs)' } },
+      toolBtn('B', 'bold', null, 'Bold'),
+      toolBtn('I', 'italic', null, 'Italic'),
+      toolBtn('H2', 'formatBlock', '<H2>', 'Heading'),
+      toolBtn('H3', 'formatBlock', '<H3>', 'Subheading'),
+      toolBtn('¶', 'formatBlock', '<P>', 'Normal text'),
+      toolBtn('• List', 'insertUnorderedList', null, 'Bulleted list'),
+      toolBtn('1. List', 'insertOrderedList', null, 'Numbered list'),
+      linkBtn
+    );
+
+    const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { commitRewriteSection(article, key, htmlToMarkdown(editor)); buildView(); } }, 'Done');
+    const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
+
+    wrap.textContent = '';
+    wrap.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
+      h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
+      h('div', { style: { display: 'flex', gap: '6px' } }, cancel, done)
+    ));
+    wrap.appendChild(toolbar);
+    wrap.appendChild(editor);
+    editor.focus();
+  };
+
+  buildView();
+  return wrap;
 }
 
 let _rewriteScoreCache = {};

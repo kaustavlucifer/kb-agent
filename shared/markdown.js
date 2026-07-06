@@ -124,6 +124,91 @@ export function parseBlocks(md) {
   return blocks;
 }
 
+export function htmlToMarkdown(root) {
+  const blocks = [];
+
+  const inlineOf = (node) => {
+    let s = '';
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { s += n.nodeValue.replace(/ /g, ' '); continue; }
+      if (n.nodeType !== 1) continue;
+      const tag = n.tagName.toLowerCase();
+      const style = (n.getAttribute && n.getAttribute('style')) || '';
+      const fontWeight = /font-weight\s*:\s*(bold|[6-9]00)/i.test(style);
+      const fontItalic = /font-style\s*:\s*italic/i.test(style);
+      if (tag === 'strong' || tag === 'b') s += `**${inlineOf(n).trim()}**`;
+      else if (tag === 'em' || tag === 'i') s += `*${inlineOf(n).trim()}*`;
+      else if (tag === 'code') s += '`' + n.textContent.replace(/ /g, ' ') + '`';
+      else if (tag === 'a') { const href = n.getAttribute('href') || ''; const txt = inlineOf(n).trim(); s += href && href !== '#' ? `[${txt}](${href})` : txt; }
+      else if (tag === 'br') s += '\n';
+      else if (fontWeight || fontItalic) { const inner = inlineOf(n).trim(); s += inner ? `${fontWeight ? '**' : ''}${fontItalic ? '*' : ''}${inner}${fontItalic ? '*' : ''}${fontWeight ? '**' : ''}` : ''; }
+      else s += inlineOf(n);
+    }
+    return s;
+  };
+
+  const tableToMarkdown = (table) => {
+    const rows = [...table.querySelectorAll('tr')];
+    if (!rows.length) return '';
+    const rowCells = (tr) => [...tr.children].map(c => inlineOf(c).trim().replace(/\|/g, '\\|'));
+    const header = rowCells(rows[0]);
+    const bodyRows = rows.slice(1).map(rowCells);
+    const sep = header.map(() => '---');
+    return [header, sep, ...bodyRows].map(r => `| ${r.join(' | ')} |`).join('\n');
+  };
+
+  const listToMarkdown = (listEl, depth) => {
+    const ordered = listEl.tagName.toLowerCase() === 'ol';
+    const lines = [];
+    let idx = 1;
+    const indent = '  '.repeat(depth);
+    for (const li of listEl.children) {
+      if (li.tagName.toLowerCase() !== 'li') continue;
+      const nested = [...li.children].filter(c => /^(ul|ol)$/i.test(c.tagName));
+      const own = { childNodes: [...li.childNodes].filter(c => !(c.nodeType === 1 && /^(ul|ol)$/i.test(c.tagName))) };
+      const marker = ordered ? `${idx++}. ` : '- ';
+      lines.push(indent + marker + inlineOf(own).trim());
+      for (const sub of nested) lines.push(listToMarkdown(sub, depth + 1));
+    }
+    return lines.join('\n');
+  };
+
+  const walk = (node) => {
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { const t = n.nodeValue.replace(/ /g, ' ').trim(); if (t) blocks.push(t); continue; }
+      if (n.nodeType !== 1) continue;
+      const tag = n.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag)) {
+        const level = Math.min(6, Number(tag[1]));
+        const t = inlineOf(n).replace(/\s*\n\s*/g, ' ').trim();
+        if (t) blocks.push('#'.repeat(level) + ' ' + t);
+      } else if (tag === 'p') {
+        const t = inlineOf(n).trim();
+        if (t) blocks.push(t);
+      } else if (tag === 'ul' || tag === 'ol') {
+        const t = listToMarkdown(n, 0);
+        if (t.trim()) blocks.push(t);
+      } else if (tag === 'pre') {
+        blocks.push('```\n' + n.textContent.replace(/ /g, ' ').replace(/\n$/, '') + '\n```');
+      } else if (tag === 'hr') {
+        blocks.push('---');
+      } else if (tag === 'table') {
+        const t = tableToMarkdown(n);
+        if (t) blocks.push(t);
+      } else if (tag === 'div') {
+        if (n.querySelector('p,div,ul,ol,pre,table,h1,h2,h3,h4,h5,h6')) walk(n);
+        else { const t = inlineOf(n).trim(); if (t) blocks.push(t); }
+      } else if (tag !== 'br') {
+        const t = inlineOf(n).trim();
+        if (t) blocks.push(t);
+      }
+    }
+  };
+
+  walk(root);
+  return blocks.join('\n\n');
+}
+
 export function markdownToHtml(md, { headingBase = 2 } = {}) {
   const blocks = parseBlocks(md);
   const out = [];
