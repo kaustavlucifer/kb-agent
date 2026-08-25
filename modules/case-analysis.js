@@ -1,7 +1,8 @@
-import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField, sanitizeHtml } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
+import { showArticlePreview } from '../shared/article-preview.js';
 
 let _container = null;
 let _port = null;
@@ -10,8 +11,28 @@ let _collapsedSections = {};
 let _streamThrottle = null;
 let _streamPending = false;
 let _editingSections = new Set();
+let _pendingBackgroundRender = false;
 let _sidebarOnly = false;
 let _renderRaf = null;
+
+function startEditing(id) { _editingSections.add(id); }
+function stopEditing(id) {
+  _editingSections.delete(id);
+  if (_editingSections.size === 0 && _pendingBackgroundRender) {
+    _pendingBackgroundRender = false;
+    renderByView();
+  }
+}
+function clearEditingForPrefix(prefix) {
+  for (const id of _editingSections) {
+    if (id.startsWith(prefix)) _editingSections.delete(id);
+  }
+  if (_editingSections.size === 0) _pendingBackgroundRender = false;
+}
+function deferredRenderByView() {
+  if (_editingSections.size > 0) { _pendingBackgroundRender = true; return; }
+  renderByView();
+}
 
 function extractStreamingField(cleaned, fieldName) {
   const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
@@ -73,13 +94,13 @@ export function mount(container) {
   }));
   _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
   _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
-  _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'result') renderByView(); } }));
-  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'streaming' || v === 'result') renderByView(); } }));
+  _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'result') deferredRenderByView(); } }));
+  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'streaming' || v === 'result') deferredRenderByView(); } }));
   _unsubs.push(subscribe('case.topArticles', () => {
     if (!_container) return;
     const view = getState('case.view');
     if (view === 'streaming') renderStreaming();
-    else if (view === 'result' || view === 'progressive') renderByView();
+    else if (view === 'result' || view === 'progressive') deferredRenderByView();
   }));
   _unsubs.push(subscribe('case.suggestionDeltas', () => {
     if (!_container || getState('case.view') !== 'streaming') return;
@@ -112,6 +133,7 @@ export function unmount() {
   _container = null;
   _collapsedSections = {};
   _editingSections.clear();
+  _pendingBackgroundRender = false;
 }
 
 async function loadRecentCases() {
@@ -800,7 +822,7 @@ function renderResult() {
     const draftCollapsed = _collapsedSections['new-draft'] || false;
     const draftCard = h('div', { class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
 
-    const draftHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--primary-soft)', borderBottom: draftCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections['new-draft'] = !_collapsedSections['new-draft']; renderByView(); } },
+    const draftHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--primary-soft)', borderBottom: draftCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!draftCollapsed) clearEditingForPrefix('draft-section-'); _collapsedSections['new-draft'] = !_collapsedSections['new-draft']; renderByView(); } },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
         h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, draftCollapsed ? '▶' : '▼'),
         h('span', { class: 'pill pill--info', style: { fontSize: '10px' } }, 'NEW'),
@@ -816,15 +838,30 @@ function renderResult() {
 
     if (!draftCollapsed) {
       const draftBody = h('div', { style: { padding: '14px 16px' } });
-      draftBody.appendChild(renderEditableSection({ heading: 'Title', body: draft.title || 'Untitled' }, 0, 'draft'));
-      draftBody.appendChild(renderEditableSection({ heading: 'Summary', body: draft.summary || '(No summary generated)' }, 1, 'draft'));
-      const contentSections = (draft.sections || []).filter(s => !/summary/i.test(s.heading));
-      const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading));
-      const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
-      draftBody.appendChild(renderEditableSection({ heading: 'Description', body: descSection?.body || '(No description)' }, 2, 'draft'));
-      draftBody.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection?.body || '(No resolution)' }, 3, 'draft'));
-      const otherSections = contentSections.filter(s => s !== descSection && s !== resSection);
-      otherSections.forEach((sec, idx) => draftBody.appendChild(renderEditableSection(sec, idx + 4, 'draft')));
+      draftBody.appendChild(renderEditableSection({
+        heading: 'Title',
+        getValue: () => draft.title || 'Untitled',
+        setValue: (v) => { draft.title = v; },
+        plain: true, singleLine: true
+      }, 0, 'draft'));
+      draftBody.appendChild(renderEditableSection({
+        heading: 'Summary',
+        getValue: () => draft.summary || '',
+        setValue: (v) => { draft.summary = v; },
+        plain: true, rows: 3
+      }, 1, 'draft'));
+      const draftDescAcc = sectionAccessor(draft, s => /description|problem|overview/i.test(s.heading), 'Description');
+      const draftResAcc = sectionAccessor(draft, s => /resolution|solution|fix|steps|workaround/i.test(s.heading), 'Resolution');
+      draftBody.appendChild(renderEditableSection({ heading: 'Description', getValue: draftDescAcc.getValue, setValue: draftDescAcc.setValue, rows: 10 }, 2, 'draft'));
+      draftBody.appendChild(renderEditableSection({ heading: 'Resolution', getValue: draftResAcc.getValue, setValue: draftResAcc.setValue, rows: 12 }, 3, 'draft'));
+      const descSection = (draft.sections || []).find(s => /description|problem|overview/i.test(s.heading));
+      const resSection = (draft.sections || []).find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
+      const otherSections = (draft.sections || []).filter(s => s !== descSection && s !== resSection && !/summary/i.test(s.heading));
+      otherSections.forEach((sec, idx) => draftBody.appendChild(renderEditableSection({
+        heading: sec.heading,
+        getValue: () => sec.body || '',
+        setValue: (v) => { sec.body = v; }
+      }, idx + 4, 'draft')));
       draftCard.appendChild(draftBody);
     }
     main.appendChild(draftCard);
@@ -966,7 +1003,7 @@ async function showComparisonModal(rewrite) {
     const scrollBox = (child) => h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } }, child);
     const htmlBox = (html) => {
       const el = h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } });
-      el.innerHTML = html || '<span style="color:var(--text-muted)">(empty)</span>';
+      el.innerHTML = html ? sanitizeHtml(html) : '<span style="color:var(--text-muted)">(empty)</span>';
       return el;
     };
     const mdOrEmpty = (text) => (text || '').trim() ? renderMarkdown(text) : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
@@ -1063,7 +1100,7 @@ function renderSidebarArticles(articles) {
         link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
         link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
 
-        const previewBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 4px', flexShrink: '0' }, title: 'Preview article', onClick: (e) => { e.stopPropagation(); showArticlePreview(a); } }, '👁');
+        const previewBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 4px', flexShrink: '0' }, title: 'Preview article', onClick: (e) => { e.stopPropagation(); showArticlePreview(a.id, { articleNumber: a.articleNumber, title: a.title }); } }, '👁');
         const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '9px', padding: '1px 5px', flexShrink: '0' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
 
         const relText = a.score != null ? `Rel: ${a.score}` : 'Rel: —';
@@ -1107,51 +1144,6 @@ function renderSidebarArticles(articles) {
     section.appendChild(body);
   }
   return section;
-}
-
-async function showArticlePreview(article) {
-  toast('Loading preview…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId: article.id });
-    if (!resp?.success) { toast(resp?.error || 'Failed to load preview.', 'error'); return; }
-    const data = resp.article;
-    const body = h('div', null,
-      h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' } }, `#${data.articleNumber || article.articleNumber || ''}`),
-      data.summary ? h('div', { style: { marginBottom: '12px', padding: '8px 12px', background: 'var(--surface-raised)', borderRadius: 'var(--radius-xs)', fontSize: '12px', lineHeight: '1.5' } }, data.summary) : null,
-      data.descriptionHtml ? renderRichTextSection('Description', data.descriptionHtml) : (data.description ? h('div', { style: { marginBottom: '12px' } }, h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Description'), renderMarkdown(data.description.slice(0, 2000))) : null),
-      data.resolutionHtml ? renderRichTextSection('Resolution', data.resolutionHtml) : (data.resolution ? h('div', { style: { marginBottom: '12px' } }, h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, 'Resolution'), renderMarkdown(data.resolution.slice(0, 2000))) : null)
-    );
-    modal(data.title || article.title || 'Article Preview', body, { wide: true });
-  } catch (e) {
-    toast('Preview failed: ' + e.message, 'error');
-  }
-}
-
-function renderRichTextSection(heading, html) {
-  const section = h('div', { style: { marginBottom: '12px' } });
-  section.appendChild(h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', marginBottom: '4px' } }, heading));
-  const content = h('div', { style: { fontSize: '12px', lineHeight: '1.6', maxHeight: '400px', overflowY: 'auto', padding: '8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)' } });
-  content.innerHTML = sanitizeHtml(html);
-  section.appendChild(content);
-  return section;
-}
-
-function sanitizeHtml(html) {
-  const SAFE_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'id', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  div.querySelectorAll('script,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());
-  div.querySelectorAll('*').forEach(el => {
-    for (const attr of [...el.attributes]) {
-      if (!SAFE_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
-    }
-    if (el.tagName === 'A') { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener'); }
-    if (el.hasAttribute('style')) {
-      const style = el.getAttribute('style');
-      if (/expression|javascript|url\s*\(/i.test(style)) el.removeAttribute('style');
-    }
-  });
-  return div.innerHTML;
 }
 
 function formatAction(action) {
@@ -1305,7 +1297,7 @@ function renderArticleSuggestionCard(sugs) {
   const card = h('div', { class: 'card', style: { marginBottom: '16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
 
   const collapseIcon = h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 4px' } }, isCollapsed ? '▶' : '▼');
-  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
+  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!isCollapsed) clearEditingForPrefix(`${collapseKey}-`); _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
       collapseIcon,
       h('a', { href: artLink, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${articleNumber}`),
@@ -1326,13 +1318,9 @@ function renderArticleSuggestionCard(sugs) {
 
       const sugContainer = h('div', { style: { padding: '14px 16px', borderBottom: isLast ? 'none' : '1px solid var(--border)' } });
 
-      const isEditing = _editingSections.has(id);
-      const editBtn = h('button', { class: `btn ${isEditing ? 'btn--error' : 'btn--ghost'} btn--sm`, style: { fontSize: '11px', minWidth: '28px' }, onClick: () => toggleEdit(id, sug) }, isEditing ? '×' : 'Edit');
       const headerRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } },
         h('span', { class: `pill pill--${impactColor(sug.impact)}`, style: { fontSize: '10px', padding: '2px 8px' } }, sug.impact || 'MEDIUM'),
-        h('span', { style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-primary)', flex: '1' } }, sug.title || `Suggestion ${i + 1}`),
-        editBtn,
-        h('button', { class: 'btn btn--primary btn--sm', style: { fontSize: '11px' }, onClick: () => refineSection(sug) }, 'Refine')
+        h('span', { style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-primary)', flex: '1' } }, sug.title || `Suggestion ${i + 1}`)
       );
       sugContainer.appendChild(headerRow);
 
@@ -1343,16 +1331,15 @@ function renderArticleSuggestionCard(sugs) {
         ));
       }
 
-      if (isEditing) {
-        const textarea = h('textarea', { id, class: 'input', style: { width: '100%', minHeight: '150px', fontSize: '12px', lineHeight: '1.5', fontFamily: 'inherit', border: '2px solid var(--primary)', borderRadius: 'var(--radius-sm)', padding: '12px' } });
-        textarea.value = sug.content || '';
-        textarea.addEventListener('input', () => { sug.content = textarea.value; });
-        sugContainer.appendChild(textarea);
-      } else {
-        const contentArea = h('div', { id, style: { color: 'var(--text-primary)', background: 'var(--surface)', border: '1px solid var(--border)', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: '12px', lineHeight: '1.6' } });
-        contentArea.appendChild(renderMarkdown(sug.content));
-        sugContainer.appendChild(contentArea);
-      }
+      sugContainer.appendChild(editableRichField({
+        label: 'Suggested Content',
+        getValue: () => sug.content || '',
+        setValue: (v) => { sug.content = v; },
+        rows: 8,
+        onRefine: () => runRefineFlow(() => sug.content || '', (v) => { sug.content = v; }, sug.title || sug.location || 'Suggestion'),
+        editing: _editingSections.has(id),
+        onEditingChange: (isEditing) => { if (isEditing) startEditing(id); else stopEditing(id); }
+      }));
 
       cardBody.appendChild(sugContainer);
     });
@@ -1369,7 +1356,7 @@ function renderFullRewriteCard(rewrite) {
 
   const card = h('div', { class: 'card', style: { marginBottom: '16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
 
-  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
+  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!isCollapsed) clearEditingForPrefix(`${collapseKey}-section-`); _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
       h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
       h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, 'REWRITE'),
@@ -1394,15 +1381,30 @@ function renderFullRewriteCard(rewrite) {
     }
     const body = h('div', { style: { padding: '14px 16px' } });
     const prefix = `rewrite-${rewrite.articleId}`;
-    body.appendChild(renderEditableSection({ heading: 'Title', body: rewrite.title || rewrite.articleTitle || 'Untitled' }, 0, prefix));
-    body.appendChild(renderEditableSection({ heading: 'Summary', body: rewrite.summary || '(No summary)' }, 1, prefix));
-    const contentSections = (rewrite.sections || []).filter(s => !/summary/i.test(s.heading));
-    const descSection = contentSections.find(s => /description|problem|overview/i.test(s.heading));
-    const resSection = contentSections.find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
-    body.appendChild(renderEditableSection({ heading: 'Description', body: descSection?.body || '(No description)' }, 2, prefix));
-    body.appendChild(renderEditableSection({ heading: 'Resolution', body: resSection?.body || '(No resolution)' }, 3, prefix));
-    const otherSections = contentSections.filter(s => s !== descSection && s !== resSection);
-    otherSections.forEach((sec, idx) => body.appendChild(renderEditableSection(sec, idx + 4, prefix)));
+    body.appendChild(renderEditableSection({
+      heading: 'Title',
+      getValue: () => rewrite.title || rewrite.articleTitle || 'Untitled',
+      setValue: (v) => { rewrite.title = v; },
+      plain: true, singleLine: true
+    }, 0, prefix));
+    body.appendChild(renderEditableSection({
+      heading: 'Summary',
+      getValue: () => rewrite.summary || '',
+      setValue: (v) => { rewrite.summary = v; },
+      plain: true, rows: 3
+    }, 1, prefix));
+    const descAcc = sectionAccessor(rewrite, s => /description|problem|overview/i.test(s.heading), 'Description');
+    const resAcc = sectionAccessor(rewrite, s => /resolution|solution|fix|steps|workaround/i.test(s.heading), 'Resolution');
+    body.appendChild(renderEditableSection({ heading: 'Description', getValue: descAcc.getValue, setValue: descAcc.setValue, rows: 10 }, 2, prefix));
+    body.appendChild(renderEditableSection({ heading: 'Resolution', getValue: resAcc.getValue, setValue: resAcc.setValue, rows: 12 }, 3, prefix));
+    const descSection = (rewrite.sections || []).find(s => /description|problem|overview/i.test(s.heading));
+    const resSection = (rewrite.sections || []).find(s => /resolution|solution|fix|steps|workaround/i.test(s.heading));
+    const otherSections = (rewrite.sections || []).filter(s => s !== descSection && s !== resSection && !/summary/i.test(s.heading));
+    otherSections.forEach((sec, idx) => body.appendChild(renderEditableSection({
+      heading: sec.heading,
+      getValue: () => sec.body || '',
+      setValue: (v) => { sec.body = v; }
+    }, idx + 4, prefix)));
     card.appendChild(body);
   }
 
@@ -1467,48 +1469,32 @@ async function publishUpdate(rewrite, result) {
   }
 }
 
-function renderEditableSection(sec, idx, prefix) {
-  const id = `${prefix}-section-${idx}`;
-  const isEditing = _editingSections.has(id);
-  const container = h('div', { style: { marginBottom: '12px', borderBottom: '1px solid var(--border)', paddingBottom: '12px' } });
-
-  const headerRow = h('div', { style: { display: 'flex', alignItems: 'center', marginBottom: '6px' } },
-    h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.3px', flex: '1' } }, sec.heading || 'Section'),
-    h('button', { class: `btn btn--ghost btn--sm`, style: { fontSize: '10px', padding: '2px 6px', opacity: '0.7' }, onClick: () => toggleEdit(id, sec) }, isEditing ? 'Done' : 'Edit'),
-    h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '10px', padding: '2px 6px', color: 'var(--primary)', opacity: '0.7' }, onClick: () => refineSection(sec) }, 'Refine')
-  );
-  container.appendChild(headerRow);
-
-  if (isEditing) {
-    const textarea = h('textarea', { id, class: 'input', style: { width: '100%', minHeight: '120px', fontSize: '12px', lineHeight: '1.6', fontFamily: 'inherit', border: '2px solid var(--primary)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', resize: 'vertical' } });
-    textarea.value = sec.body || '';
-    textarea.addEventListener('input', () => { sec.body = textarea.value; });
-    container.appendChild(textarea);
-  } else {
-    const contentArea = h('div', { id, style: { fontSize: '12px', lineHeight: '1.7', color: 'var(--text-primary)' } });
-    contentArea.appendChild(renderMarkdown(sec.body));
-    container.appendChild(contentArea);
-  }
-
-  return container;
+function sectionAccessor(obj, matcher, heading) {
+  return {
+    getValue: () => (obj.sections || []).find(matcher)?.body || '',
+    setValue: (v) => {
+      const sec = (obj.sections || []).find(matcher);
+      if (sec) sec.body = v;
+      else obj.sections = [...(obj.sections || []), { heading, body: v }];
+    }
+  };
 }
 
-function toggleEdit(elementId, sectionData) {
-  const el = document.getElementById(elementId);
-  if (!el) return;
-
-  if (_editingSections.has(elementId)) {
-    _editingSections.delete(elementId);
-    const newContent = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
-    if (sectionData) {
-      if (sectionData.content !== undefined) sectionData.content = newContent;
-      else if (sectionData.body !== undefined) sectionData.body = newContent;
-    }
-    renderByView();
-  } else {
-    _editingSections.add(elementId);
-    renderByView();
-  }
+function renderEditableSection({ heading, getValue, setValue, plain = false, singleLine = false, rows = 6 }, idx, prefix) {
+  const id = `${prefix}-section-${idx}`;
+  const container = h('div', { style: { marginBottom: '12px', borderBottom: '1px solid var(--border)', paddingBottom: '12px' } });
+  container.appendChild(editableRichField({
+    label: heading || 'Section',
+    getValue,
+    setValue,
+    plain,
+    singleLine,
+    rows,
+    onRefine: () => runRefineFlow(getValue, setValue, heading),
+    editing: _editingSections.has(id),
+    onEditingChange: (isEditing) => { if (isEditing) startEditing(id); else stopEditing(id); }
+  }));
+  return container;
 }
 
 function refineRewrite(rewrite) {
@@ -1612,14 +1598,13 @@ function showScoreInsights(draftScores) {
 }
 
 
-function refineSection(section) {
-  const content = section.content || section.body || '';
-  const title = section.title || section.heading || '';
+function runRefineFlow(getValue, setValue, title) {
+  const content = getValue() || '';
   if (!content) { toast('No content to refine.', 'error'); return; }
 
   const inputEl = h('input', { type: 'text', class: 'input', placeholder: 'Focus on… (e.g. "add steps", "simplify", "add examples")', style: { width: '100%', marginBottom: '12px' } });
   const bodyEl = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' } }, `Refining: ${title}`),
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' } }, `Refining: ${title || ''}`),
     inputEl,
     h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
       h('button', { class: 'btn btn--primary btn--sm', onClick: doRefine }, 'Refine')
@@ -1641,8 +1626,7 @@ function refineSection(section) {
         focus
       });
       if (resp?.success && resp.refined) {
-        if ('content' in section) section.content = resp.refined;
-        else if ('body' in section) section.body = resp.refined;
+        setValue(resp.refined);
         renderByView();
         toast('Section refined.', 'success');
       } else {
@@ -1853,6 +1837,7 @@ function startAnalysis(caseId, isRetry = false) {
     _retryCount = 0;
     _sidebarOnly = false;
     _editingSections.clear();
+    _pendingBackgroundRender = false;
   }
   const gen = ++_analysisGen;
   setState('case.view', 'analyzing');
@@ -1942,14 +1927,14 @@ function onPortMessage(msg) {
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
       if (msg.scoringInProgress) {
         setState('case.scoringInProgress', msg.scoringInProgress);
-        if (getState('case.view') === 'result') renderByView();
+        if (getState('case.view') === 'result') deferredRenderByView();
       }
       if (msg.draftScore) {
         const scores = getState('case.draftScores') || {};
         const inProgress = (getState('case.scoringInProgress') || []).filter(k => k !== msg.draftScore.key);
         setState('case.draftScores', { ...scores, [msg.draftScore.key]: msg.draftScore.score });
         setState('case.scoringInProgress', inProgress.length ? inProgress : null);
-        if (getState('case.view') === 'result') renderByView();
+        if (getState('case.view') === 'result') deferredRenderByView();
       }
       if (msg.topArticles) {
         const currentView = getState('case.view');

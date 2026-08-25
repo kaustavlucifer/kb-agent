@@ -19,7 +19,7 @@ Never add console.log, console.info, console.warn, console.error, or console.deb
 
 ## Architecture
 - Scoring and rewrite call `streamClaude` directly from the **popup** context
-- Case analysis, coverage, dedup run in the **service worker** via ports
+- Case analysis, dedup run in the **service worker** via ports
 - `shared/config.js` exports are `let` bindings — `applySettings()` reassigns them in place; all `import { X }` call sites see the new value automatically
 - `shared/markdown.js` is the ONE markdown parser — never reimplement it
 - `shared/ui.js` is the ONE UI helper — `h()`, `modal()`, `toast()`, `spinner()`, etc.

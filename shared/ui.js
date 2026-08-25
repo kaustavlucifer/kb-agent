@@ -1,4 +1,4 @@
-import { parseInline, parseBlocks } from './markdown.js';
+import { parseInline, parseBlocks, markdownToHtml, htmlToMarkdown } from './markdown.js';
 
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -21,6 +21,37 @@ export function h(tag, attrs, ...children) {
     el.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
   }
   return el;
+}
+
+export function uniqueSortedValues(items, field) {
+  return [...new Set(items.map(item => item[field]).filter(Boolean))].sort();
+}
+
+export function statusPill(status, opts = {}) {
+  if (!status) return null;
+  const variant = status === 'Online' ? 'success' : status === 'Draft' ? 'warning' : 'neutral';
+  const style = { fontSize: opts.fontSize || '10px' };
+  if (opts.padding) style.padding = opts.padding;
+  return h('span', { class: `pill pill--${variant}`, style }, status);
+}
+
+const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'id', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
+
+export function sanitizeHtml(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  div.querySelectorAll('script,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());
+  div.querySelectorAll('*').forEach(el => {
+    for (const attr of [...el.attributes]) {
+      if (!SAFE_HTML_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+    }
+    if (el.tagName === 'A') { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener'); }
+    if (el.hasAttribute('style')) {
+      const style = el.getAttribute('style');
+      if (/expression|javascript|url\s*\(/i.test(style)) el.removeAttribute('style');
+    }
+  });
+  return div.innerHTML;
 }
 
 export function chip(state, label, opts = {}) {
@@ -243,6 +274,81 @@ export function renderMarkdown(text) {
     }
   }
   return container;
+}
+
+export function editableRichField({ label, getValue, setValue, plain = false, singleLine = false, bold = false, rows = 8, onRefine = null, editing = false, onEditingChange = null }) {
+  const wrap = h('div', { style: { marginBottom: '14px' } });
+
+  const fieldHeader = (actions) => h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
+    h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
+    h('div', { style: { display: 'flex', gap: '6px' } }, ...actions)
+  );
+
+  const buildView = () => {
+    if (onEditingChange) onEditingChange(false);
+    const value = getValue() || '';
+    const editBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => swapToEdit() }, 'Edit');
+    const refineBtn = onRefine ? h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px', color: 'var(--primary)' }, onClick: () => onRefine() }, 'Refine') : null;
+    const body = plain
+      ? h('div', { style: { fontSize: '13px', fontWeight: singleLine || bold ? '600' : '400', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, value || '(empty)')
+      : (value.trim() ? renderMarkdown(value) : h('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '(empty)'));
+    wrap.textContent = '';
+    wrap.appendChild(fieldHeader([refineBtn, editBtn].filter(Boolean)));
+    wrap.appendChild(body);
+  };
+
+  const swapToEdit = () => {
+    if (onEditingChange) onEditingChange(true);
+    const value = getValue() || '';
+
+    if (plain) {
+      const input = singleLine
+        ? h('input', { type: 'text', class: 'input', style: { width: '100%', fontSize: '13px', fontWeight: '600' } })
+        : h('textarea', { class: 'input', rows: String(rows), style: { width: '100%', fontSize: '12px', lineHeight: '1.6', resize: 'vertical' } });
+      input.value = value;
+      const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { setValue(input.value); buildView(); } }, 'Done');
+      const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
+      wrap.textContent = '';
+      wrap.appendChild(fieldHeader([cancel, done]));
+      wrap.appendChild(input);
+      input.focus();
+      return;
+    }
+
+    const editor = h('div', {
+      class: 'kb-richtext',
+      contenteditable: 'true',
+      style: { minHeight: `${rows * 20}px`, maxHeight: '360px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '12px', lineHeight: '1.6', outline: 'none' }
+    });
+    editor.innerHTML = markdownToHtml(value, { headingBase: 1 });
+
+    const applyCmd = (cmd, arg) => { editor.focus(); try { document.execCommand('styleWithCSS', false, false); } catch {} document.execCommand(cmd, false, arg); };
+    const toolBtn = (labelTxt, cmd, arg, title) => h('button', { class: 'btn btn--ghost btn--sm', title: title || labelTxt, style: { padding: '2px 8px', fontSize: '12px', minWidth: '28px', fontWeight: cmd === 'bold' ? '700' : '400', fontStyle: cmd === 'italic' ? 'italic' : 'normal' }, onMouseDown: (e) => { e.preventDefault(); applyCmd(cmd, arg); } }, labelTxt);
+    const linkBtn = h('button', { class: 'btn btn--ghost btn--sm', title: 'Insert link', style: { padding: '2px 8px', fontSize: '11px' }, onMouseDown: (e) => { e.preventDefault(); const url = prompt('Link URL:'); if (url) applyCmd('createLink', url); } }, '🔗');
+
+    const toolbar = h('div', { style: { display: 'flex', gap: '2px', flexWrap: 'wrap', marginBottom: '6px', padding: '4px', background: 'var(--surface-subtle, rgba(0,0,0,0.03))', borderRadius: 'var(--radius-xs)' } },
+      toolBtn('B', 'bold', null, 'Bold'),
+      toolBtn('I', 'italic', null, 'Italic'),
+      toolBtn('H2', 'formatBlock', '<H2>', 'Heading'),
+      toolBtn('H3', 'formatBlock', '<H3>', 'Subheading'),
+      toolBtn('¶', 'formatBlock', '<P>', 'Normal text'),
+      toolBtn('• List', 'insertUnorderedList', null, 'Bulleted list'),
+      toolBtn('1. List', 'insertOrderedList', null, 'Numbered list'),
+      linkBtn
+    );
+
+    const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { setValue(htmlToMarkdown(editor)); buildView(); } }, 'Done');
+    const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
+
+    wrap.textContent = '';
+    wrap.appendChild(fieldHeader([cancel, done]));
+    wrap.appendChild(toolbar);
+    wrap.appendChild(editor);
+    editor.focus();
+  };
+
+  if (editing) swapToEdit(); else buildView();
+  return wrap;
 }
 
 export function multiSelect(id, label, options, selected, onChange) {

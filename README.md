@@ -1,6 +1,6 @@
 # KB Agent v2.2.0
 
-AI-powered Knowledge Base quality management for Salesforce Industry & Revenue Cloud. Chrome Extension (Manifest V3) that analyzes support cases, generates KB articles, scores existing content, detects coverage gaps, and identifies duplicates — optimized for Agentforce retrieval.
+AI-powered Knowledge Base quality management for Salesforce Industry & Revenue Cloud. Chrome Extension (Manifest V3) that analyzes support cases, generates KB articles, scores existing content, and identifies duplicates — optimized for Agentforce retrieval.
 
 ## Features
 
@@ -23,11 +23,6 @@ AI-powered Knowledge Base quality management for Salesforce Industry & Revenue C
 - SOSL search with Cloud and Status filtering matched to Industry/Revenue verticals
 - AI-ranked relevance scoring against the case context
 - Related KIs displayed in sidebar and used as context during generation
-
-### P&T Coverage
-- Agentforce conversation cluster analysis against KB coverage
-- Per-P&T gap detection with AI-powered assessment
-- Coverage recommendations for under-served product areas
 
 ### Duplicate Detection
 - Pairwise similarity detection across the article corpus
@@ -54,20 +49,17 @@ kb-agent/
 │       ├── kb-scorer.js       Scoring + rewrite streaming
 │       ├── ki-enrichment.js   Known Issues search + ranking
 │       ├── gus-enrichment.js  GUS work item fetch
-│       ├── coverage.js        P&T gap analysis
 │       ├── dedup.js           Duplicate detection
 │       └── article-publish.js Article creation/update in OrgCS
 ├── modules/             UI modules (popup page context)
 │   ├── app.js             Tab shell, header, connection chips
 │   ├── case-analysis.js   Case tab: progressive UI, streaming, results
 │   ├── kb-scorer.js       KB Articles tab: filters, scoring, rewrite
-│   ├── coverage.js        P&T Coverage tab
 │   └── dedup.js           Duplicates tab
 ├── data/
 │   ├── writing_guide_prompts.js  AI prompt guides (generation, scoring, style)
 │   ├── pt_routing.js             Product & Topic routing/keyword matching
-│   ├── ki_mapping.js             KI Cloud__c to vertical mapping
-│   └── pt_clusters.json          Agentforce conversation clusters
+│   └── ki_mapping.js             KI Cloud__c to vertical mapping
 ├── styles/
 │   ├── tokens.css         Design tokens
 │   └── app.css            Component styles

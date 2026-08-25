@@ -3,13 +3,11 @@ import { pingGateway, callClaude, extractText, extractJson } from '../shared/gat
 import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
-import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, applySettings } from '../shared/config.js';
-import { mapArticleRecord, scoreArticle as sharedScoreArticle } from '../shared/scoring.js';
+import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, ARTICLE_META_FIELDS, applySettings } from '../shared/config.js';
+import { mapArticleRecord } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
-import { handleCoverage, analyzePtCoverage } from './handlers/coverage.js';
-import { handleDedup, handleMerge } from './handlers/dedup.js';
 import { publishNewArticle, publishUpdateDraft } from './handlers/article-publish.js';
 import { checkGusConnection } from './handlers/gus-enrichment.js';
 
@@ -72,7 +70,6 @@ async function handleMessage(msg) {
     }
     case 'RESOLVE_CASE_NUMBER': return resolveCase(msg.caseNumber);
     case 'SEARCH_CASES': return searchCases(msg.query);
-    case 'COVERAGE_ANALYZE_PT': return analyzePtCoverage(msg);
     case 'REFINE_SECTION': return refineSection(msg);
     case 'PUBLISH_NEW_ARTICLE': return publishNewArticle(msg.payload);
     case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
@@ -81,7 +78,6 @@ async function handleMessage(msg) {
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
     case 'CHECK_KI_CONNECTION': return checkKiConnection();
     case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
-    case 'SCORE_DRAFT_ARTICLE': return scoreDraftArticle(msg.article);
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }
@@ -127,24 +123,13 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   }
 }
 
-async function scoreDraftArticle(article) {
-  if (!article) return { success: false, error: 'No article provided' };
-  try {
-    const result = await sharedScoreArticle(article);
-    if (result.overall == null) return { success: false, error: result.error || 'Could not parse score' };
-    return { success: true, score: result };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
 async function fetchArticlePreview(articleId) {
   const safeId = sanitizeId(articleId);
   if (!safeId) return { success: false, error: 'Invalid article ID' };
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
   try {
-    const soql = `SELECT Id, Title, Summary, ArticleNumber, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
+    const soql = `SELECT Id, Title, Summary, ArticleNumber, PublishStatus, ValidationStatus, CreatedBy.Name, LastModifiedBy.Name, LastModifiedDate, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (!records.length) return { success: false, error: 'Article not found' };
     const r = records[0];
@@ -155,6 +140,11 @@ async function fetchArticlePreview(articleId) {
         title: r.Title || '',
         summary: r.Summary || '',
         articleNumber: r.ArticleNumber || '',
+        publishStatus: r.PublishStatus || '',
+        validationStatus: r.ValidationStatus || '',
+        createdByName: r.CreatedBy?.Name || '',
+        lastModifiedByName: r.LastModifiedBy?.Name || '',
+        lastModifiedDate: r.LastModifiedDate || '',
         descriptionHtml: r.Description__c || '',
         resolutionHtml: r.Resolution__c || '',
         stepsHtml: r.Steps__c || '',
@@ -282,24 +272,6 @@ function handlePort(port) {
         else if (msg.action === 'GENERATE_NEW_ARTICLE') wrap(handleGenerateNew)(msg);
       });
       break;
-    case 'kbs-coverage':
-      port.onMessage.addListener(wrap(handleCoverage));
-      break;
-    case 'kba-coverage-stream':
-      port.onMessage.addListener((msg) => {
-        analyzePtCoverage(msg, guardedPort)
-          .catch(e => {
-            if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
-          })
-          .finally(() => { flushCost(); });
-      });
-      break;
-    case 'kbs-dedup':
-      port.onMessage.addListener(wrap(handleDedup));
-      break;
-    case 'kbs-merge':
-      port.onMessage.addListener(wrap(handleMerge));
-      break;
   }
 }
 
@@ -315,14 +287,12 @@ function handlePort(port) {
     const session = await detectSession();
     if (!session.sid) return;
 
-    const META_FIELDS = 'Id, KnowledgeArticleId, ArticleNumber, Title, Summary, UrlName, PublishStatus, ValidationStatus, LastPublishedDate, LastModifiedDate, Contains_Image__c, Contains_Video__c, Article_Length__c, ArticleTotalViewCount, ArticleCaseAttachCount, Product_And_Topic__r.Name';
-
     const [tier1Records, tier2Records] = await Promise.all([
       sfQueryAll(session.apiBase, session.sid,
-        `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+        `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
       ),
       sfQueryAll(session.apiBase, session.sid,
-        `SELECT ${META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+        `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
       )
     ]);
 

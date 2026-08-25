@@ -1,13 +1,13 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, editableRichField, statusPill, sanitizeHtml, uniqueSortedValues } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { sfGet, sfQueryAll, mapWithConcurrency, stripHtml } from '../shared/api.js';
+import { mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SF_API_VERSION, SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, mapArticleRecord } from '../shared/scoring.js';
+import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
-import { markdownToHtml, htmlToMarkdown } from '../shared/markdown.js';
+import { showArticlePreview } from '../shared/article-preview.js';
 
 let _container = null;
 let _unsubs = [];
@@ -21,16 +21,6 @@ const _sorter = createSorter('articleNumber', 'asc');
 let _page = 0;
 const _pageSize = 50;
 let _agfHits = null;
-
-const SCORE_META_FIELDS = [
-  'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
-  'PublishStatus', 'ValidationStatus', 'LastPublishedDate', 'LastModifiedDate',
-  'Contains_Image__c', 'Contains_Video__c', 'Article_Length__c',
-  'ArticleTotalViewCount', 'ArticleCaseAttachCount',
-  'Product_And_Topic__r.Name'
-].join(', ');
-
-
 
 
 
@@ -212,7 +202,7 @@ function render() {
 
   const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
-  const ptOptions = [...new Set(articles.map(a => a.topicName).filter(Boolean))].sort();
+  const ptOptions = uniqueSortedValues(articles, 'topicName');
   const filteredScored = filtered.filter(a => scores[a.id]?.overall != null);
   const filteredAvg = filteredScored.length ? Math.round(filteredScored.reduce((s, a) => s + scores[a.id].overall, 0) / filteredScored.length) : null;
 
@@ -223,7 +213,7 @@ function render() {
     filteredScored.length ? { value: filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length, label: 'Below 60', color: 'var(--error)' } : null
   ]));
 
-  const validationOptions = [...new Set(articles.map(a => a.validationStatus).filter(Boolean))].sort();
+  const validationOptions = uniqueSortedValues(articles, 'validationStatus');
 
   const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
   searchInput.addEventListener('input', e => { _filterText = e.target.value; _page = 0; render(); });
@@ -260,7 +250,7 @@ function render() {
     (sel) => { _filterValidation = sel; _page = 0; render(); }
   );
 
-  const publishOptions = [...new Set(articles.map(a => a.publishStatus).filter(Boolean))].sort();
+  const publishOptions = uniqueSortedValues(articles, 'publishStatus');
   const publishMulti = multiSelect('kb-publish-filter', 'Status',
     publishOptions.map(v => ({ value: v, label: v })),
     _filterPublish,
@@ -356,7 +346,7 @@ function render() {
       h('th', { style: { width: '85px', cursor: 'pointer' }, onClick: () => { toggleKbSort('lastPublished'); } }, 'Published' + ind('lastPublished')),
       h('th', { style: { width: '80px', cursor: 'pointer' }, onClick: () => { toggleKbSort('agfHits'); } }, 'AGF' + ind('agfHits')),
       h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + ind('score')),
-      h('th', { style: { width: '120px' } }, 'Actions')
+      h('th', { style: { width: '150px' } }, 'Actions')
     )),
     h('tbody', null)
   );
@@ -392,7 +382,7 @@ function render() {
       h('td', null,
         h('div', { style: { fontSize: '12px', fontWeight: '500' } }, a.title || ''),
         h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' } },
-          a.publishStatus ? h('span', { class: `pill pill--${a.publishStatus === 'Online' ? 'success' : a.publishStatus === 'Draft' ? 'warning' : 'neutral'}`, style: { fontSize: '9px', padding: '1px 5px' } }, a.publishStatus) : null,
+          statusPill(a.publishStatus, { fontSize: '9px', padding: '1px 5px' }),
           a.validationStatus ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, a.validationStatus) : null
         )
       ),
@@ -402,6 +392,7 @@ function render() {
       h('td', null, scoreEl),
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px' } },
+          h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 5px' }, title: 'Preview article content locally', onClick: () => showArticlePreview(a.id, { articleNumber: a.articleNumber, title: a.title }) }, '👁'),
           scoreData?.overall != null
             ? h('button', { class: 'btn btn--ghost btn--sm', title: 'View score details and rescore', onClick: () => showScoreDetail(a, scoreData) }, 'Score')
             : h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, 'Score'),
@@ -471,48 +462,18 @@ function showScoreDetail(article, scoreData) {
 async function loadArticles(forceLive = false) {
   setState('kb.loading', true);
   try {
-    if (!forceLive) {
-      const cachedData = await localGet([STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT]);
-      const cachedArticles = cachedData[STORAGE_KEYS.ALL_ARTICLES];
-      const cachedAt = cachedData[STORAGE_KEYS.ALL_ARTICLES_AT];
-      if (cachedArticles?.length && cachedAt && (Date.now() - cachedAt < 30 * 60 * 1000)) {
-        setState('kb.articles', cachedArticles);
-        const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
-        if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
-          setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
-        }
-        toast(`Loaded ${cachedArticles.length} articles (cached).`, 'success');
-        setState('kb.loading', false);
-        return;
-      }
-    }
-
-    const session = await detectSession();
-    if (!session.sid) { toast('Not connected to Salesforce.', 'error'); setState('kb.loading', false); return; }
-
-    const WHERE = `WHERE PublishStatus IN ('Online','Draft','Archived') AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')`;
-    const countResp = await sfGet(
-      `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(`SELECT COUNT() FROM Knowledge__kav ${WHERE}`)}`,
-      session.sid
-    );
-    const totalCount = countResp.totalSize || 0;
-    setState('kb.loading', { loaded: 0, total: totalCount });
-
-    const records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${SCORE_META_FIELDS} FROM Knowledge__kav ${WHERE} ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
-      (loaded, total) => setState('kb.loading', { loaded, total: total || totalCount })
-    );
-
-    const articles = records.map(mapArticleRecord);
+    const { articles, error, fromCache } = await loadAllArticles({
+      forceLive,
+      onProgress: (p) => setState('kb.loading', p)
+    });
+    if (error) { toast(error, 'error'); return; }
 
     setState('kb.articles', articles);
-    await localSet({ [STORAGE_KEYS.ALL_ARTICLES]: articles, [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now() });
-
-    const cached = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
-    if (cached[STORAGE_KEYS.ARTICLE_SCORES]) {
-      setState('kb.scores', cached[STORAGE_KEYS.ARTICLE_SCORES]);
+    const cachedScores = await localGet([STORAGE_KEYS.ARTICLE_SCORES]);
+    if (cachedScores[STORAGE_KEYS.ARTICLE_SCORES]) {
+      setState('kb.scores', cachedScores[STORAGE_KEYS.ARTICLE_SCORES]);
     }
-    toast(`Loaded ${articles.length} articles.`, 'success');
+    toast(`Loaded ${articles.length} articles${fromCache ? ' (cached)' : ''}.`, 'success');
   } catch (e) {
     toast('Failed to load: ' + e.message, 'error');
   } finally {
@@ -1063,79 +1024,14 @@ function commitRewriteSection(article, key, value) {
 }
 
 function renderRewriteSection(article, key, label, opts = {}) {
-  const wrap = h('div', { style: { marginBottom: '14px' } });
-
-  const buildView = () => {
-    const value = currentRewriteSections(article)[key] || '';
-    const header = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
-      h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
-      h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => swapToEdit() }, 'Edit')
-    );
-    const body = opts.plain
-      ? h('div', { style: { fontSize: opts.bold === false ? '12px' : '13px', fontWeight: key === 'title' ? '600' : '400', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, value || '(empty)')
-      : (value.trim() ? renderMarkdown(value) : h('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '(empty)'));
-    wrap.textContent = '';
-    wrap.appendChild(header);
-    wrap.appendChild(body);
-  };
-
-  const swapToEdit = () => {
-    const value = currentRewriteSections(article)[key] || '';
-
-    if (opts.plain) {
-      const input = key === 'title'
-        ? h('input', { type: 'text', class: 'input', style: { width: '100%', fontSize: '13px', fontWeight: '600' } })
-        : h('textarea', { class: 'input', rows: String(opts.rows || 2), style: { width: '100%', fontSize: '12px', lineHeight: '1.6', resize: 'vertical' } });
-      input.value = value;
-      const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { commitRewriteSection(article, key, input.value); buildView(); } }, 'Done');
-      const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
-      wrap.textContent = '';
-      wrap.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
-        h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
-        h('div', { style: { display: 'flex', gap: '6px' } }, cancel, done)
-      ));
-      wrap.appendChild(input);
-      input.focus();
-      return;
-    }
-
-    const editor = h('div', {
-      class: 'kb-richtext',
-      contenteditable: 'true',
-      style: { minHeight: `${(opts.rows || 8) * 20}px`, maxHeight: '360px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '12px', lineHeight: '1.6', outline: 'none' }
-    });
-    editor.innerHTML = markdownToHtml(value, { headingBase: 1 });
-
-    const exec = (cmd, arg) => { editor.focus(); try { document.execCommand('styleWithCSS', false, false); } catch {} document.execCommand(cmd, false, arg); };
-    const toolBtn = (labelTxt, cmd, arg, title) => h('button', { class: 'btn btn--ghost btn--sm', title: title || labelTxt, style: { padding: '2px 8px', fontSize: '12px', minWidth: '28px', fontWeight: cmd === 'bold' ? '700' : '400', fontStyle: cmd === 'italic' ? 'italic' : 'normal' }, onMouseDown: (e) => { e.preventDefault(); exec(cmd, arg); } }, labelTxt);
-    const linkBtn = h('button', { class: 'btn btn--ghost btn--sm', title: 'Insert link', style: { padding: '2px 8px', fontSize: '11px' }, onMouseDown: (e) => { e.preventDefault(); const url = prompt('Link URL:'); if (url) exec('createLink', url); } }, '🔗');
-
-    const toolbar = h('div', { style: { display: 'flex', gap: '2px', flexWrap: 'wrap', marginBottom: '6px', padding: '4px', background: 'var(--surface-subtle, rgba(0,0,0,0.03))', borderRadius: 'var(--radius-xs)' } },
-      toolBtn('B', 'bold', null, 'Bold'),
-      toolBtn('I', 'italic', null, 'Italic'),
-      toolBtn('H2', 'formatBlock', '<H2>', 'Heading'),
-      toolBtn('H3', 'formatBlock', '<H3>', 'Subheading'),
-      toolBtn('¶', 'formatBlock', '<P>', 'Normal text'),
-      toolBtn('• List', 'insertUnorderedList', null, 'Bulleted list'),
-      toolBtn('1. List', 'insertOrderedList', null, 'Numbered list'),
-      linkBtn
-    );
-
-    const done = h('button', { class: 'btn btn--primary btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { commitRewriteSection(article, key, htmlToMarkdown(editor)); buildView(); } }, 'Done');
-    const cancel = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => buildView() }, 'Cancel');
-
-    wrap.textContent = '';
-    wrap.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
-      h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, label),
-      h('div', { style: { display: 'flex', gap: '6px' } }, cancel, done)
-    ));
-    wrap.appendChild(toolbar);
-    wrap.appendChild(editor);
-    editor.focus();
-  };
-
-  buildView();
-  return wrap;
+  return editableRichField({
+    label,
+    getValue: () => currentRewriteSections(article)[key] || '',
+    setValue: (v) => commitRewriteSection(article, key, v),
+    plain: !!opts.plain,
+    singleLine: key === 'title',
+    rows: opts.rows || 2
+  });
 }
 
 let _rewriteScoreCache = {};
@@ -1344,7 +1240,7 @@ async function showRewriteComparison(article) {
       let contentEl;
       if (opts.html != null) {
         contentEl = h('div', { class: 'kb-compare-html', style: { fontSize: '12px', lineHeight: '1.5' } });
-        contentEl.innerHTML = opts.html || '<span style="color:var(--text-muted)">(empty)</span>';
+        contentEl.innerHTML = opts.html ? sanitizeHtml(opts.html) : '<span style="color:var(--text-muted)">(empty)</span>';
       } else if (opts.markdown) {
         contentEl = (value || '').trim()
           ? renderMarkdown(value)

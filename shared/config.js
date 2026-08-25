@@ -46,13 +46,6 @@ export let SCORE_MID_THRESHOLD = 60;
 export let SCORE_GOOD_ENOUGH_THRESHOLD = 70;
 export let RELEVANCE_COVERAGE_THRESHOLD = 65;
 
-export const PT_HIGH_VOLUME_CONVS = 200;
-export const PT_MID_VOLUME_CONVS = 100;
-export const PT_LOW_COVERAGE_ARTICLES = 3;
-
-export const CLUSTER_HIGH_VOLUME_CONVS = 200;
-export const CLUSTER_MID_VOLUME_CONVS = 50;
-
 export const STREAM_RENDER_THROTTLE_MS = 150;
 
 export const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -63,6 +56,17 @@ export const CASE_GUARD_RAIL_EXCLUSIONS = [
 
 export const ORGCS_BASE = 'https://orgcs.lightning.force.com';
 export function articleUrl(id) { return `${ORGCS_BASE}/lightning/r/Knowledge__kav/${id}/view`; }
+
+export const ARTICLE_META_FIELDS = [
+  'Id', 'KnowledgeArticleId', 'ArticleNumber', 'Title', 'Summary', 'UrlName',
+  'PublishStatus', 'ValidationStatus', 'LastPublishedDate', 'LastModifiedDate',
+  'CreatedBy.Name', 'LastModifiedBy.Name',
+  'Contains_Image__c', 'Contains_Video__c', 'Article_Length__c',
+  'ArticleTotalViewCount', 'ArticleCaseAttachCount',
+  'Product_And_Topic__r.Name'
+].join(', ');
+
+export const ARTICLE_LIST_WHERE = `WHERE PublishStatus IN ('Online','Draft','Archived') AND Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')`;
 
 export const CLOUDS = ['Industry', 'Revenue'];
 

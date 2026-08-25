@@ -1,9 +1,41 @@
-import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, soqlIdList } from './api.js';
+import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList } from './api.js';
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
-import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, SCORING_MODEL, SCORING_MAX_TOKENS } from './config.js';
+import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, SCORING_MODEL, SCORING_MAX_TOKENS, ARTICLE_META_FIELDS, ARTICLE_LIST_WHERE, CACHE_TTL_MS, STORAGE_KEYS } from './config.js';
 import { SCORING_CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
+import { detectSession } from './auth.js';
+import { localGet, localSet } from './storage.js';
 
 export { SCORING_CRITERIA, computeDynamicMaxes };
+
+export async function loadAllArticles({ forceLive = false, onProgress } = {}) {
+  if (!forceLive) {
+    const cached = await localGet([STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT]);
+    const cachedArticles = cached[STORAGE_KEYS.ALL_ARTICLES];
+    const cachedAt = cached[STORAGE_KEYS.ALL_ARTICLES_AT];
+    if (cachedArticles?.length && cachedAt && (Date.now() - cachedAt < CACHE_TTL_MS)) {
+      return { articles: cachedArticles, fromCache: true };
+    }
+  }
+
+  const session = await detectSession();
+  if (!session.sid) return { articles: null, error: 'Not connected to Salesforce.' };
+
+  const countResp = await sfGet(
+    `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(`SELECT COUNT() FROM Knowledge__kav ${ARTICLE_LIST_WHERE}`)}`,
+    session.sid
+  );
+  const totalCount = countResp.totalSize || 0;
+  if (onProgress) onProgress({ loaded: 0, total: totalCount });
+
+  const records = await sfQueryAll(session.apiBase, session.sid,
+    `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav ${ARTICLE_LIST_WHERE} ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
+    (loaded, total) => onProgress && onProgress({ loaded, total: total || totalCount })
+  );
+
+  const articles = records.map(mapArticleRecord);
+  await localSet({ [STORAGE_KEYS.ALL_ARTICLES]: articles, [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now() });
+  return { articles, fromCache: false };
+}
 
 export function mapArticleRecord(r) {
   return {
@@ -15,6 +47,8 @@ export function mapArticleRecord(r) {
     urlName: r.UrlName,
     publishStatus: r.PublishStatus || 'Online',
     validationStatus: r.ValidationStatus,
+    createdByName: r.CreatedBy?.Name || '',
+    lastModifiedByName: r.LastModifiedBy?.Name || '',
     topicName: r.Product_And_Topic__r?.Name || '',
     containsImage: !!r.Contains_Image__c,
     containsVideo: !!r.Contains_Video__c,
