@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, editableRichField, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, confirmModal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, editableRichField, renderMarkdown } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
@@ -8,7 +8,7 @@ import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS, CLOUDS, getCloudFromPt
 import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup.js';
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
-import { showArticlePreview, showArticleCompare } from '../shared/article-preview.js';
+import { previewButton, showArticleCompare } from '../shared/article-preview.js';
 import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
 
 let _container = null;
@@ -76,9 +76,7 @@ function articleCell(pair, side) {
     ? h('a', { href: articleUrl(id), target: '_blank', rel: 'noopener', style: { fontWeight: '600', color: 'var(--primary)', textDecoration: 'none', fontSize: '12px' } }, `#${number}`)
     : h('span', { style: { fontWeight: '600', fontSize: '12px' } }, `#${number}`);
   const statusEl = statusPill(status, { fontSize: '9px', padding: '1px 5px' });
-  const viewBtn = id
-    ? h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 5px' }, title: 'Preview article content locally', onClick: () => showArticlePreview(id, { articleNumber: number, title }) }, '👁')
-    : null;
+  const viewBtn = id ? previewButton(id, { articleNumber: number, title }) : null;
   const authorLine = [createdBy ? `Created: ${createdBy}` : null, modifiedBy ? `Modified: ${modifiedBy}` : null].filter(Boolean).join(' · ');
 
   return h('td', { style: { verticalAlign: 'top' } },
@@ -223,7 +221,7 @@ function render() {
         articleCell(pair, 'B'),
         h('td', null, h('span', { class: `pill pill--${pair.relationship === 'DUPLICATE' ? 'error' : 'warning'}` }, pair.relationship || 'DUP')),
         h('td', null, h('span', { class: `pill pill--${confPct >= 95 ? 'error' : 'warning'}` }, `${confPct}%`)),
-        h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px' } }, pair.reason || ''),
+        h('td', null, h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px' } }, pair.reason || '')),
         h('td', null,
           h('div', { style: { display: 'flex', gap: '4px' } },
             h('button', {
@@ -490,6 +488,16 @@ async function publishMergedUpdate(pair, mergeKey, keepSelect) {
   const target = articles.find(a => String(a.articleNumber) === String(keepSelect.value));
   if (!target) { toast('Could not resolve the article to update.', 'error'); return; }
 
+  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: target.id } });
+  if (draftCheck?.hasDraft) {
+    const proceed = await confirmModal(
+      'Existing Draft Found',
+      'A draft version of this article already exists. Replace its content with this merge, or leave the existing draft as is?',
+      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
+    );
+    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
+  }
+
   const sections = [];
   if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
   if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
@@ -560,7 +568,7 @@ async function showMerge(pair) {
   keepSelect.value = String(pair.keepArticle || pair.articleA);
 
   const hasCached = !!_mergeTextCache[mergeKey];
-  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'merge-regenerate', disabled: !hasCached, onClick: () => generateMerge(pair, mergeKey) }, hasCached ? 'Regenerate' : 'Working…');
+  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'merge-regenerate', disabled: !hasCached, onClick: () => generateMerge(pair, mergeKey) }, hasCached ? 'Regenerate' : 'Generating…');
   const updateBtn = h('button', { class: 'btn btn--primary btn--sm', id: 'merge-publish', onClick: () => publishMergedUpdate(pair, mergeKey, keepSelect) }, 'Create New Version in ORGCS');
   const createNewBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'merge-create-new', onClick: () => publishMergedNew(pair, mergeKey) }, 'Create as New Instead');
 

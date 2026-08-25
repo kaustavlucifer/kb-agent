@@ -1,4 +1,4 @@
-export const PT_RELATED = {
+const PT_RELATED = {
   'Industry-OmniStudio': [
     'Revenue Cloud (Core)-OmniStudio',
     'Industry-Document Generation',

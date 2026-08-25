@@ -8,7 +8,7 @@ import { mapArticleRecord } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
-import { publishNewArticle, publishUpdateDraft } from './handlers/article-publish.js';
+import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handlers/article-publish.js';
 import { checkGusConnection } from './handlers/gus-enrichment.js';
 
 let _settingsReady = (async () => {
@@ -74,6 +74,7 @@ async function handleMessage(msg) {
     case 'REFINE_SECTION': return refineSection(msg);
     case 'PUBLISH_NEW_ARTICLE': return publishNewArticle(msg.payload);
     case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
+    case 'CHECK_DRAFT_EXISTS': return checkDraftExists(msg.payload);
     case 'CHECK_GUS_CONNECTION': return checkGusConnection();
     case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);

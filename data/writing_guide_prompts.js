@@ -22,20 +22,6 @@ GENERAL RULES:
 - Videos and images are NOT served to customers via Agentforce, but alt-text descriptions ARE chunked and vectorized. Always annotate media with descriptive alt text.
 - The Additional Resources section IS used by Agentforce for citations.`;
 
-export const GUIDE_SCORING = `AGENTFORCE KB QUALITY STANDARDS — score articles against these criteria:
-- Titles must be product-specific and describe the exact issue (not generic)
-- Must use H2/H3 header tags for structure (bold text is NOT a substitute — it breaks chunking)
-- Summary should be 2-4 sentences covering problem + resolution approach
-- Description must state the problem, symptoms, context, and WHY it happens
-- Resolution must start with what the steps accomplish, then numbered steps
-- After code blocks, there must be plain-text explanation
-- Acronyms must be explained on first use
-- Tables must use text, not visual indicators (checkmarks/circles)
-- Media must have alt-text descriptions
-- Product name + feature must appear together to avoid cross-cloud ambiguity
-- Content should be spread across sections with headers, not dumped in one block
-- FAQ items must be specific in intent — large generic FAQs score poorly`;
-
 export const GUIDE_STYLE = `CRITICAL KB STYLE RULES — apply to ALL generated and rewritten articles:
 
 - Write as a PRODUCT KNOWLEDGE ARTICLE, not a case note. The article must be useful to ANY customer experiencing this issue, not just the one who filed this case.

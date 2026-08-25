@@ -1,12 +1,10 @@
-import { h, modal, spinner, statusPill, sanitizeHtml } from './ui.js';
+import { h, modal, spinner, statusPill, richHtmlBox } from './ui.js';
 import { escapeHtml } from './markdown.js';
 
 function htmlField(label, html, opts = {}) {
-  const box = h('div', { style: { fontSize: '12px', lineHeight: '1.6', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px 10px' } });
-  box.innerHTML = html ? sanitizeHtml(html) : '<span style="color:var(--text-muted)">(empty)</span>';
   return h('div', { style: { marginBottom: opts.compact ? '8px' : '12px' } },
     h('div', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
-    box
+    richHtmlBox(html)
   );
 }
 
@@ -41,6 +39,16 @@ function loadingModal(title) {
   );
   modal(title, content, { wide: true });
   return content;
+}
+
+export function previewButton(articleId, meta = {}, opts = {}) {
+  return h('button', {
+    class: 'btn btn--ghost btn--sm',
+    style: opts.style || null,
+    title: 'Preview article content locally',
+    'aria-label': 'Preview article content',
+    onClick: (e) => { e.stopPropagation(); showArticlePreview(articleId, meta); }
+  }, '👁');
 }
 
 export function showArticlePreview(articleId, meta = {}) {

@@ -34,9 +34,3 @@ export async function acquireSlot() {
   _callTimestamps.push(Date.now());
   persistTimestamps();
 }
-
-export function getUsage() {
-  const now = Date.now();
-  _callTimestamps = _callTimestamps.filter(ts => now - ts < WINDOW_MS);
-  return { used: _callTimestamps.length, limit: RPM_LIMIT, window: WINDOW_MS };
-}

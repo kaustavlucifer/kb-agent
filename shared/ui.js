@@ -37,6 +37,8 @@ export function statusPill(status, opts = {}) {
 
 const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'id', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
 
+const SAFE_URL_RE = /^(https?:|mailto:)/i;
+
 export function sanitizeHtml(html) {
   const div = document.createElement('div');
   div.innerHTML = html;
@@ -45,6 +47,8 @@ export function sanitizeHtml(html) {
     for (const attr of [...el.attributes]) {
       if (!SAFE_HTML_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
     }
+    if (el.hasAttribute('href') && !SAFE_URL_RE.test(el.getAttribute('href'))) el.removeAttribute('href');
+    if (el.hasAttribute('src') && !SAFE_URL_RE.test(el.getAttribute('src'))) el.removeAttribute('src');
     if (el.tagName === 'A') { el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener'); }
     if (el.hasAttribute('style')) {
       const style = el.getAttribute('style');
@@ -52,6 +56,19 @@ export function sanitizeHtml(html) {
     }
   });
   return div.innerHTML;
+}
+
+export function richHtmlBox(html, opts = {}) {
+  const box = h('div', {
+    class: 'rich-html-box',
+    style: {
+      fontSize: '12px', lineHeight: '1.6',
+      border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px 10px',
+      ...(opts.tall ? { maxHeight: '260px', overflow: 'auto' } : null)
+    }
+  });
+  box.innerHTML = html ? sanitizeHtml(html) : '<span style="color:var(--text-muted)">(empty)</span>';
+  return box;
 }
 
 export function chip(state, label, opts = {}) {
@@ -113,6 +130,18 @@ export function modal(title, contentEl, opts = {}) {
     if (opts.onClose) opts.onClose();
   }
   return instance;
+}
+
+export function confirmModal(title, message, { confirmLabel = 'Confirm', cancelLabel = 'Cancel' } = {}) {
+  return new Promise((resolve) => {
+    let decided = false;
+    const content = h('div', { style: { fontSize: '13px', lineHeight: '1.5' } }, message);
+    const footer = h('div', { class: 'modal__footer' },
+      h('button', { class: 'btn btn--secondary', onClick: () => { decided = true; resolve(false); ref.close(); } }, cancelLabel),
+      h('button', { class: 'btn btn--primary', onClick: () => { decided = true; resolve(true); ref.close(); } }, confirmLabel)
+    );
+    const ref = modal(title, content, { footer, onClose: () => { if (!decided) resolve(false); } });
+  });
 }
 
 export function progressBar(pct, variant = 'default', animated = false) {
@@ -180,38 +209,7 @@ export function statsBar(stats) {
   );
 }
 
-export function streamingModal(title, { header = null, onClose } = {}) {
-  const stream = h('div', { class: 'stream-output' });
-  stream.appendChild(spinner('md'));
-  let raw = '';
-  const content = h('div', null, header, stream);
-  const ref = modal(title, content, {
-    wide: true,
-    onClose,
-    primaryAction: {
-      label: 'Copy',
-      handler: () => navigator.clipboard.writeText(raw).then(() => toast('Copied.', 'success'))
-    }
-  });
-  return {
-    ...ref,
-    stream,
-    getRaw: () => raw,
-    renderFull(text, { scroll = false } = {}) {
-      raw = text;
-      stream.textContent = '';
-      stream.appendChild(renderMarkdown(text));
-      if (scroll) stream.scrollTop = stream.scrollHeight;
-    },
-    setError(message) {
-      raw = '';
-      stream.textContent = '';
-      stream.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, message));
-    }
-  };
-}
-
-export function renderInlineFormatting(text) {
+function renderInlineFormatting(text) {
   const tokens = parseInline(text);
   if (tokens.length === 1 && tokens[0].type === 'text') return document.createTextNode(tokens[0].text);
   const span = h('span', null);
@@ -376,7 +374,7 @@ export function multiSelect(id, label, options, selected, onChange) {
   trigger.addEventListener('click', toggleDropdown);
   wrap.appendChild(trigger);
 
-  const dropdown = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '0', maxHeight: '320px', overflowY: 'hidden', zIndex: '500', minWidth: '220px', boxShadow: 'var(--shadow-md)', display: 'none', flexDirection: 'column' } });
+  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '0', maxHeight: '320px', overflowY: 'hidden', zIndex: '500', minWidth: '220px', boxShadow: 'var(--shadow-md)', flexDirection: 'column' } });
 
   const searchInput = h('input', { type: 'text', placeholder: `Search ${label}…`, style: { width: '100%', padding: '6px 8px', fontSize: '11px', border: 'none', borderBottom: '1px solid var(--border)', outline: 'none', background: 'var(--surface)', boxSizing: 'border-box' } });
   searchInput.addEventListener('input', () => filterOptions(searchInput.value));
@@ -400,8 +398,6 @@ export function multiSelect(id, label, options, selected, onChange) {
       checkbox,
       h('span', null, opt.label)
     );
-    item.addEventListener('mouseenter', () => { item.style.background = 'var(--surface-raised)'; });
-    item.addEventListener('mouseleave', () => { item.style.background = ''; });
     item.addEventListener('click', e => e.stopPropagation());
     listWrap.appendChild(item);
   });

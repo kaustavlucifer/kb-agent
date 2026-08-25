@@ -43,6 +43,7 @@ export async function handleAnalyze(port, msg) {
   const session = await detectSession();
   if (!session.sid) { clearInterval(keepalive); send({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
 
+  try {
   const caseId = sanitizeId(msg.caseId);
 
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
@@ -53,25 +54,23 @@ export async function handleAnalyze(port, msg) {
   const extraFields = getGuardRailExtraFields(guardRailFields);
   const caseFields = `Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
   const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid, signal);
-  if (!caseRecord || !caseRecord.Id) { clearInterval(keepalive); send({ type: 'error', error: 'Case not found.' }); return; }
+  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
 
   const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
   const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
 
   if (!bypassEnabled && guardRailFields.describeFailed) {
-    clearInterval(keepalive);
     send({ type: 'error', error: 'Could not verify case guard-rail fields (Case describe failed). Analysis blocked for safety. Retry, or enable bypass in options if you have authorization.' });
     return;
   }
 
-  if (!bypassEnabled && guardRailFields.bothPresent) {
+  if (!bypassEnabled && (guardRailFields.hasSupportLevel || guardRailFields.hasHyperforce)) {
     const supportLevel = guardRailFields.supportLevelName ? (caseRecord[guardRailFields.supportLevelName] || '') : '';
     const hyperforce = guardRailFields.hyperforceName ? (caseRecord[guardRailFields.hyperforceName] || '') : '';
     caseRecord.__supportLevel = supportLevel;
     caseRecord.__hyperforce = hyperforce;
     const guardCheck = isCaseAnalysisAllowed(caseRecord);
     if (!guardCheck.allowed) {
-      clearInterval(keepalive);
       send({ type: 'error', error: guardCheck.reason });
       return;
     }
@@ -224,14 +223,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'meta', topArticles: scoredArticles, productDocs: (productDocs || []).slice(0, 20) });
 
-  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
   const kbScoredArticles = [...scoredArticles];
   await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
-  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const wellCovered = kbScoredArticles.filter(a =>
     a.relevanceFromAI &&
@@ -241,7 +240,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
 
-  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   let decision;
   if (wellCovered.length) {
@@ -257,7 +256,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
   }
 
-  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
   let structured;
@@ -306,7 +305,15 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   if (!stopped) {
     await autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
   }
-  clearInterval(keepalive);
+  } catch (e) {
+    if (signal.aborted || e?.name === 'AbortError') {
+      send({ type: 'stopped', partial: true });
+    } else {
+      send({ type: 'error', error: e?.message || 'Analysis failed.' });
+    }
+  } finally {
+    clearInterval(keepalive);
+  }
 }
 
 export async function handleGenerateNew(port, msg) {
@@ -324,47 +331,62 @@ export async function handleGenerateNew(port, msg) {
 
   send({ type: 'progress', label: 'Generating new article…' });
 
-  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid);
-  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
-  const comments = await sfQuery(session.apiBase, session.sid,
-    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
-  );
+  try {
+    const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid, signal);
+    if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
+    const comments = await sfQuery(session.apiBase, session.sid,
+      `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
+      signal
+    );
 
-  const [intentsResult, caseAbstract] = await Promise.all([
-    extractIntents(caseRecord, comments, signal),
-    extractAbstract(caseRecord, comments, signal)
-  ]);
+    const [intentsResult, caseAbstract] = await Promise.all([
+      extractIntents(caseRecord, comments, signal),
+      extractAbstract(caseRecord, comments, signal)
+    ]);
 
-  send({ type: 'streaming-start' });
-  const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, new Map(), send, signal);
+    send({ type: 'streaming-start' });
+    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, new Map(), send, signal);
 
-  const structured = {
-    action: 'CREATE_NEW',
-    confidence: 'HIGH',
-    summary: 'New article generated from case.',
-    newArticleDraft: draft
-  };
+    const structured = {
+      action: 'CREATE_NEW',
+      confidence: 'HIGH',
+      summary: 'New article generated from case.',
+      newArticleDraft: draft
+    };
 
-  send({ type: 'result', success: true, draft, structured });
+    send({ type: 'result', success: true, draft, structured });
 
-  autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
+    await autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
+  } catch (e) {
+    if (signal.aborted || e?.name === 'AbortError') {
+      send({ type: 'stopped', partial: true });
+    } else {
+      send({ type: 'error', error: e?.message || 'Article generation failed.' });
+    }
+  }
 }
 
 
 async function extractIntents(caseRecord, comments, signal) {
+  const fallback = { theme: caseRecord.Subject, product: null, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
   const commentsText = comments.slice(0, 10).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
-  const resp = await callClaudeFast({
-    system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
+  try {
+    const resp = await callClaudeFast({
+      system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
 
 Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries":["..."]}]}`,
-    messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
-    maxTokens: 800,
-    temperature: 0,
-    signal
-  });
-  const parsed = extractJson(extractText(resp));
-  if (!parsed?.intents) return { theme: caseRecord.Subject, product: null, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
-  return { theme: parsed.theme || '', product: parsed.product || null, intents: parsed.intents };
+      messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 2000)}\nComments:\n${commentsText.slice(0, 3000)}` }],
+      maxTokens: 800,
+      temperature: 0,
+      signal
+    });
+    const parsed = extractJson(extractText(resp));
+    if (!parsed?.intents) return fallback;
+    return { theme: parsed.theme || '', product: parsed.product || null, intents: parsed.intents };
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return fallback;
+  }
 }
 
 async function extractAbstract(caseRecord, comments, signal) {
@@ -782,8 +804,9 @@ async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies
     ? `Problem: ${structuredResolution.problem_statement || ''}\nRoot Cause: ${structuredResolution.root_cause || 'unknown'}\nSteps: ${(structuredResolution.resolution_steps || []).join('; ')}\nWorkarounds: ${(structuredResolution.workarounds || []).join('; ')}\nErrors: ${(structuredResolution.error_codes || []).join(', ')}`
     : `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}`;
 
-  const resp = await callClaudeFast({
-    system: `You are a senior Salesforce KB gap evaluator. Your job is to evaluate what is MISSING, INCOMPLETE, or OUTDATED in existing KB articles given a real-world case resolution.
+  try {
+    const resp = await callClaudeFast({
+      system: `You are a senior Salesforce KB gap evaluator. Your job is to evaluate what is MISSING, INCOMPLETE, or OUTDATED in existing KB articles given a real-world case resolution.
 
 ${GUIDE_DECISION}
 
@@ -804,13 +827,17 @@ Then derive action:
 - Mix of covered + uncoverable → BOTH
 
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
-    messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
-    maxTokens: 4500,
-    temperature: 0,
-    signal
-  });
-  const parsed = extractJson(extractText(resp));
-  return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.', gaps: [] };
+      messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
+      maxTokens: 4500,
+      temperature: 0,
+      signal
+    });
+    const parsed = extractJson(extractText(resp));
+    return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.', gaps: [] };
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update (evaluation failed).', gaps: [] };
+  }
 }
 
 async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, candidateBodies, send, signal) {

@@ -18,8 +18,8 @@ Never add console.log, console.info, console.warn, console.error, or console.deb
 - Settings are applied via `applySettings()` at startup in BOTH the popup (`modules/app.js init()`) and service worker (`_settingsReady` promise); both contexts must call it
 
 ## Architecture
-- Scoring and rewrite call `streamClaude` directly from the **popup** context
-- Case analysis, dedup run in the **service worker** via ports
+- Scoring, rewrite, and dedup merge call `streamClaude` directly from the **popup** context
+- Case analysis runs in the **service worker** via ports
 - `shared/config.js` exports are `let` bindings — `applySettings()` reassigns them in place; all `import { X }` call sites see the new value automatically
 - `shared/markdown.js` is the ONE markdown parser — never reimplement it
 - `shared/ui.js` is the ONE UI helper — `h()`, `modal()`, `toast()`, `spinner()`, etc.

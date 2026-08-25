@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, editableRichField, statusPill, sanitizeHtml, uniqueSortedValues } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, confirmModal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, editableRichField, statusPill, richHtmlBox, uniqueSortedValues } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
@@ -7,7 +7,7 @@ import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
-import { showArticlePreview } from '../shared/article-preview.js';
+import { previewButton } from '../shared/article-preview.js';
 import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
 
 let _container = null;
@@ -393,7 +393,7 @@ function render() {
       h('td', null, scoreEl),
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px' } },
-          h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 5px' }, title: 'Preview article content locally', onClick: () => showArticlePreview(a.id, { articleNumber: a.articleNumber, title: a.title }) }, '👁'),
+          previewButton(a.id, { articleNumber: a.articleNumber, title: a.title }),
           scoreData?.overall != null
             ? h('button', { class: 'btn btn--ghost btn--sm', title: 'View score details and rescore', onClick: () => showScoreDetail(a, scoreData) }, 'Score')
             : h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreOne(a) }, 'Score'),
@@ -881,7 +881,7 @@ async function rewriteArticle(article) {
   if (cached) streamEl.appendChild(renderMarkdown(cached));
   else setRewriteStatus(streamEl, 'Preparing rewrite…');
 
-  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', disabled: !cached, onClick: () => generateRewrite(article, _rwSession) }, cached ? 'Regenerate' : 'Working…');
+  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', disabled: !cached, onClick: () => generateRewrite(article, _rwSession) }, cached ? 'Regenerate' : 'Generating…');
 
   let _rwSession = null;
 
@@ -1214,20 +1214,20 @@ async function showRewriteComparison(article) {
     const field = (label, value, opts = {}) => {
       let contentEl;
       if (opts.html != null) {
-        contentEl = h('div', { class: 'kb-compare-html', style: { fontSize: '12px', lineHeight: '1.5' } });
-        contentEl.innerHTML = opts.html ? sanitizeHtml(opts.html) : '<span style="color:var(--text-muted)">(empty)</span>';
+        contentEl = richHtmlBox(opts.html, { tall: opts.tall });
       } else if (opts.markdown) {
-        contentEl = (value || '').trim()
+        const inner = (value || '').trim()
           ? renderMarkdown(value)
           : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
+        contentEl = opts.tall
+          ? h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px' } }, inner)
+          : inner;
       } else {
         contentEl = h('div', { style: { fontSize: opts.bold ? '13px' : '12px', fontWeight: opts.bold ? '600' : '400', lineHeight: '1.5', color: opts.color || 'var(--text-primary)', whiteSpace: 'pre-wrap' } }, value || '(empty)');
       }
       return h('div', { style: { marginBottom: '12px' } },
         h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, label),
-        opts.tall
-          ? h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px' } }, contentEl)
-          : contentEl
+        contentEl
       );
     };
 
@@ -1258,6 +1258,16 @@ async function showRewriteComparison(article) {
 async function publishRewriteToOrgcs(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
+
+  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: article.id } });
+  if (draftCheck?.hasDraft) {
+    const proceed = await confirmModal(
+      'Existing Draft Found',
+      'A draft version of this article already exists. Replace its content with this rewrite, or leave the existing draft as is?',
+      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
+    );
+    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
+  }
 
   const parsed = parseRewriteSections(cached);
   const title = parsed.title || article.title;

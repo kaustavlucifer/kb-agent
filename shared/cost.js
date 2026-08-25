@@ -15,7 +15,7 @@ export function costUsd(model, inputTokens, outputTokens, cacheReadTokens = 0, c
     + (outputTokens / 1_000_000) * p.out;
 }
 
-export function charsToTokens(chars) {
+function charsToTokens(chars) {
   const cpt = CHARS_PER_TOKEN || 3.7;
   return Math.max(0, Math.round((chars || 0) / cpt));
 }

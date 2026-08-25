@@ -264,6 +264,38 @@ async function patchArticleSavingContent(apiBase, sid, recordId, updates) {
   }
 }
 
+export async function checkDraftExists(payload) {
+  const session = await detectSession();
+  if (!session.sid) return { hasDraft: false };
+  const { apiBase, sid } = session;
+
+  let existingId;
+  try {
+    existingId = sanitizeId(payload.existingArticleId);
+  } catch {
+    return { hasDraft: false };
+  }
+
+  let source;
+  try {
+    source = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${existingId}?fields=Id,KnowledgeArticleId,PublishStatus`, sid);
+  } catch {
+    return { hasDraft: false };
+  }
+
+  if (source.PublishStatus === 'Draft') return { hasDraft: true, draftId: existingId };
+
+  let masterArticleId;
+  try {
+    masterArticleId = sanitizeId(source.KnowledgeArticleId);
+  } catch {
+    return { hasDraft: false };
+  }
+
+  const draftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+  return { hasDraft: !!draftId, draftId: draftId || null };
+}
+
 async function findExistingDraftId(apiBase, sid, masterArticleId) {
   try {
     const safeMaster = escapeSoql(masterArticleId);

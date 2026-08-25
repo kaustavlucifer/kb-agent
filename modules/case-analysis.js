@@ -1,8 +1,8 @@
-import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField, sanitizeHtml } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, confirmModal, renderMarkdown, editableRichField, richHtmlBox } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
-import { showArticlePreview } from '../shared/article-preview.js';
+import { previewButton } from '../shared/article-preview.js';
 
 let _container = null;
 let _port = null;
@@ -1001,11 +1001,7 @@ async function showComparisonModal(rewrite) {
 
     const labelEl = (text) => h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, text);
     const scrollBox = (child) => h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } }, child);
-    const htmlBox = (html) => {
-      const el = h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px', fontSize: '12px', lineHeight: '1.5' } });
-      el.innerHTML = html ? sanitizeHtml(html) : '<span style="color:var(--text-muted)">(empty)</span>';
-      return el;
-    };
+    const htmlBox = (html) => richHtmlBox(html, { tall: true });
     const mdOrEmpty = (text) => (text || '').trim() ? renderMarkdown(text) : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
 
     const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
@@ -1100,8 +1096,8 @@ function renderSidebarArticles(articles) {
         link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
         link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
 
-        const previewBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '11px', padding: '1px 4px', flexShrink: '0' }, title: 'Preview article', onClick: (e) => { e.stopPropagation(); showArticlePreview(a.id, { articleNumber: a.articleNumber, title: a.title }); } }, '👁');
-        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { fontSize: '9px', padding: '1px 5px', flexShrink: '0' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
+        const previewBtn = previewButton(a.id, { articleNumber: a.articleNumber, title: a.title }, { style: { flexShrink: '0' } });
+        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { flexShrink: '0' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
 
         const relText = a.score != null ? `Rel: ${a.score}` : 'Rel: —';
         const relColor = a.score != null ? (a.score >= 70 ? 'var(--success)' : a.score >= 50 ? 'var(--primary)' : 'var(--warning)') : 'var(--text-muted)';
@@ -1440,6 +1436,16 @@ async function publishArticle(draft, result) {
 }
 
 async function publishUpdate(rewrite, result) {
+  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: rewrite.articleId } });
+  if (draftCheck?.hasDraft) {
+    const proceed = await confirmModal(
+      'Existing Draft Found',
+      'A draft version of this article already exists. Replace its content with this update, or leave the existing draft as is?',
+      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
+    );
+    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
+  }
+
   toast('Creating new draft version in ORGCS…', 'info');
   try {
     const resp = await chrome.runtime.sendMessage({

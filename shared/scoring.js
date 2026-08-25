@@ -1,4 +1,4 @@
-import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList } from './api.js';
+import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList, ID_RE } from './api.js';
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
 import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, SCORING_MODEL, SCORING_MAX_TOKENS, ARTICLE_META_FIELDS, ARTICLE_LIST_WHERE, CACHE_TTL_MS, STORAGE_KEYS } from './config.js';
 import { SCORING_CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
@@ -228,12 +228,10 @@ export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS) {
   return parseScoreResponse(text, maxes);
 }
 
-const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
-
 export async function fetchArticleBodies(articleIds, session) {
   const bodyMap = new Map();
   const failedIds = new Set();
-  const validIds = articleIds.filter(id => SF_ID_RE.test(id));
+  const validIds = articleIds.filter(id => ID_RE.test(id));
   const batches = [];
   for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
   const runBatch = async (batch) => {

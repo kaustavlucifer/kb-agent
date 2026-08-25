@@ -1,6 +1,6 @@
 import { SF_API_VERSION } from './config.js';
 
-const ID_RE = /^[a-zA-Z0-9]{15,18}$/;
+export const ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
 export function sanitizeId(id) {
   if (!id || !ID_RE.test(id)) throw new Error(`Invalid Salesforce ID: ${id}`);
