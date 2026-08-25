@@ -81,11 +81,11 @@ export function showArticleCompare(metaA = {}, metaB = {}) {
         return;
       }
       const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', maxHeight: '70vh', overflow: 'auto' } },
-        h('div', null,
+        h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
           h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, `#${respA.article.articleNumber}`),
           renderArticleColumn(respA.article, { compact: true })
         ),
-        h('div', null,
+        h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
           h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, `#${respB.article.articleNumber}`),
           renderArticleColumn(respB.article, { compact: true })
         )

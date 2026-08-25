@@ -1232,7 +1232,7 @@ async function showRewriteComparison(article) {
     };
 
     const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
-      h('div', null,
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
         field('Title', original.title, { bold: true }),
         field('Summary', original.summary, { bold: false }),
@@ -1240,7 +1240,7 @@ async function showRewriteComparison(article) {
         field('Resolution', null, { html: original.resolutionHtml, tall: true }),
         original.stepsHtml ? field('Steps', null, { html: original.stepsHtml, tall: true }) : null
       ),
-      h('div', null,
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
         field('Title', parsed.title || article.title, { bold: true, color: 'var(--primary)' }),
         field('Summary', parsed.summary, { bold: false }),

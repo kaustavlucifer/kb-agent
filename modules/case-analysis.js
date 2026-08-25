@@ -1005,7 +1005,7 @@ async function showComparisonModal(rewrite) {
     const mdOrEmpty = (text) => (text || '').trim() ? renderMarkdown(text) : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
 
     const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
-      h('div', null,
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
         h('div', { style: { marginBottom: '12px' } },
           labelEl('Title'),
@@ -1019,7 +1019,7 @@ async function showComparisonModal(rewrite) {
         h('div', { style: { marginBottom: '12px' } }, labelEl('Resolution'), htmlBox(original.resolutionHtml)),
         original.stepsHtml ? h('div', null, labelEl('Steps'), htmlBox(original.stepsHtml)) : null
       ),
-      h('div', null,
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
         h('div', { style: { marginBottom: '12px' } },
           labelEl('Title'),
