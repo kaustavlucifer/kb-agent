@@ -32,8 +32,9 @@ chrome.action.onClicked.addListener(() => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   _settingsReady.then(() => handleMessage(msg))
-    .then(result => flushCost().then(() => sendResponse(result)))
-    .catch(e => flushCost().then(() => sendResponse({ error: e.message })));
+    .then(result => { sendResponse(result); })
+    .catch(e => { sendResponse({ error: e.message }); })
+    .finally(() => { flushCost().catch(() => {}); });
   return true;
 });
 
@@ -124,11 +125,10 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
 }
 
 async function fetchArticlePreview(articleId) {
-  const safeId = sanitizeId(articleId);
-  if (!safeId) return { success: false, error: 'Invalid article ID' };
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
   try {
+    const safeId = sanitizeId(articleId);
     const soql = `SELECT Id, Title, Summary, ArticleNumber, PublishStatus, ValidationStatus, CreatedBy.Name, LastModifiedBy.Name, LastModifiedDate, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (!records.length) return { success: false, error: 'Article not found' };
@@ -262,7 +262,7 @@ function handlePort(port) {
       .catch(e => {
         if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
       })
-      .finally(() => { flushCost(); });
+      .finally(() => { flushCost().catch(() => {}); });
   };
 
   switch (port.name) {
@@ -305,6 +305,5 @@ function handlePort(port) {
       [STORAGE_KEYS.ALL_ARTICLES]: allArticles,
       [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now()
     });
-  } catch (e) {
-  }
+  } catch {}
 })();

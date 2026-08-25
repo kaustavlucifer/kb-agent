@@ -98,6 +98,8 @@ async function resolveProductAndTopic(apiBase, sid, { taxonomyName, taxonomyId }
   }
 }
 
+const STALE_PT_WARNING = "The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the save could go through. Re-tag the article's Product & Topic in Salesforce.";
+
 export async function publishNewArticle(payload) {
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No Salesforce session.' };
@@ -118,6 +120,7 @@ export async function publishNewArticle(payload) {
   const stamp = buildClaudeGenStamp({ caseNumber: payload.caseNumber });
   record['Internal_Information__c'] = stamp;
 
+  let ptFieldName = null;
   if (payload.taxonomyName || payload.taxonomyId) {
     const ptResult = await resolveProductAndTopic(apiBase, sid, {
       taxonomyName: payload.taxonomyName,
@@ -125,6 +128,7 @@ export async function publishNewArticle(payload) {
     });
     if (ptResult.ok) {
       record[ptResult.fieldName] = ptResult.idToWrite;
+      ptFieldName = ptResult.fieldName;
     }
   }
 
@@ -138,7 +142,20 @@ export async function publishNewArticle(payload) {
       url: articleUrl(articleId)
     };
   } catch (e) {
-    return { success: false, error: e?.message || 'Article creation failed.' };
+    const msg = e?.message || '';
+    const isStalePtFilter = ptFieldName && /FIELD_FILTER_VALIDATION_EXCEPTION/i.test(msg) && /Product_And_Topic__c/i.test(msg);
+    if (!isStalePtFilter) return { success: false, error: msg || 'Article creation failed.' };
+
+    try {
+      const retryRecord = { ...record };
+      delete retryRecord[ptFieldName];
+      const res2 = await sfPost(`${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav`, sid, retryRecord);
+      const articleId2 = res2?.id || res2?.Id;
+      if (!articleId2) return { success: false, error: 'No ID returned from article creation.' };
+      return { success: true, id: articleId2, url: articleUrl(articleId2), warning: STALE_PT_WARNING };
+    } catch (e2) {
+      return { success: false, error: e2?.message || 'Article creation failed after clearing Product & Topic.' };
+    }
   }
 }
 
@@ -204,6 +221,11 @@ export async function publishUpdateDraft(payload) {
     newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
     if (newDraftId) reusedExistingDraft = true;
   }
+  if (!newDraftId) {
+    await new Promise(r => setTimeout(r, 1200));
+    newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+    if (newDraftId) reusedExistingDraft = true;
+  }
   if (!newDraftId) return { success: false, error: 'No draft ID returned from new-version creation.' };
 
   const r = await patchArticleSavingContent(apiBase, sid, newDraftId, updates);
@@ -222,8 +244,6 @@ export async function publishUpdateDraft(payload) {
     ].filter(Boolean).join(' ') || null
   };
 }
-
-const STALE_PT_WARNING = "The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the rewrite could save. Re-tag the article's Product & Topic in Salesforce.";
 
 async function patchArticleSavingContent(apiBase, sid, recordId, updates) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/sobjects/Knowledge__kav/${recordId}`;

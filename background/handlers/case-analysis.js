@@ -52,7 +52,7 @@ export async function handleAnalyze(port, msg) {
   const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
   const extraFields = getGuardRailExtraFields(guardRailFields);
   const caseFields = `Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
-  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid);
+  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid, signal);
   if (!caseRecord || !caseRecord.Id) { clearInterval(keepalive); send({ type: 'error', error: 'Case not found.' }); return; }
 
   const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
@@ -81,14 +81,15 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
   const comments = await sfQuery(session.apiBase, session.sid,
-    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`
+    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
+    signal
   );
 
   const completeness = computeCompleteness(caseRecord, comments);
   send({ type: 'meta', caseCompleteness: completeness });
 
   const gusWorkNames = extractWorkItemNames(comments);
-  const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames) : Promise.resolve({ items: [], feed: [], error: null });
+  const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames, signal) : Promise.resolve({ items: [], feed: [], error: null });
 
   send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
   const [intentsResult, caseAbstract, gusData, structuredResolution] = await Promise.all([
@@ -117,12 +118,12 @@ export async function handleAnalyze(port, msg) {
     send({ type: 'meta', customizationWarning: { isCustomerSpecific: true, indicators: caseAbstract.customizationIndicators || [] } });
   }
 
-  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject).catch(() => ({ items: [], error: null }));
+  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject, signal).catch(() => ({ items: [], error: null }));
 
   const caseContextForDocs = `Subject: ${caseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}`;
   const [soslResults, productDocs, kiData] = await Promise.all([
-    soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns),
-    searchProductDocs(session.apiBase, session.sid, allQueries, casePt, caseContextForDocs),
+    soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns, signal),
+    searchProductDocs(session.apiBase, session.sid, allQueries, casePt, caseContextForDocs, signal),
     kiPromise
   ]);
 
@@ -139,7 +140,7 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
   const candidates = soslResults.slice(0, 15);
 
-  const candidateBodies = await fetchCandidateBodies(session.apiBase, session.sid, candidates);
+  const candidateBodies = await fetchCandidateBodies(session.apiBase, session.sid, candidates, signal);
 
   const articleDetailsForAI = candidates.map((a, i) => {
     const body = candidateBodies.get(a.Id) || {};
@@ -223,14 +224,14 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'meta', topArticles: scoredArticles, productDocs: (productDocs || []).slice(0, 20) });
 
-  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
   const kbScoredArticles = [...scoredArticles];
   await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
-  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
 
   const wellCovered = kbScoredArticles.filter(a =>
     a.relevanceFromAI &&
@@ -240,7 +241,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'progress', step: 5, label: 'Evaluating strategy…' });
 
-  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
 
   let decision;
   if (wellCovered.length) {
@@ -256,7 +257,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
   }
 
-  if (stopped) { send({ type: 'stopped', partial: true }); return; }
+  if (stopped) { clearInterval(keepalive); send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
   let structured;
@@ -346,7 +347,7 @@ export async function handleGenerateNew(port, msg) {
 
   send({ type: 'result', success: true, draft, structured });
 
-  autoScoreGeneratedArticles(structured, send, signal);
+  autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
 }
 
 
@@ -402,7 +403,7 @@ async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
 }
 
 
-async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
+async function soslPrimarySearch(apiBase, sid, queries, ptPatterns, signal) {
   const seen = new Set();
   const results = [];
   const uniqueQueries = [...new Set(
@@ -428,7 +429,8 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
     if (results.length >= 20) return;
     try {
       const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`,
+        signal
       );
       addRecords(records);
     } catch {}
@@ -439,7 +441,8 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
       if (results.length >= 15) return;
       try {
         const records = await sfSearch(apiBase, sid,
-          `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`
+          `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`,
+          signal
         );
         addRecords(records);
       } catch {}
@@ -449,32 +452,30 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns) {
   return results;
 }
 
-async function fetchCandidateBodies(apiBase, sid, candidates) {
+async function fetchCandidateBodies(apiBase, sid, candidates, signal) {
   const bodyMap = new Map();
   if (!candidates.length) return bodyMap;
   const ids = candidates.map(c => c.Id);
   const batches = [];
   for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
 
-  for (const batch of batches) {
-    try {
-      const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, additional_resources__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-      const result = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, sid);
-      for (const r of (result.records || [])) {
-        bodyMap.set(r.Id, {
-          id: r.Id,
-          title: r.Title || '',
-          summary: r.Summary || '',
-          articleNumber: r.ArticleNumber || '',
-          topicName: r.Product_And_Topic__r?.Name || '',
-          description: r.Description__c || '',
-          resolution: r.Resolution__c || '',
-          steps: r.Steps__c || '',
-          additionalResources: r.additional_resources__c || ''
-        });
-      }
-    } catch {}
-  }
+  await mapWithConcurrency(batches, 3, async (batch) => {
+    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, additional_resources__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
+    const result = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, sid, signal);
+    for (const r of (result.records || [])) {
+      bodyMap.set(r.Id, {
+        id: r.Id,
+        title: r.Title || '',
+        summary: r.Summary || '',
+        articleNumber: r.ArticleNumber || '',
+        topicName: r.Product_And_Topic__r?.Name || '',
+        description: r.Description__c || '',
+        resolution: r.Resolution__c || '',
+        steps: r.Steps__c || '',
+        additionalResources: r.additional_resources__c || ''
+      });
+    }
+  });
   return bodyMap;
 }
 
@@ -555,12 +556,12 @@ async function setCachedProductDocs(cacheKey, articles) {
   } catch {}
 }
 
-async function searchProductDocs(apiBase, sid, queries, casePt, caseContext) {
+async function searchProductDocs(apiBase, sid, queries, casePt, caseContext, signal) {
   const { urlPatterns } = getProductDocsConfig(casePt);
 
   const [soslDocs, patternDocs] = await Promise.all([
-    searchProductDocsSosl(apiBase, sid, queries),
-    urlPatterns.length ? searchProductDocsByPattern(apiBase, sid, urlPatterns) : Promise.resolve([])
+    searchProductDocsSosl(apiBase, sid, queries, signal),
+    urlPatterns.length ? searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) : Promise.resolve([])
   ]);
 
   const seen = new Set();
@@ -577,7 +578,7 @@ async function searchProductDocs(apiBase, sid, queries, casePt, caseContext) {
   return scored;
 }
 
-async function searchProductDocsSosl(apiBase, sid, queries) {
+async function searchProductDocsSosl(apiBase, sid, queries, signal) {
   const uniqueQueries = [...new Set(
     queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2)
   )].slice(0, 3);
@@ -587,7 +588,8 @@ async function searchProductDocsSosl(apiBase, sid, queries) {
   await mapWithConcurrency(uniqueQueries, 3, async (q) => {
     try {
       const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,Help_Portal_URL__c,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 5`
+        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,Title,Summary,Help_Portal_URL__c,ArticleNumber WHERE RecordType.DeveloperName = 'Product_Documentation' AND PublishStatus = 'Online' AND Language = 'en_US') LIMIT 5`,
+        signal
       );
       for (const r of records) {
         if (!seen.has(r.Id)) {
@@ -604,7 +606,7 @@ async function searchProductDocsSosl(apiBase, sid, queries) {
   return results;
 }
 
-async function searchProductDocsByPattern(apiBase, sid, urlPatterns) {
+async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
   const patternKey = urlPatterns.sort().join('|');
   const cacheKey = PROD_DOCS_CACHE_PREFIX + patternKey.slice(0, 80);
   const cached = await getCachedProductDocs(cacheKey);
@@ -619,7 +621,7 @@ async function searchProductDocsByPattern(apiBase, sid, urlPatterns) {
         + `AND Help_Portal_URL__c LIKE '%id=${pattern}%' `
         + `LIMIT 2000`;
       const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, sid);
+      const result = await sfGet(url, sid, signal);
       return result.records || [];
     });
 

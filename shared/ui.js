@@ -81,7 +81,11 @@ export function toast(message, type = 'info', duration = 3000) {
   }, duration);
 }
 
+let _activeModal = null;
+
 export function modal(title, contentEl, opts = {}) {
+  if (_activeModal) _activeModal.close();
+
   const backdrop = h('div', { class: 'modal-backdrop' });
   const box = h('div', { class: `modal ${opts.wide ? 'modal--wide' : ''}` },
     h('div', { class: 'modal__header' },
@@ -100,11 +104,15 @@ export function modal(title, contentEl, opts = {}) {
   backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
   document.body.appendChild(backdrop);
 
+  const instance = { close, backdrop, box };
+  _activeModal = instance;
+
   function close() {
     backdrop.remove();
+    if (_activeModal === instance) _activeModal = null;
     if (opts.onClose) opts.onClose();
   }
-  return { close, backdrop, box };
+  return instance;
 }
 
 export function progressBar(pct, variant = 'default', animated = false) {

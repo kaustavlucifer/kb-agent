@@ -15,9 +15,10 @@ export function escapeSosl(str) {
   return String(str || '').replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, '\\$&');
 }
 
-export async function sfGet(url, sid) {
+export async function sfGet(url, sid, signal) {
   const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${sid}`, Accept: 'application/json' }
+    headers: { Authorization: `Bearer ${sid}`, Accept: 'application/json' },
+    signal
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
@@ -26,11 +27,12 @@ export async function sfGet(url, sid) {
   return resp.json();
 }
 
-export async function sfPost(url, sid, body) {
+export async function sfPost(url, sid, body, signal) {
   const resp = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${sid}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
@@ -39,11 +41,12 @@ export async function sfPost(url, sid, body) {
   return resp.json();
 }
 
-export async function sfPatch(url, sid, body) {
+export async function sfPatch(url, sid, body, signal) {
   const resp = await fetch(url, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${sid}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
@@ -53,33 +56,33 @@ export async function sfPatch(url, sid, body) {
   return resp.json();
 }
 
-export async function sfQuery(apiBase, sid, soql) {
+export async function sfQuery(apiBase, sid, soql, signal) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-  const result = await sfGet(url, sid);
+  const result = await sfGet(url, sid, signal);
   const records = [...(result.records || [])];
   let next = result.nextRecordsUrl;
   while (next) {
-    const page = await sfGet(`${apiBase}${next}`, sid);
+    const page = await sfGet(`${apiBase}${next}`, sid, signal);
     records.push(...(page.records || []));
     next = page.nextRecordsUrl;
   }
   return records;
 }
 
-export async function sfSearch(apiBase, sid, sosl) {
+export async function sfSearch(apiBase, sid, sosl, signal) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/search?q=${encodeURIComponent(sosl)}`;
-  const result = await sfGet(url, sid);
+  const result = await sfGet(url, sid, signal);
   return result.searchRecords || [];
 }
 
-export async function sfQueryAll(apiBase, sid, soql, onProgress) {
+export async function sfQueryAll(apiBase, sid, soql, onProgress, signal) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-  const result = await sfGet(url, sid);
+  const result = await sfGet(url, sid, signal);
   const records = [...(result.records || [])];
   if (onProgress) onProgress(records.length, result.totalSize || records.length);
   let next = result.nextRecordsUrl;
   while (next) {
-    const page = await sfGet(`${apiBase}${next}`, sid);
+    const page = await sfGet(`${apiBase}${next}`, sid, signal);
     records.push(...(page.records || []));
     if (onProgress) onProgress(records.length, result.totalSize || records.length);
     next = page.nextRecordsUrl;

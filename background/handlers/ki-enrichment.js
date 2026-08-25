@@ -1,12 +1,12 @@
 import { detectKiSession } from '../../shared/auth.js';
-import { sfSearch, sfQuery, escapeSoql, escapeSosl, mapWithConcurrency } from '../../shared/api.js';
+import { sfSearch, escapeSoql, escapeSosl, mapWithConcurrency } from '../../shared/api.js';
 import { callClaudeFast, extractText, extractJson } from '../../shared/gateway.js';
 import { KI_CLOUD_MAPPING } from '../../data/ki_mapping.js';
 
 const KI_FIELDS = 'Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Category__r.Name, Workaround__c, Work_ID__c, Reporting_User_Count__c';
 const KI_ACTIVE_STATUSES = ['In Review', 'Solution in Progress', 'Solution Scheduled', 'Solution Deploying'];
 
-export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubject) {
+export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubject, signal) {
   const kiSession = await detectKiSession();
   if (!kiSession.sid) return { items: [], error: 'No KI session. Log into the Known Issues org.' };
 
@@ -27,7 +27,8 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
       if (candidates.length >= 10) return;
       try {
         const records = await sfSearch(apiBase, sid,
-          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter}) AND (${cloudFilter})) LIMIT 5`
+          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter}) AND (${cloudFilter})) LIMIT 5`,
+          signal
         );
         for (const r of records) {
           if (!candidates.some(c => c.Id === r.Id)) {
@@ -44,7 +45,8 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
       try {
         const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
         const records = await sfSearch(apiBase, sid,
-          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter})) LIMIT 5`
+          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter})) LIMIT 5`,
+          signal
         );
         for (const r of records) {
           if (!candidates.some(c => c.Id === r.Id)) {
@@ -57,7 +59,7 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
 
   if (!candidates.length) return { items: [], error: null };
 
-  const ranked = await rankKiRelevance(candidates, caseAbstract, caseSubject);
+  const ranked = await rankKiRelevance(candidates, caseAbstract, caseSubject, signal);
   return { items: ranked, error: null };
 }
 
@@ -85,7 +87,7 @@ function buildSearchTerms(caseAbstract, caseSubject) {
   return terms.filter(t => t && t.length > 3);
 }
 
-async function rankKiRelevance(candidates, caseAbstract, caseSubject) {
+async function rankKiRelevance(candidates, caseAbstract, caseSubject, signal) {
   const kiList = candidates.slice(0, 10).map((r, i) => {
     return `[${i}] ${r.Name}: "${r.Subject__c || ''}"\nSummary: ${(r.Summary__c || '').slice(0, 200)}\nCloud: ${r.Cloud__c || ''}\nStatus: ${r.Status__c || ''}`;
   }).join('\n\n');
@@ -95,7 +97,8 @@ async function rankKiRelevance(candidates, caseAbstract, caseSubject) {
       system: `You rank Known Issues by relevance to a support case. Score each 0-100. Return JSON: {"ranked": [{"index": 0, "score": 85, "reason": "short reason"}, ...]}. Include only items scoring above 30. Be strict.`,
       messages: [{ role: 'user', content: `CASE:\nSubject: ${caseSubject || ''}\nProduct: ${caseAbstract?.product || ''}\nSymptom: ${caseAbstract?.symptomClass || ''}\nError: ${caseAbstract?.errorSignature || ''}\n\nKNOWN ISSUES:\n${kiList}` }],
       maxTokens: 600,
-      temperature: 0
+      temperature: 0,
+      signal
     });
     const parsed = extractJson(extractText(resp));
     if (parsed?.ranked?.length) {

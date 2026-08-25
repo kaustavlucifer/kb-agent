@@ -1,5 +1,8 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+ul, ol { padding-left: 20px; }
+li { margin-bottom: 2px; }
+
 body {
   font-family: var(--font-sans);
   font-size: var(--text-base);

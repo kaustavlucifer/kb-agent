@@ -1,10 +1,10 @@
 import { h, modal, spinner, statusPill, sanitizeHtml } from './ui.js';
 import { escapeHtml } from './markdown.js';
 
-function htmlField(label, html) {
+function htmlField(label, html, opts = {}) {
   const box = h('div', { style: { fontSize: '12px', lineHeight: '1.6', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px 10px' } });
   box.innerHTML = html ? sanitizeHtml(html) : '<span style="color:var(--text-muted)">(empty)</span>';
-  return h('div', { style: { marginBottom: '12px' } },
+  return h('div', { style: { marginBottom: opts.compact ? '8px' : '12px' } },
     h('div', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
     box
   );
@@ -12,15 +12,15 @@ function htmlField(label, html) {
 
 function renderArticleColumn(a, opts = {}) {
   const col = h('div', null);
-  col.appendChild(h('div', { style: { fontSize: opts.compact ? '13px' : '15px', fontWeight: '600', marginBottom: '6px' } }, a.title || ''));
-  col.appendChild(h('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center' } },
+  col.appendChild(h('div', { style: { fontSize: opts.compact ? '13px' : '15px', fontWeight: '600', marginBottom: opts.compact ? '4px' : '6px' } }, a.title || ''));
+  col.appendChild(h('div', { style: { display: 'flex', gap: '6px', marginBottom: opts.compact ? '8px' : '12px', flexWrap: 'wrap', alignItems: 'center' } },
     statusPill(a.publishStatus),
     a.validationStatus ? h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, a.validationStatus) : null
   ));
-  if (a.summary) col.appendChild(htmlField('Summary', `<p>${escapeHtml(a.summary)}</p>`));
-  col.appendChild(htmlField('Description', a.descriptionHtml));
-  col.appendChild(htmlField('Resolution', a.resolutionHtml));
-  if (a.stepsHtml) col.appendChild(htmlField('Steps', a.stepsHtml));
+  if (a.summary) col.appendChild(htmlField('Summary', `<p>${escapeHtml(a.summary)}</p>`, opts));
+  col.appendChild(htmlField('Description', a.descriptionHtml, opts));
+  col.appendChild(htmlField('Resolution', a.resolutionHtml, opts));
+  if (a.stepsHtml) col.appendChild(htmlField('Steps', a.stepsHtml, opts));
   const authorLine = [
     a.createdByName ? `Created by ${a.createdByName}` : null,
     a.lastModifiedByName ? `Last modified by ${a.lastModifiedByName}` : null

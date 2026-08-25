@@ -87,6 +87,7 @@ export const STORAGE_KEYS = {
   ARTICLE_SCORES: 'kba_article_scores',
   DEDUP_RESULTS: 'kba_dedup_results',
   DEDUP_AT: 'kba_dedup_at',
+  MERGE_CACHE: 'kba_merge_cache',
   RECENT_CASES: 'recentCases',
   BYPASS_GUARD_RAILS: 'bypassGuardRails',
   AUTH_CACHE: 'authCache',

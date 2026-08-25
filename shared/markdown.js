@@ -209,6 +209,32 @@ export function htmlToMarkdown(root) {
   return blocks.join('\n\n');
 }
 
+const REWRITE_SECTION_MARKER = /^##\s+(TITLE|SUMMARY|DESCRIPTION|RESOLUTION)\s*$/i;
+
+export function parseRewriteSections(text) {
+  const out = { title: '', summary: '', description: '', resolution: '' };
+  const lines = String(text || '').split('\n');
+  let current = null;
+  const buffers = { title: [], summary: [], description: [], resolution: [] };
+  for (const line of lines) {
+    const marker = line.match(REWRITE_SECTION_MARKER);
+    if (marker) {
+      current = marker[1].toLowerCase();
+      continue;
+    }
+    if (current) buffers[current].push(line);
+  }
+  out.title = buffers.title.join('\n').trim();
+  out.summary = buffers.summary.join('\n').trim();
+  out.description = buffers.description.join('\n').trim();
+  out.resolution = buffers.resolution.join('\n').trim();
+  return out;
+}
+
+export function serializeRewriteSections({ title, summary, description, resolution }) {
+  return `## TITLE\n${title || ''}\n\n## SUMMARY\n${summary || ''}\n\n## DESCRIPTION\n${description || ''}\n\n## RESOLUTION\n${resolution || ''}`;
+}
+
 export function markdownToHtml(md, { headingBase = 2 } = {}) {
   const blocks = parseBlocks(md);
   const out = [];

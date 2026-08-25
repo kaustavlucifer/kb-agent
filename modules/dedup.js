@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, editableRichField, renderMarkdown } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
@@ -9,6 +9,7 @@ import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
 import { showArticlePreview, showArticleCompare } from '../shared/article-preview.js';
+import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
 
 let _container = null;
 let _unsubs = [];
@@ -17,6 +18,8 @@ let _filterPt = [];
 let _filterValidation = ['Validated External', 'Validated Internal'];
 let _filterPublish = ['Online'];
 let _articlesLoading = false;
+let _mergeTextCache = {};
+let _mergeAbort = null;
 
 export function mount(container) {
   _container = container;
@@ -327,47 +330,101 @@ async function detectDuplicates() {
 }
 
 
-async function showMerge(pair) {
+function mergeKeyFor(pair) {
+  return [String(pair.articleA), String(pair.articleB)].sort().join('_');
+}
+
+async function loadMergeCache() {
+  const data = await localGet([STORAGE_KEYS.MERGE_CACHE]);
+  return data[STORAGE_KEYS.MERGE_CACHE] || {};
+}
+
+async function saveMergeText(mergeKey, text) {
+  const cache = await loadMergeCache();
+  cache[mergeKey] = text;
+  await localSet({ [STORAGE_KEYS.MERGE_CACHE]: cache });
+}
+
+function setMergeStatus(el, message) {
+  if (!el) return;
+  el.textContent = '';
+  el.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } },
+    spinner('sm'),
+    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, message)
+  ));
+}
+
+function currentMergeSections(mergeKey) {
+  return parseRewriteSections(_mergeTextCache[mergeKey] || '');
+}
+
+function commitMergeSection(mergeKey, key, value) {
+  const sections = currentMergeSections(mergeKey);
+  sections[key] = value.trim();
+  const text = serializeRewriteSections(sections);
+  _mergeTextCache[mergeKey] = text;
+  saveMergeText(mergeKey, text);
+}
+
+function renderMergeSection(mergeKey, key, label, opts = {}) {
+  return editableRichField({
+    label,
+    getValue: () => currentMergeSections(mergeKey)[key] || '',
+    setValue: (v) => commitMergeSection(mergeKey, key, v),
+    plain: !!opts.plain,
+    singleLine: key === 'title',
+    rows: opts.rows || 2
+  });
+}
+
+function renderEditableMerge(mergeKey) {
+  const el = document.getElementById('merge-stream');
+  if (!el) return;
+  el.textContent = '';
+  el.appendChild(renderMergeSection(mergeKey, 'title', 'Title', { plain: true }));
+  el.appendChild(renderMergeSection(mergeKey, 'summary', 'Summary', { plain: true, rows: 3 }));
+  el.appendChild(renderMergeSection(mergeKey, 'description', 'Description', { rows: 10 }));
+  el.appendChild(renderMergeSection(mergeKey, 'resolution', 'Resolution', { rows: 14 }));
+}
+
+async function generateMerge(pair, mergeKey) {
+  if (_mergeAbort) _mergeAbort.abort();
+  const abort = new AbortController();
+  _mergeAbort = abort;
+
+  const regenBtn = document.getElementById('merge-regenerate');
+  if (regenBtn) { regenBtn.disabled = true; regenBtn.textContent = 'Generating…'; }
+  const streamEl = document.getElementById('merge-stream');
+  setMergeStatus(streamEl, 'Generating merge…');
+
   const articles = getState('kb.articles') || [];
   const artA = articles.find(a => String(a.articleNumber) === String(pair.articleA));
   const artB = articles.find(a => String(a.articleNumber) === String(pair.articleB));
 
-  const streamEl = h('div', { id: 'merge-stream', style: { whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } }, spinner('md'));
-  const content = h('div', null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } },
-      h('div', null, h('strong', null, 'A: '), `#${pair.articleA} — ${pair.titleA}`),
-      h('div', null, h('strong', null, 'B: '), `#${pair.articleB} — ${pair.titleB}`),
-      h('div', { style: { marginTop: '4px', fontStyle: 'italic' } }, `Keep: #${pair.keepArticle} | ${pair.reason}`)
-    ),
-    streamEl
-  );
-
-  modal('Merge Suggestion', content, {
-    wide: true,
-    primaryAction: { label: 'Copy', handler: () => {
-      navigator.clipboard.writeText(document.getElementById('merge-stream')?.textContent || '').then(() => toast('Copied.', 'success'));
-    }}
-  });
-
   const session = await detectSession();
+  if (abort.signal.aborted) return;
+  if (!session.sid) {
+    const el = document.getElementById('merge-stream');
+    if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'No Salesforce session.')); }
+    if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+    return;
+  }
+
   let descA = '', resA = '', descB = '', resB = '';
-  if (session.sid && artA && artB) {
+  if (artA && artB) {
     const bodyMap = await fetchArticleBodies([artA.id, artB.id], session);
+    if (abort.signal.aborted) return;
     descA = stripHtml(bodyMap.get(artA.id)?.description || '').slice(0, MAX_BODY_CHARS);
     resA = stripHtml(bodyMap.get(artA.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
     descB = stripHtml(bodyMap.get(artB.id)?.description || '').slice(0, MAX_BODY_CHARS);
     resB = stripHtml(bodyMap.get(artB.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
   }
 
-  const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide. Output:
+  const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide. Output EXACTLY these four sections and nothing else:
 ## TITLE
-[merged title]
 ## SUMMARY
-[2-4 sentences]
 ## DESCRIPTION
-[merged description]
-## RESOLUTION
-[merged resolution with numbered steps]`;
+## RESOLUTION`;
 
   const user = `Merge these duplicates into one article.
 
@@ -385,20 +442,150 @@ Resolution: ${resB}
 
 Keep best content from both. Prefer most complete and recent steps.`;
 
+  let fullText = '';
+  const isStale = () => _mergeAbort !== abort || abort.signal.aborted;
   try {
     await streamClaude({
       system,
       messages: [{ role: 'user', content: user }],
       maxTokens: 4000,
       temperature: 0.2,
+      signal: abort.signal,
       onDelta: (chunk, full) => {
+        fullText = full;
+        if (isStale()) return;
         const el = document.getElementById('merge-stream');
-        if (el) el.textContent = full;
+        if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
     });
+    if (isStale()) return;
+    _mergeTextCache[mergeKey] = fullText;
+    await saveMergeText(mergeKey, fullText);
+    renderEditableMerge(mergeKey);
   } catch (e) {
+    if (isStale() || e.name === 'AbortError') return;
     const el = document.getElementById('merge-stream');
-    if (el) el.textContent = 'Error: ' + e.message;
+    if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
+  } finally {
+    if (_mergeAbort === abort) _mergeAbort = null;
+  }
+  const regenBtn2 = document.getElementById('merge-regenerate');
+  if (regenBtn2) { regenBtn2.disabled = false; regenBtn2.textContent = 'Regenerate'; }
+}
+
+function replaceMergePublishButtons(url) {
+  const btn = document.getElementById('merge-publish');
+  if (btn) {
+    const openBtn = h('button', { class: 'btn btn--primary btn--sm', onClick: () => chrome.tabs.create({ url }) }, 'Open in ORGCS ↗');
+    btn.replaceWith(openBtn);
+  }
+  document.getElementById('merge-create-new')?.remove();
+}
+
+async function publishMergedUpdate(pair, mergeKey, keepSelect) {
+  const text = _mergeTextCache[mergeKey];
+  if (!text) { toast('Generate the merge first.', 'error'); return; }
+  const parsed = parseRewriteSections(text);
+  const articles = getState('kb.articles') || [];
+  const target = articles.find(a => String(a.articleNumber) === String(keepSelect.value));
+  if (!target) { toast('Could not resolve the article to update.', 'error'); return; }
+
+  const sections = [];
+  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
+  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
+
+  toast('Creating new draft version in ORGCS…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      action: 'PUBLISH_UPDATE_DRAFT',
+      payload: {
+        existingArticleId: target.id,
+        title: parsed.title,
+        summary: parsed.summary,
+        sections,
+        taxonomyName: pair.ptName || target.topicName || null
+      }
+    });
+    if (resp?.success) {
+      const actionLabel = (resp.action === 'patched-draft' || resp.action === 'updated-existing-draft') ? 'Existing draft updated!' : 'New draft version created!';
+      toast(actionLabel, 'success');
+      if (resp.warning) toast(resp.warning, 'warning');
+      if (resp.url) replaceMergePublishButtons(resp.url);
+    } else {
+      toast(resp?.error || 'Failed to create draft version.', 'error');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function publishMergedNew(pair, mergeKey) {
+  const text = _mergeTextCache[mergeKey];
+  if (!text) { toast('Generate the merge first.', 'error'); return; }
+  const parsed = parseRewriteSections(text);
+  const sections = [];
+  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
+  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
+
+  toast('Creating article in ORGCS…', 'info');
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      action: 'PUBLISH_NEW_ARTICLE',
+      payload: { title: parsed.title, summary: parsed.summary, sections, taxonomyName: pair.ptName || null }
+    });
+    if (resp?.success) {
+      toast('Article created!', 'success');
+      if (resp.url) replaceMergePublishButtons(resp.url);
+    } else {
+      toast(resp?.error || 'Failed to create article.', 'error');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function showMerge(pair) {
+  const mergeKey = mergeKeyFor(pair);
+  if (_mergeTextCache[mergeKey] == null) {
+    const cache = await loadMergeCache();
+    _mergeTextCache[mergeKey] = cache[mergeKey] || '';
+  }
+
+  const streamEl = h('div', { id: 'merge-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '460px', overflowY: 'auto' } });
+
+  const keepSelect = h('select', { id: 'merge-keep-select', class: 'input', style: { fontSize: '11px', padding: '3px 6px', width: 'auto' } },
+    h('option', { value: String(pair.articleA) }, `Update #${pair.articleA}`),
+    h('option', { value: String(pair.articleB) }, `Update #${pair.articleB}`)
+  );
+  keepSelect.value = String(pair.keepArticle || pair.articleA);
+
+  const hasCached = !!_mergeTextCache[mergeKey];
+  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'merge-regenerate', disabled: !hasCached, onClick: () => generateMerge(pair, mergeKey) }, hasCached ? 'Regenerate' : 'Working…');
+  const updateBtn = h('button', { class: 'btn btn--primary btn--sm', id: 'merge-publish', onClick: () => publishMergedUpdate(pair, mergeKey, keepSelect) }, 'Create New Version in ORGCS');
+  const createNewBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'merge-create-new', onClick: () => publishMergedNew(pair, mergeKey) }, 'Create as New Instead');
+
+  const content = h('div', null,
+    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } },
+      h('div', null, h('strong', null, 'A: '), `#${pair.articleA} — ${pair.titleA}`),
+      h('div', null, h('strong', null, 'B: '), `#${pair.articleB} — ${pair.titleB}`),
+      h('div', { style: { marginTop: '4px', fontStyle: 'italic' } }, `AI suggests keeping: #${pair.keepArticle} | ${pair.reason}`)
+    ),
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' } },
+      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } }, keepSelect, updateBtn, createNewBtn),
+      regenBtn
+    ),
+    streamEl
+  );
+
+  modal('Merge Suggestion', content, {
+    wide: true,
+    onClose: () => { if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; } }
+  });
+
+  if (hasCached) {
+    renderEditableMerge(mergeKey);
+  } else {
+    generateMerge(pair, mergeKey);
   }
 }
 

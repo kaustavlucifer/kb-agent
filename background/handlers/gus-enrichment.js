@@ -19,7 +19,7 @@ export function extractWorkItemNames(comments) {
   return [...seen];
 }
 
-export async function fetchGusWorkItems(workNames) {
+export async function fetchGusWorkItems(workNames, signal) {
   if (!workNames.length) return { items: [], feed: [], error: null };
 
   const gusSession = await detectGusSession();
@@ -35,7 +35,7 @@ export async function fetchGusWorkItems(workNames) {
     const inList = batch.map(n => `'${escapeSoql(n)}'`).join(',');
     try {
       const soql = `SELECT ${GUS_FIELDS.join(', ')} FROM ${WORK_OBJECT} WHERE Name IN (${inList})`;
-      return await sfQuery(apiBase, sid, soql);
+      return await sfQuery(apiBase, sid, soql, signal);
     } catch { return []; }
   }));
   for (const records of batchResults) {
@@ -59,7 +59,7 @@ export async function fetchGusWorkItems(workNames) {
     const workIds = items.map(i => i.id);
     try {
       const feedSoql = `SELECT Id, ParentId, Type, Body, CreatedDate, CreatedBy.Name FROM ADM_Work__Feed WHERE ParentId IN (${soqlIdList(workIds)}) AND Type IN ('TextPost','ContentPost','LinkPost') ORDER BY CreatedDate ASC LIMIT 50`;
-      const feedRecords = await sfQuery(apiBase, sid, feedSoql);
+      const feedRecords = await sfQuery(apiBase, sid, feedSoql, signal);
       feed = feedRecords.map(r => ({
         workId: r.ParentId,
         body: r.Body || '',

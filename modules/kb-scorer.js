@@ -8,6 +8,7 @@ import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
 import { showArticlePreview } from '../shared/article-preview.js';
+import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
 
 let _container = null;
 let _unsubs = [];
@@ -346,7 +347,7 @@ function render() {
       h('th', { style: { width: '85px', cursor: 'pointer' }, onClick: () => { toggleKbSort('lastPublished'); } }, 'Published' + ind('lastPublished')),
       h('th', { style: { width: '80px', cursor: 'pointer' }, onClick: () => { toggleKbSort('agfHits'); } }, 'AGF' + ind('agfHits')),
       h('th', { style: { width: '60px', cursor: 'pointer' }, onClick: () => { toggleKbSort('score'); } }, 'Score' + ind('score')),
-      h('th', { style: { width: '150px' } }, 'Actions')
+      h('th', { style: { width: '170px' } }, 'Actions')
     )),
     h('tbody', null)
   );
@@ -970,32 +971,6 @@ async function rewriteArticle(article) {
 
   if (closed) return;
   generateRewrite(article, session);
-}
-
-const REWRITE_SECTION_MARKER = /^##\s+(TITLE|SUMMARY|DESCRIPTION|RESOLUTION)\s*$/i;
-
-function parseRewriteSections(text) {
-  const out = { title: '', summary: '', description: '', resolution: '' };
-  const lines = String(text || '').split('\n');
-  let current = null;
-  const buffers = { title: [], summary: [], description: [], resolution: [] };
-  for (const line of lines) {
-    const marker = line.match(REWRITE_SECTION_MARKER);
-    if (marker) {
-      current = marker[1].toLowerCase();
-      continue;
-    }
-    if (current) buffers[current].push(line);
-  }
-  out.title = buffers.title.join('\n').trim();
-  out.summary = buffers.summary.join('\n').trim();
-  out.description = buffers.description.join('\n').trim();
-  out.resolution = buffers.resolution.join('\n').trim();
-  return out;
-}
-
-function serializeRewriteSections({ title, summary, description, resolution }) {
-  return `## TITLE\n${title || ''}\n\n## SUMMARY\n${summary || ''}\n\n## DESCRIPTION\n${description || ''}\n\n## RESOLUTION\n${resolution || ''}`;
 }
 
 function currentRewriteSections(article) {
