@@ -8,7 +8,7 @@ function htmlField(label, html, opts = {}) {
   );
 }
 
-function renderArticleColumn(a, opts = {}) {
+export function renderArticleColumn(a, opts = {}) {
   const col = h('div', null);
   col.appendChild(h('div', { style: { fontSize: opts.compact ? '13px' : '15px', fontWeight: '600', marginBottom: opts.compact ? '4px' : '6px' } }, a.title || ''));
   col.appendChild(h('div', { style: { display: 'flex', gap: '6px', marginBottom: opts.compact ? '8px' : '12px', flexWrap: 'wrap', alignItems: 'center' } },

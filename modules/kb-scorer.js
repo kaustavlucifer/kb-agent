@@ -1,14 +1,15 @@
-import { h, spinner, emptyState, toast, modal, confirmModal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, editableRichField, statusPill, richHtmlBox, uniqueSortedValues } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
+import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
 import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
-import { previewButton } from '../shared/article-preview.js';
-import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
+import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
+import { parseRewriteSections, markdownToHtml } from '../shared/markdown.js';
+import { confirmDraftOverwriteIfExists, publishDraftUpdate, sectionsToPublishArray } from '../shared/draft-publish.js';
 
 let _container = null;
 let _unsubs = [];
@@ -22,6 +23,19 @@ const _sorter = createSorter('articleNumber', 'asc');
 let _page = 0;
 const _pageSize = 50;
 let _agfHits = null;
+let _searchDebounce = null;
+
+const rewriteSectionsEditor = sectionsEditor({
+  getCachedText: (article) => _rewriteCache[article.id] || '',
+  setCachedText: (article, text) => { _rewriteCache[article.id] = text; },
+  fields: [
+    { field: 'title', label: 'Title', plain: true },
+    { field: 'summary', label: 'Summary', plain: true },
+    { field: 'description', label: 'Description', rows: 12 },
+    { field: 'resolution', label: 'Resolution', rows: 16 }
+  ],
+  deriveDefaults: (article, parsed) => ({ ...parsed, title: parsed.title || article.title })
+});
 
 
 
@@ -75,6 +89,7 @@ export function unmount() {
   _unsubs = [];
   _container = null;
   if (_renderTimer) { clearTimeout(_renderTimer); _renderTimer = null; }
+  if (_searchDebounce) { clearTimeout(_searchDebounce); _searchDebounce = null; }
   if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; }
 }
 
@@ -137,6 +152,7 @@ function updateScoreCellsInPlace() {
   const scores = getState('kb.scores') || {};
   const scoringIds = getState('kb.scoringIds') || [];
   const scoring = getState('kb.scoring');
+  const articleById = new Map((getState('kb.articles') || []).map(a => [a.id, a]));
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
@@ -150,9 +166,8 @@ function updateScoreCellsInPlace() {
     if (barLabel) barLabel.textContent = `${pct}%`;
     const activeEl = document.getElementById('kb-scoring-active');
     if (activeEl) {
-      const articles = getState('kb.articles') || [];
       const activeNumbers = scoringIds
-        .map(id => articles.find(a => a.id === id)?.articleNumber)
+        .map(id => articleById.get(id)?.articleNumber)
         .filter(Boolean);
       activeEl.textContent = '';
       if (activeNumbers.length) {
@@ -178,7 +193,7 @@ function updateScoreCellsInPlace() {
     if (isBeingScored) {
       scoreTd.appendChild(spinner('sm'));
     } else if (overall != null) {
-      const article = (getState('kb.articles') || []).find(a => a.id === articleId);
+      const article = articleById.get(articleId);
       const pill = h('span', {
         class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`,
         style: { cursor: 'pointer' },
@@ -217,7 +232,12 @@ function render() {
   const validationOptions = uniqueSortedValues(articles, 'validationStatus');
 
   const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
-  searchInput.addEventListener('input', e => { _filterText = e.target.value; _page = 0; render(); });
+  searchInput.addEventListener('input', e => {
+    _filterText = e.target.value;
+    _page = 0;
+    clearTimeout(_searchDebounce);
+    _searchDebounce = setTimeout(render, 200);
+  });
   if (_searchFocused) {
     setTimeout(() => { const el = document.getElementById('kb-filter'); if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; } }, 0);
   }
@@ -865,21 +885,12 @@ function renderAppliedRefine(article) {
   ));
 }
 
-function setRewriteStatus(streamEl, message) {
-  if (!streamEl) return;
-  streamEl.textContent = '';
-  streamEl.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } },
-    spinner('sm'),
-    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, message)
-  ));
-}
-
 async function rewriteArticle(article) {
   const cached = _rewriteCache[article.id];
 
   const streamEl = h('div', { id: 'rewrite-stream', style: { fontSize: '13px', lineHeight: '1.6', maxHeight: '500px', overflowY: 'auto' } });
   if (cached) streamEl.appendChild(renderMarkdown(cached));
-  else setRewriteStatus(streamEl, 'Preparing rewrite…');
+  else streamingStatus(streamEl, 'Preparing rewrite…');
 
   const regenBtn = h('button', { class: 'btn btn--ghost btn--sm', id: 'rewrite-regenerate', disabled: !cached, onClick: () => generateRewrite(article, _rwSession) }, cached ? 'Regenerate' : 'Generating…');
 
@@ -927,7 +938,6 @@ async function rewriteArticle(article) {
   const session = await detectSession();
   if (closed) return;
   if (!session.sid) {
-    setRewriteStatus(streamEl, '');
     streamEl.textContent = '';
     streamEl.appendChild(h('span', { style: { color: 'var(--error)', fontSize: '12px' } }, 'No Salesforce session.'));
     return;
@@ -937,7 +947,7 @@ async function rewriteArticle(article) {
   const existing = getState('kb.scores')?.[article.id];
   let score = existing?.overall;
   if (score == null) {
-    setRewriteStatus(streamEl, 'Scoring this article before rewrite…');
+    streamingStatus(streamEl, 'Scoring this article before rewrite…');
     try {
       const result = await scoreArticle(await enrichForScore(article, session));
       if (closed) return;
@@ -973,11 +983,6 @@ async function rewriteArticle(article) {
   generateRewrite(article, session);
 }
 
-function currentRewriteSections(article) {
-  const parsed = parseRewriteSections(_rewriteCache[article.id] || '');
-  return { ...parsed, title: parsed.title || article.title };
-}
-
 function renderEditableRewrite(article) {
   const el = document.getElementById('rewrite-stream');
   if (!el) return;
@@ -986,27 +991,7 @@ function renderEditableRewrite(article) {
   el.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '10px' } },
     'Each section renders with full formatting. Click Edit to change a section inline — changes are used when you publish to ORGCS, and are sent as the current article state if you regenerate.'));
 
-  el.appendChild(renderRewriteSection(article, 'title', 'Title', { plain: true }));
-  el.appendChild(renderRewriteSection(article, 'summary', 'Summary', { plain: true }));
-  el.appendChild(renderRewriteSection(article, 'description', 'Description', { rows: 12 }));
-  el.appendChild(renderRewriteSection(article, 'resolution', 'Resolution', { rows: 16 }));
-}
-
-function commitRewriteSection(article, key, value) {
-  const sections = currentRewriteSections(article);
-  sections[key] = value.trim();
-  _rewriteCache[article.id] = serializeRewriteSections(sections);
-}
-
-function renderRewriteSection(article, key, label, opts = {}) {
-  return editableRichField({
-    label,
-    getValue: () => currentRewriteSections(article)[key] || '',
-    setValue: (v) => commitRewriteSection(article, key, v),
-    plain: !!opts.plain,
-    singleLine: key === 'title',
-    rows: opts.rows || 2
-  });
+  rewriteSectionsEditor.renderInto(el, article);
 }
 
 let _rewriteScoreCache = {};
@@ -1125,15 +1110,17 @@ HOW AGENTFORCE RETRIEVES CONTENT (optimize for this):
 - Code blocks consume poorly — always explain them in plain text.
 
 REWRITE RULES (each maps to a scored criterion — satisfy ALL):
-1. TITLE: ≤60 chars, front-load keywords, include the specific product name, no question format, symptom-based for troubleshooting.
+1. TITLE: ≤60 chars, front-load keywords, no question format, symptom-based for troubleshooting. Must include at least one of: product name, cloud, audience, or mode — prefer including the specific product name.
 2. SUMMARY: ≤170 chars, use DIFFERENT words/synonyms than the title. This is where the intent statement belongs — state WHAT question or problem the article resolves and WHY it matters, and include exact error text for error articles. Do NOT name a target audience or role (never "for developers", "for admins", "scoped for architects", etc.).
 3. HEADERS: Use ## for each section (renders as <h2>) — NEVER bold text as a header. Make headers descriptive with intent keywords. Keep each section ≤~2000 chars; split with ### if longer.
-4. DESCRIPTION: Open directly with the problem, symptom, or observed behavior — do NOT open with a meta sentence such as "This article addresses…", "This article explains…", or "This article is scoped for…". Explain WHY it happens (root-cause context: when, where, and how it occurs). Explain uncommon acronyms. Present tense. State the product name explicitly. Do NOT describe the intended audience, reader role, or who the article is "for".
-5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does.
+4. DESCRIPTION: Open directly with the problem, symptom, or observed behavior — do NOT open with a meta sentence such as "This article addresses…", "This article explains…", or "This article is scoped for…". Explain WHY it happens (root-cause context: when, where, and how it occurs). Present tense. State the product name explicitly. Do NOT describe the intended audience, reader role, or who the article is "for".
+5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does. A concrete reproduction/error-message walkthrough already counts as real-life context — do not pad it with extra "scenario" framing.
 6. SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists, no wall-of-text. Each section must read as a self-contained chunk.
 7. VOICE: Write in impersonal, product-facing documentation language. Avoid pronouns wherever possible — no first-person ("I", "we", "our") and no second-person ("you", "your"). Prefer imperative mood for steps ("Open Setup", not "You open Setup") and noun/passive phrasing for descriptions ("The report displays no results", not "You will see no results"). Do NOT address the reader directly or reference "the customer".
-8. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
-9. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
+8. GRAMMAR: Every sentence must be grammatically complete (subject + main verb) or a valid imperative/procedural/list construction — no fragments or thoughts truncated mid-sentence. Imperative commands, numbered procedural steps, and noun-phrase bullet labels are already complete; do not force them into full-sentence prose.
+9. DEFINITIONS: Explain every acronym, synonym, and abbreviation on first use, EXCEPT standard Salesforce platform terminology (API, CRM, URL, Lightning Experience, Classic, org, SQL, HTML, SELECT, HTML tags like BR/P/DIV/SPAN/IMG/TABLE, and capitalized emphasis words like NOTE/TIP/WARNING/CAUTION/NEW). Domain-specific acronyms and currency/unit codes (e.g. "PHP", "USD") DO need a first-use definition.
+10. LINK HYGIENE: Keep the article to 4 or fewer hyperlinks total — 5 or more makes it link-heavy and non-compliant. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim, and even then stay within the 4-link budget. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
+11. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
 
 Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
 ## TITLE
@@ -1175,7 +1162,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
       onDelta: (chunk, full) => {
         fullText = full;
         if (throttle || isStale()) return;
-        throttle = setTimeout(() => { throttle = null; }, 150);
+        throttle = setTimeout(() => { throttle = null; }, STREAM_RENDER_THROTTLE_MS);
         const el = document.getElementById('rewrite-stream');
         if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
@@ -1210,42 +1197,21 @@ async function showRewriteComparison(article) {
     const resp = await chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId: article.id });
     if (!resp?.success) { toast(resp?.error || 'Failed to load original.', 'error'); return; }
     const original = resp.article;
-
-    const field = (label, value, opts = {}) => {
-      let contentEl;
-      if (opts.html != null) {
-        contentEl = richHtmlBox(opts.html, { tall: opts.tall });
-      } else if (opts.markdown) {
-        const inner = (value || '').trim()
-          ? renderMarkdown(value)
-          : h('span', { style: { color: 'var(--text-muted)' } }, '(empty)');
-        contentEl = opts.tall
-          ? h('div', { style: { maxHeight: '260px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '8px' } }, inner)
-          : inner;
-      } else {
-        contentEl = h('div', { style: { fontSize: opts.bold ? '13px' : '12px', fontWeight: opts.bold ? '600' : '400', lineHeight: '1.5', color: opts.color || 'var(--text-primary)', whiteSpace: 'pre-wrap' } }, value || '(empty)');
-      }
-      return h('div', { style: { marginBottom: '12px' } },
-        h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' } }, label),
-        contentEl
-      );
+    const rewritten = {
+      title: parsed.title || article.title,
+      summary: parsed.summary || '',
+      descriptionHtml: parsed.description ? markdownToHtml(parsed.description) : '',
+      resolutionHtml: parsed.resolution ? markdownToHtml(parsed.resolution) : ''
     };
 
     const body = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '70vh', overflow: 'auto' } },
       h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, 'Original'),
-        field('Title', original.title, { bold: true }),
-        field('Summary', original.summary, { bold: false }),
-        field('Description', null, { html: original.descriptionHtml, tall: true }),
-        field('Resolution', null, { html: original.resolutionHtml, tall: true }),
-        original.stepsHtml ? field('Steps', null, { html: original.stepsHtml, tall: true }) : null
+        renderArticleColumn(original, { compact: true })
       ),
       h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
         h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, 'Rewritten'),
-        field('Title', parsed.title || article.title, { bold: true, color: 'var(--primary)' }),
-        field('Summary', parsed.summary, { bold: false }),
-        field('Description', parsed.description, { markdown: true, tall: true }),
-        field('Resolution', parsed.resolution, { markdown: true, tall: true })
+        renderArticleColumn(rewritten, { compact: true })
       )
     );
 
@@ -1259,53 +1225,19 @@ async function publishRewriteToOrgcs(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
 
-  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: article.id } });
-  if (draftCheck?.hasDraft) {
-    const proceed = await confirmModal(
-      'Existing Draft Found',
-      'A draft version of this article already exists. Replace its content with this rewrite, or leave the existing draft as is?',
-      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
-    );
-    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
-  }
+  const proceed = await confirmDraftOverwriteIfExists(article.id, 'this rewrite');
+  if (!proceed) return;
 
   const parsed = parseRewriteSections(cached);
-  const title = parsed.title || article.title;
-  const summary = parsed.summary;
-  const sections = [];
-  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
-  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
-
-  toast('Creating new draft version in ORGCS…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PUBLISH_UPDATE_DRAFT',
-      payload: {
-        existingArticleId: article.id,
-        title,
-        summary,
-        sections,
-        taxonomyName: article.topicName || null
-      }
-    });
-    if (resp?.success) {
-      const actionLabel = (resp.action === 'patched-draft' || resp.action === 'updated-existing-draft')
-        ? 'Existing draft updated!'
-        : 'New draft version created!';
-      toast(actionLabel, 'success');
-      if (resp.warning) toast(resp.warning, 'warning');
-      const publishBtn = document.getElementById('rewrite-publish');
-      if (publishBtn) {
-        const openBtn = resp.url
-          ? h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-open', onClick: () => chrome.tabs.create({ url: resp.url }) }, 'Open Draft Version ↗')
-          : h('button', { class: 'btn btn--primary btn--sm', id: 'rewrite-open', disabled: true }, 'Draft Created ✓');
-        publishBtn.replaceWith(openBtn);
-      }
-    } else {
-      toast(resp?.error || 'Failed to create draft version.', 'error');
-    }
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
+  const resp = await publishDraftUpdate({
+    existingArticleId: article.id,
+    title: parsed.title || article.title,
+    summary: parsed.summary,
+    sections: sectionsToPublishArray(parsed),
+    taxonomyName: article.topicName || null
+  });
+  if (resp?.success) {
+    swapButtonWithLink('rewrite-publish', { url: resp.url, label: 'Open Draft Version ↗' });
   }
 }
 

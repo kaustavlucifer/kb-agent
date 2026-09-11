@@ -1,6 +1,6 @@
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
 import { stripHtml } from './api.js';
-import { SCORING_MODEL, DEDUP_MAX_TOKENS, DEDUP_BODY_CHARS, DEDUP_BATCH_SIZE } from './config.js';
+import { SCORING_MODEL, DEDUP_MAX_TOKENS, DEDUP_BODY_CHARS, DEDUP_BATCH_SIZE, DEDUP_MAX_SLICES_PER_PT } from './config.js';
 
 export function buildDedupWorkQueue(articles) {
   const ptGroups = new Map();
@@ -11,6 +11,7 @@ export function buildDedupWorkQueue(articles) {
   }
 
   const workQueue = [];
+  const truncatedPts = [];
   for (const [ptName, ptArticles] of ptGroups) {
     if (ptArticles.length < 2) continue;
     const slices = [];
@@ -18,14 +19,16 @@ export function buildDedupWorkQueue(articles) {
     if (slices.length === 1) {
       workQueue.push({ ptName, batch: slices[0] });
     } else {
-      for (let i = 0; i < slices.length; i++) {
-        for (let j = i + 1; j < slices.length; j++) {
-          workQueue.push({ ptName, batch: [...slices[i], ...slices[j]] });
+      const cappedSlices = slices.length > DEDUP_MAX_SLICES_PER_PT ? slices.slice(0, DEDUP_MAX_SLICES_PER_PT) : slices;
+      if (cappedSlices.length < slices.length) truncatedPts.push(ptName);
+      for (let i = 0; i < cappedSlices.length; i++) {
+        for (let j = i + 1; j < cappedSlices.length; j++) {
+          workQueue.push({ ptName, batch: [...cappedSlices[i], ...cappedSlices[j]] });
         }
       }
     }
   }
-  return workQueue;
+  return { workQueue, truncatedPts };
 }
 
 export function dedupePairs(pairs) {

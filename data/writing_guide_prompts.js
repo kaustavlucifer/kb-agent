@@ -1,6 +1,6 @@
 export const GUIDE_GENERATION = `AGENTFORCE KB WRITING RULES — follow strictly when creating or rewriting articles:
 
-TITLE: Must be specific to the product AND the exact issue. Include product name, error text, or scenario. Example: "Troubleshooting Tableau Prep Flows" not "Troubleshooting Flows". If the article is specific to a customer segment, include that (e.g. "Salesforce.org Trial Extensions for Nonprofits").
+TITLE: Must include at least one of: product name, cloud, audience, or mode — a title with none of these contextual identifiers (e.g. "How to fix the error", "Troubleshooting login issues") is non-compliant. Prefer being specific to the product AND the exact issue: include product name, error text, or scenario. Example: "Troubleshooting Tableau Prep Flows" not "Troubleshooting Flows". If the article is specific to a customer segment, include that (e.g. "Salesforce.org Trial Extensions for Nonprofits").
 
 SUMMARY: 2-4 sentences carrying the intent — WHAT problem/question the article resolves and WHY — plus the resolution approach. This is where the "this article addresses…" intent statement belongs, NOT the Description. Do NOT name a target audience or role ("for developers", "scoped for admins/architects" is jargon — omit it). Used by Agentforce for retrieval but not directly shown to customers on the help portal.
 
@@ -11,16 +11,17 @@ DESCRIPTION SECTION: Open directly with the problem, symptoms, and context — d
 RESOLUTION SECTION: Begin with a brief statement of what the steps accomplish. Then provide numbered steps. After code blocks, always add a plain-text explanation of what the code does — Agentforce does not consume code blocks well in isolation.
 
 GENERAL RULES:
-- Explain acronyms and abbreviations (BDR = Business Development Representative). API does not need explanation.
+- Write in complete sentences or grammatically valid constructions — no sentence fragments (missing subject+main verb, or truncated mid-thought). Imperative sentences/commands, numbered procedural steps in imperative form, and bulleted noun-phrase labels/menu options/feature names are all considered complete — do not force them into full-sentence prose.
+- Explain every acronym, synonym, and abbreviation on first use (BDR = Business Development Representative), EXCEPT standard Salesforce platform terminology: universally known abbreviations (API, CRM, URL, etc.), Salesforce-standard terms (Lightning Experience, Classic, org, etc.), programming-language keywords/syntax tokens (SQL, HTML, SELECT, etc.), HTML tags in body text (BR, P, DIV, SPAN, IMG, TABLE, etc.), and capitalized emphasis words (NOTE, TIP, WARNING, CAUTION, NEW). Domain-specific acronyms and currency/unit codes (e.g. "PHP", "USD") DO need first-use definition.
 - Write in impersonal, product-facing voice. Avoid pronouns where possible — no first-person ("I", "we", "our") and no second-person ("you", "your"). Use imperative mood for steps ("Open Setup") and noun/passive phrasing for descriptions ("The report displays no results").
 - Use simple present tense.
-- Give real-life Salesforce examples when information is complex.
+- Give real-life Salesforce examples when information is complex; step-by-step procedural walkthroughs, concrete error messages, and reproduction steps already satisfy this — no extra "scenario" framing is needed on top of them.
 - Tables must use text, NOT visual indicators (checkmarks, circles). Tables with text work for both full-table and single-row responses.
 - Do NOT copy/paste tables from external sources — use built-in table features.
 - Each FAQ item must be very specific in intent and solution. Large FAQs are not consumed well.
 - Long articles should spread content across Description and Resolution with distinct headers, not put everything in one section.
 - Videos and images are NOT served to customers via Agentforce, but alt-text descriptions ARE chunked and vectorized. Always annotate media with descriptive alt text.
-- The Additional Resources section IS used by Agentforce for citations.`;
+- Minimize references and links — keep the article to 4 or fewer hyperlinks total; 5 or more makes it "link-heavy" and non-compliant. The Additional Resources section IS used by Agentforce for citations, but stay within that 4-link budget rather than padding it out.`;
 
 export const GUIDE_STYLE = `CRITICAL KB STYLE RULES — apply to ALL generated and rewritten articles:
 

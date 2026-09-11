@@ -13,6 +13,7 @@ const TABS = [
 let _activeModule = null;
 let _tabContent = null;
 let _tabGen = 0;
+let _subscribed = false;
 
 async function init() {
   try {
@@ -60,9 +61,12 @@ function render() {
   app.appendChild(_tabContent);
   activateTab(getState('app.activeTab'));
 
-  subscribe('app.activeTab', (tabId) => activateTab(tabId));
-  subscribe('app.connections', () => updateConnectionChips());
-  subscribe('app.cost', () => updateCostChip());
+  if (!_subscribed) {
+    _subscribed = true;
+    subscribe('app.activeTab', (tabId) => activateTab(tabId));
+    subscribe('app.connections', () => updateConnectionChips());
+    subscribe('app.cost', () => updateCostChip());
+  }
   updateCostChip();
 }
 

@@ -40,10 +40,10 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
   }
 
   if (candidates.length < 3) {
+    const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
     await mapWithConcurrency(searchTerms.slice(0, 2), 2, async (term) => {
       if (candidates.length >= 10) return;
       try {
-        const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
         const records = await sfSearch(apiBase, sid,
           `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter})) LIMIT 5`,
           signal

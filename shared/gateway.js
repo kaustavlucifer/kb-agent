@@ -84,7 +84,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
       throw Object.assign(new Error(`Gateway ${resp.status}: ${text.slice(0, 200)}`), { status: resp.status, retryAfter });
     }
     const data = await resp.json();
-    recordUsage(data.model || m, usageFromResponse(data));
+    await recordUsage(data.model || m, usageFromResponse(data));
     return data;
   } finally {
     clearTimeout(timeout);
@@ -190,6 +190,10 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
       if (onError) onError(stallErr);
       throw stallErr;
     }
+    if (err.name === 'AbortError') {
+      await recordUsage(streamModel, streamUsage);
+      throw err;
+    }
     if (onError) onError(err);
     throw err;
   } finally {
@@ -197,7 +201,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
     if (signal) signal.removeEventListener('abort', onAbort);
   }
 
-  recordUsage(streamModel, streamUsage);
+  await recordUsage(streamModel, streamUsage);
   if (onDone) onDone(fullText);
   return fullText;
 }

@@ -79,14 +79,14 @@ export async function detectSession() {
   return orgs.length ? { ...orgs[0], orgs } : { sid: null, apiBase: null, lightningHost: null, orgs: [] };
 }
 
-export async function detectGusSession() {
+async function detectOrgSession(matchKey) {
   const sfCookies = await loadFreshSfCookies();
   if (!sfCookies.length) return { sid: null, apiBase: null, lightningHost: null };
 
   const groups = groupCookiesByOrg(sfCookies);
   for (const [key, group] of groups.entries()) {
     if (!group.bestCookie?.value) continue;
-    if (key.toLowerCase() !== 'gus') continue;
+    if (!matchKey(key)) continue;
     const hosts = Array.from(group.hosts);
     const apiHost = hosts.find(h => h.endsWith('.my.salesforce.com')) || hosts[0];
     const lightHost = hosts.find(h => h.endsWith('.lightning.force.com')) || `${key}.lightning.force.com`;
@@ -100,72 +100,49 @@ export async function detectGusSession() {
   return { sid: null, apiBase: null, lightningHost: null };
 }
 
-export async function detectKiSession() {
-  const sfCookies = await loadFreshSfCookies();
-  if (!sfCookies.length) return { sid: null, apiBase: null, lightningHost: null };
-
-  const groups = groupCookiesByOrg(sfCookies);
-  for (const [key, group] of groups.entries()) {
-    if (!group.bestCookie?.value) continue;
-    if (!/^known-issues/i.test(key)) continue;
-    const hosts = Array.from(group.hosts);
-    const apiHost = hosts.find(h => h.endsWith('.my.salesforce.com')) || hosts[0];
-    const lightHost = hosts.find(h => h.endsWith('.lightning.force.com')) || `${key}.lightning.force.com`;
-    return {
-      sid: group.bestCookie.value,
-      apiBase: `https://${apiHost}`,
-      lightningHost: lightHost,
-      key
-    };
-  }
-  return { sid: null, apiBase: null, lightningHost: null };
+export function detectGusSession() {
+  return detectOrgSession(key => key.toLowerCase() === 'gus');
 }
 
-let _gusPingCache = null;
+export function detectKiSession() {
+  return detectOrgSession(key => /^known-issues/i.test(key));
+}
 
-export async function pingGusSession() {
-  const session = await detectGusSession();
+const PING_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function pingSession(detectFn, cacheRef) {
+  const session = await detectFn();
   if (!session.sid) return { status: 'none', apiBase: null };
-  if (_gusPingCache && _gusPingCache.sid === session.sid && Date.now() - _gusPingCache.ts < 5 * 60 * 1000) {
-    return { status: _gusPingCache.status, apiBase: session.apiBase };
+  if (cacheRef.value && cacheRef.value.sid === session.sid && Date.now() - cacheRef.value.ts < PING_CACHE_TTL_MS) {
+    return { status: cacheRef.value.status, apiBase: session.apiBase };
   }
   try {
     const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
       headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
     });
     const status = r.ok ? 'active' : 'expired';
-    _gusPingCache = { sid: session.sid, status, ts: Date.now() };
+    cacheRef.value = { sid: session.sid, status, ts: Date.now() };
     return { status, apiBase: session.apiBase };
   } catch {
-    _gusPingCache = { sid: session.sid, status: 'error', ts: Date.now() };
+    cacheRef.value = { sid: session.sid, status: 'error', ts: Date.now() };
     return { status: 'error', apiBase: session.apiBase };
   }
 }
 
-let _kiPingCache = null;
+const _gusPingCache = { value: null };
+const _kiPingCache = { value: null };
 
-export async function pingKiSession() {
-  const session = await detectKiSession();
-  if (!session.sid) return { status: 'none', apiBase: null };
-  if (_kiPingCache && _kiPingCache.sid === session.sid && Date.now() - _kiPingCache.ts < 5 * 60 * 1000) {
-    return { status: _kiPingCache.status, apiBase: session.apiBase };
-  }
-  try {
-    const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
-      headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
-    });
-    const status = r.ok ? 'active' : 'expired';
-    _kiPingCache = { sid: session.sid, status, ts: Date.now() };
-    return { status, apiBase: session.apiBase };
-  } catch {
-    _kiPingCache = { sid: session.sid, status: 'error', ts: Date.now() };
-    return { status: 'error', apiBase: session.apiBase };
-  }
+export function pingGusSession() {
+  return pingSession(detectGusSession, _gusPingCache);
+}
+
+export function pingKiSession() {
+  return pingSession(detectKiSession, _kiPingCache);
 }
 
 export function clearAuthCache() {
-  _gusPingCache = null;
-  _kiPingCache = null;
+  _gusPingCache.value = null;
+  _kiPingCache.value = null;
 }
 
 export function isCaseAnalysisAllowed(caseRecord) {

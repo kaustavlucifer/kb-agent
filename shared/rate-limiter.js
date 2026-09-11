@@ -3,18 +3,21 @@ const WINDOW_MS = 60_000;
 const STORAGE_KEY = '_rateLimiterTs';
 
 let _callTimestamps = [];
-let _loaded = false;
+let _loadPromise = null;
 
 async function loadTimestamps() {
-  if (_loaded) return;
-  try {
-    const data = await chrome.storage.session.get(STORAGE_KEY);
-    if (Array.isArray(data[STORAGE_KEY])) {
-      const now = Date.now();
-      _callTimestamps = data[STORAGE_KEY].filter(ts => now - ts < WINDOW_MS);
-    }
-  } catch {}
-  _loaded = true;
+  if (!_loadPromise) {
+    _loadPromise = (async () => {
+      try {
+        const data = await chrome.storage.session.get(STORAGE_KEY);
+        if (Array.isArray(data[STORAGE_KEY])) {
+          const now = Date.now();
+          _callTimestamps = data[STORAGE_KEY].filter(ts => now - ts < WINDOW_MS);
+        }
+      } catch {}
+    })();
+  }
+  await _loadPromise;
 }
 
 function persistTimestamps() {

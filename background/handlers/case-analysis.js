@@ -1,5 +1,6 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
+import { redactPii, redactCaseRecord, redactComments } from '../../shared/pii.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
 import { scoreArticle as sharedScoreArticle, draftToScorable } from '../../shared/scoring.js';
@@ -16,6 +17,26 @@ function getGuardRailExtraFields(guardRailFields) {
   return extra.length ? ',' + extra.join(',') : '';
 }
 
+const _portStopHandlers = new WeakMap();
+
+function bindStopHandler(port, onStop) {
+  let handlers = _portStopHandlers.get(port);
+  if (!handlers) {
+    handlers = { current: null };
+    _portStopHandlers.set(port, handlers);
+    port.onMessage.addListener((m) => { if (m.action === 'STOP') handlers.current?.(); });
+    port.onDisconnect.addListener(() => handlers.current?.());
+  }
+  handlers.current = onStop;
+}
+
+async function fetchCaseComments(apiBase, sid, caseId, signal) {
+  return sfQuery(apiBase, sid,
+    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
+    signal
+  );
+}
+
 export async function handleAnalyze(port, msg) {
   const abortController = new AbortController();
   const signal = abortController.signal;
@@ -25,14 +46,7 @@ export async function handleAnalyze(port, msg) {
     try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
   }, 25_000);
 
-  port.onMessage.addListener((m) => {
-    if (m.action === 'STOP') {
-      stopped = true;
-      abortController.abort();
-    }
-  });
-
-  port.onDisconnect.addListener(() => {
+  bindStopHandler(port, () => {
     stopped = true;
     abortController.abort();
     clearInterval(keepalive);
@@ -40,10 +54,10 @@ export async function handleAnalyze(port, msg) {
 
   const send = (data) => { try { port.postMessage(data); } catch {} };
 
-  const session = await detectSession();
-  if (!session.sid) { clearInterval(keepalive); send({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
-
   try {
+  const session = await detectSession();
+  if (!session.sid) { send({ type: 'error', error: 'No Salesforce session. Log into OrgCS.' }); return; }
+
   const caseId = sanitizeId(msg.caseId);
 
   send({ type: 'progress', step: 0, label: 'Connecting to Salesforce' });
@@ -79,10 +93,9 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'meta', caseRecord: { id: caseRecord.Id, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, status: caseRecord.Status, severity: caseRecord.Severity_Level__c, supportLevel: caseRecord.SupportLevel__c, createdDate: caseRecord.CreatedDate, description: (caseRecord.Description || '').slice(0, 500) } });
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
-  const comments = await sfQuery(session.apiBase, session.sid,
-    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
-    signal
-  );
+  const comments = await fetchCaseComments(session.apiBase, session.sid, caseId, signal);
+  const aiCaseRecord = redactCaseRecord(caseRecord);
+  const aiComments = redactComments(comments);
 
   const completeness = computeCompleteness(caseRecord, comments);
   send({ type: 'meta', caseCompleteness: completeness });
@@ -92,13 +105,13 @@ export async function handleAnalyze(port, msg) {
 
   send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
   const [intentsResult, caseAbstract, gusData, structuredResolution] = await Promise.all([
-    extractIntents(caseRecord, comments, signal),
-    extractAbstract(caseRecord, comments, signal),
+    extractIntents(aiCaseRecord, aiComments, signal),
+    extractAbstract(aiCaseRecord, aiComments, signal),
     gusPromise,
-    extractStructuredResolution(caseRecord, comments, signal)
+    extractStructuredResolution(aiCaseRecord, aiComments, signal)
   ]);
 
-  const caseSummaryPromise = streamCaseSummary(caseRecord, comments, gusData, send, signal);
+  const caseSummaryPromise = streamCaseSummary(aiCaseRecord, aiComments, gusData, send, signal);
   send({ type: 'meta', gusItems: gusData.items });
 
   send({ type: 'progress', step: 3, label: 'Searching KB articles (SOSL)' });
@@ -117,9 +130,9 @@ export async function handleAnalyze(port, msg) {
     send({ type: 'meta', customizationWarning: { isCustomerSpecific: true, indicators: caseAbstract.customizationIndicators || [] } });
   }
 
-  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseRecord.Subject, signal).catch(() => ({ items: [], error: null }));
+  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, aiCaseRecord.Subject, signal).catch(() => ({ items: [], error: null }));
 
-  const caseContextForDocs = `Subject: ${caseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}`;
+  const caseContextForDocs = `Subject: ${aiCaseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 800)}`;
   const [soslResults, productDocs, kiData] = await Promise.all([
     soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns, signal),
     searchProductDocs(session.apiBase, session.sid, allQueries, casePt, caseContextForDocs, signal),
@@ -133,7 +146,7 @@ export async function handleAnalyze(port, msg) {
   }
 
   const prodDocGapPromise = (productDocs.length && !stopped)
-    ? assessProductDocGap(caseRecord, caseAbstract, productDocs, signal).then(gap => { if (gap) send({ type: 'meta', prodDocGap: gap }); return gap; }).catch(() => null)
+    ? assessProductDocGap(aiCaseRecord, caseAbstract, productDocs, signal).then(gap => { if (gap) send({ type: 'meta', prodDocGap: gap }); return gap; }).catch(() => null)
     : Promise.resolve(null);
 
   send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
@@ -172,7 +185,7 @@ Be STRICT. Do not inflate scores. An article about the same PRODUCT but a DIFFER
 
 Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason", "notRelevant": false}, ...]}
 Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
-    messages: [{ role: 'user', content: `CASE:\nSubject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1200)}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nComments: ${comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
+    messages: [{ role: 'user', content: `CASE:\nSubject: ${aiCaseRecord.Subject}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 1200)}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nComments: ${aiComments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
     maxTokens: 1200,
     temperature: 0
   };
@@ -253,7 +266,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       coveringArticles: coveringIdx >= 0 ? [coveringIdx] : []
     };
   } else {
-    decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, caseAbstract, signal);
+    decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, aiCaseRecord, caseAbstract, signal);
   }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
@@ -273,7 +286,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       coveringArticles: coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    const suggestions = await generateFullRewrites(topArticles, candidateBodies, caseRecord, comments, caseAbstract, send, signal);
+    const suggestions = await generateFullRewrites(topArticles, candidateBodies, aiCaseRecord, aiComments, caseAbstract, send, signal);
     structured = {
       action,
       confidence: decision.confidence,
@@ -284,7 +297,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   }
 
   if (action === 'CREATE_NEW' || action === 'BOTH') {
-    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, candidateBodies, send, signal);
+    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, candidateBodies, send, signal);
     if (structured && action === 'BOTH') {
       structured.newArticleDraft = draft;
     } else {
@@ -320,8 +333,7 @@ export async function handleGenerateNew(port, msg) {
   const abortController = new AbortController();
   const signal = abortController.signal;
 
-  port.onMessage.addListener((m) => { if (m.action === 'STOP') abortController.abort(); });
-  port.onDisconnect.addListener(() => abortController.abort());
+  bindStopHandler(port, () => abortController.abort());
 
   const session = await detectSession();
   if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session.' }); return; }
@@ -334,18 +346,17 @@ export async function handleGenerateNew(port, msg) {
   try {
     const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid, signal);
     if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
-    const comments = await sfQuery(session.apiBase, session.sid,
-      `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
-      signal
-    );
+    const comments = await fetchCaseComments(session.apiBase, session.sid, caseId, signal);
+    const aiCaseRecord = redactCaseRecord(caseRecord);
+    const aiComments = redactComments(comments);
 
     const [intentsResult, caseAbstract] = await Promise.all([
-      extractIntents(caseRecord, comments, signal),
-      extractAbstract(caseRecord, comments, signal)
+      extractIntents(aiCaseRecord, aiComments, signal),
+      extractAbstract(aiCaseRecord, aiComments, signal)
     ]);
 
     send({ type: 'streaming-start' });
-    const draft = await generateNewArticleStreaming(caseRecord, comments, caseAbstract, intentsResult, new Map(), send, signal);
+    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, new Map(), send, signal);
 
     const structured = {
       action: 'CREATE_NEW',
@@ -402,13 +413,16 @@ Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null"
       signal
     });
     return extractJson(extractText(resp)) || null;
-  } catch { return null; }
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return null;
+  }
 }
 
 async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
   const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
-  const gusContext = (gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n');
-  const gusFeedText = (gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n');
+  const gusContext = redactPii((gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n'));
+  const gusFeedText = redactPii((gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n'));
 
   try {
     const fullText = await streamClaude({
@@ -628,19 +642,25 @@ async function searchProductDocsSosl(apiBase, sid, queries, signal) {
   return results;
 }
 
+const URL_PATTERN_BATCH_SIZE = 10;
+
 async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
   const patternKey = urlPatterns.sort().join('|');
   const cacheKey = PROD_DOCS_CACHE_PREFIX + patternKey.slice(0, 80);
   const cached = await getCachedProductDocs(cacheKey);
   if (cached) return cached;
 
+  const patternBatches = [];
+  for (let i = 0; i < urlPatterns.length; i += URL_PATTERN_BATCH_SIZE) patternBatches.push(urlPatterns.slice(i, i + URL_PATTERN_BATCH_SIZE));
+
   try {
-    const results = await mapWithConcurrency(urlPatterns, 3, async (pattern) => {
+    const results = await mapWithConcurrency(patternBatches, 3, async (patternBatch) => {
+      const clauses = patternBatch.map(p => `Help_Portal_URL__c LIKE '%id=${p}%'`).join(' OR ');
       const soql = `SELECT Id, Title, Help_Portal_URL__c, ArticleNumber, Summary `
         + `FROM Knowledge__kav `
         + `WHERE RecordType.DeveloperName = 'Product_Documentation' `
         + `AND PublishStatus = 'Online' AND IsLatestVersion = true AND Language = 'en_US' `
-        + `AND Help_Portal_URL__c LIKE '%id=${pattern}%' `
+        + `AND (${clauses}) `
         + `LIMIT 2000`;
       const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
       const result = await sfGet(url, sid, signal);
@@ -787,7 +807,10 @@ Return JSON: {"problem_statement":"...","root_cause":"...or null","resolution_st
       signal
     });
     return extractJson(extractText(resp)) || null;
-  } catch { return null; }
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return null;
+  }
 }
 
 async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, abstract, signal) {

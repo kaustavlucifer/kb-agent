@@ -16,6 +16,7 @@ export const CLAUDE_TIMEOUT_MS = 90_000;
 
 export let SCORE_CONCURRENCY = 8;
 export const BODY_FETCH_BATCH_SIZE = 50;
+export const BODY_FETCH_CONCURRENCY = 4;
 export const MAX_BODY_CHARS = 4000;
 export const SCORING_MAX_TOKENS = 4000;
 export const SCORING_RETRY_MAX_TOKENS = 6000;
@@ -24,12 +25,12 @@ export const DEDUP_BATCH_SIZE = 20;
 export const DEDUP_CONCURRENCY = 5;
 export const DEDUP_MAX_TOKENS = 4000;
 export const DEDUP_BODY_CHARS = 2000;
+export const DEDUP_MAX_SLICES_PER_PT = 10;
 
 export const MODEL_PRICING = {
   'claude-haiku-4-5-20251001': { in: 1.0, out: 5.0 },
   'claude-sonnet-4-6': { in: 3.0, out: 15.0 },
-  'claude-opus-4-7': { in: 15.0, out: 75.0 },
-  'claude-opus-4-8': { in: 15.0, out: 75.0 }
+  'claude-opus-4-7': { in: 15.0, out: 75.0 }
 };
 export const CACHE_READ_MULTIPLIER = 0.1;
 export const CACHE_WRITE_MULTIPLIER = 1.25;

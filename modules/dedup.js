@@ -1,15 +1,16 @@
-import { h, spinner, emptyState, toast, modal, confirmModal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, editableRichField, renderMarkdown } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, renderMarkdown, sectionsEditor, streamingStatus, swapButtonWithLink } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtml } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl } from '../shared/config.js';
+import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl } from '../shared/config.js';
 import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup.js';
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
 import { previewButton, showArticleCompare } from '../shared/article-preview.js';
-import { parseRewriteSections, serializeRewriteSections } from '../shared/markdown.js';
+import { parseRewriteSections } from '../shared/markdown.js';
+import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft, sectionsToPublishArray } from '../shared/draft-publish.js';
 
 let _container = null;
 let _unsubs = [];
@@ -20,6 +21,23 @@ let _filterPublish = ['Online'];
 let _articlesLoading = false;
 let _mergeTextCache = {};
 let _mergeAbort = null;
+let _lastBodyMap = null;
+let _workQueueMemo = null;
+
+const mergeSectionsEditor = sectionsEditor({
+  getCachedText: (mergeKey) => _mergeTextCache[mergeKey] || '',
+  setCachedText: (mergeKey, text) => { _mergeTextCache[mergeKey] = text; saveMergeText(mergeKey, text); },
+  fields: [
+    { field: 'title', label: 'Title', plain: true },
+    { field: 'summary', label: 'Summary', plain: true, rows: 3 },
+    { field: 'description', label: 'Description', rows: 10 },
+    { field: 'resolution', label: 'Resolution', rows: 14 }
+  ]
+});
+
+function normalizeArticleNumber(n) {
+  return String(n ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+}
 
 export function mount(container) {
   _container = container;
@@ -96,6 +114,22 @@ function scopeArticles(articles) {
   return scoped;
 }
 
+function memoizedWorkQueue(scopedArticles) {
+  const signature = `${scopedArticles.length}:${_filterCloud.join('|')}:${_filterPt.join('|')}:${_filterValidation.join('|')}:${_filterPublish.join('|')}`;
+  if (_workQueueMemo && _workQueueMemo.signature === signature) return _workQueueMemo.workQueue;
+  const { workQueue } = buildDedupWorkQueue(scopedArticles);
+  _workQueueMemo = { signature, workQueue };
+  return workQueue;
+}
+
+function pairMatchesFilters(pair) {
+  if (_filterCloud.length && !_filterCloud.includes(getCloudFromPt(pair.ptName))) return false;
+  if (_filterPt.length && !_filterPt.includes(pair.ptName)) return false;
+  if (_filterValidation.length && !(_filterValidation.includes(pair.validationA) && _filterValidation.includes(pair.validationB))) return false;
+  if (_filterPublish.length && !(_filterPublish.includes(pair.statusA) && _filterPublish.includes(pair.statusB))) return false;
+  return true;
+}
+
 function render() {
   if (!_container) return;
   _container.textContent = '';
@@ -145,7 +179,7 @@ function render() {
   detectBtn.addEventListener('click', detectDuplicates);
 
   const scopedArticles = scopeArticles(articles);
-  const workQueue = buildDedupWorkQueue(scopedArticles);
+  const workQueue = memoizedWorkQueue(scopedArticles);
   const batchCount = workQueue.length;
   const est = batchCount && !running ? estimateDedup(workQueue.map(w => w.batch)) : null;
   const scopeInfo = (_filterPt.length || _filterValidation.length || _filterPublish.length)
@@ -172,9 +206,10 @@ function render() {
 
   if (running) {
     const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
+    const activeLabel = running.activePts?.length ? `P&T: ${running.activePts.join(', ')}` : 'Preparing…';
     stickySection.appendChild(h('div', { class: 'card', style: { padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-        h('span', null, running.ptName ? `P&T: ${running.ptName}` : 'Preparing…'),
+        h('span', null, activeLabel),
         h('span', null, `${pct}%`)
       ),
       progressBar(pct, 'default', true)
@@ -200,7 +235,7 @@ function render() {
     return;
   }
 
-  const displayPairs = _filterPt.length ? pairs.filter(p => _filterPt.includes(p.ptName)) : pairs;
+  const displayPairs = pairs.filter(pairMatchesFilters);
   if (displayPairs.length) {
     const table = h('table', { class: 'data-table data-table--animated' },
       h('thead', null, h('tr', null,
@@ -252,21 +287,24 @@ async function detectDuplicates() {
     const session = await detectSession();
     if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-    const workQueue = buildDedupWorkQueue(articles);
+    const { workQueue, truncatedPts } = buildDedupWorkQueue(articles);
     if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
 
-    setState('dedup.running', { done: 0, total: workQueue.length, ptName: '' });
+    setState('dedup.running', { done: 0, total: workQueue.length, activePts: [] });
 
     const bodyIds = articles.map(a => a.id);
     const bodyMap = await fetchArticleBodies(bodyIds, session);
     const bodyFetchFailures = bodyMap.failedIds?.size || 0;
+    _lastBodyMap = bodyMap;
 
     const allPairs = [];
     let done = 0;
     let incompleteBatches = 0;
+    const activePts = new Set();
 
     await mapWithConcurrency(workQueue, DEDUP_CONCURRENCY, async (item) => {
-      setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+      activePts.add(item.ptName);
+      setState('dedup.running', { done, total: workQueue.length, activePts: [...activePts] });
       const enriched = item.batch.map(a => ({
         ...a,
         description: bodyMap.get(a.id)?.description || '',
@@ -277,19 +315,22 @@ async function detectDuplicates() {
       allPairs.push(...pairs);
       if (incomplete) incompleteBatches++;
       done++;
-      setState('dedup.running', { done, total: workQueue.length, ptName: item.ptName });
+      activePts.delete(item.ptName);
+      setState('dedup.running', { done, total: workQueue.length, activePts: [...activePts] });
     });
 
     const articleMap = new Map();
     articles.forEach(a => {
       articleMap.set(a.articleNumber, a);
       articleMap.set(String(a.articleNumber), a);
+      articleMap.set(normalizeArticleNumber(a.articleNumber), a);
     });
+    const resolveArticle = (num) => articleMap.get(String(num)) || articleMap.get(normalizeArticleNumber(num));
 
     const enrichedPairs = dedupePairs(allPairs.filter(p => p.confidence >= 0.85))
       .map(p => {
-        const artA = articleMap.get(String(p.articleA));
-        const artB = articleMap.get(String(p.articleB));
+        const artA = resolveArticle(p.articleA);
+        const artB = resolveArticle(p.articleB);
         return {
           ...p,
           ptName: artA?.topicName || '',
@@ -307,16 +348,18 @@ async function detectDuplicates() {
           modifiedByB: artB?.lastModifiedByName || ''
         };
       })
+      .filter(p => p.idA && p.idB)
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .slice(0, 30);
 
     setState('dedup.pairs', enrichedPairs);
     setState('dedup.running', null);
     await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
-    if (incompleteBatches || bodyFetchFailures) {
+    if (incompleteBatches || bodyFetchFailures || truncatedPts.length) {
       const reasons = [];
       if (incompleteBatches) reasons.push(`${incompleteBatches} batch(es) truncated`);
       if (bodyFetchFailures) reasons.push(`${bodyFetchFailures} article bodies failed to load`);
+      if (truncatedPts.length) reasons.push(`${truncatedPts.length} Product/Topic(s) too large to fully cross-compare`);
       toast(`Found ${enrichedPairs.length} duplicate pairs. ${reasons.join(', ')} — some duplicates may be missing. Re-run to retry.`, 'warning');
     } else {
       toast(`Found ${enrichedPairs.length} duplicate pairs.`, enrichedPairs.length ? 'warning' : 'success');
@@ -343,46 +386,11 @@ async function saveMergeText(mergeKey, text) {
   await localSet({ [STORAGE_KEYS.MERGE_CACHE]: cache });
 }
 
-function setMergeStatus(el, message) {
-  if (!el) return;
-  el.textContent = '';
-  el.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } },
-    spinner('sm'),
-    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, message)
-  ));
-}
-
-function currentMergeSections(mergeKey) {
-  return parseRewriteSections(_mergeTextCache[mergeKey] || '');
-}
-
-function commitMergeSection(mergeKey, key, value) {
-  const sections = currentMergeSections(mergeKey);
-  sections[key] = value.trim();
-  const text = serializeRewriteSections(sections);
-  _mergeTextCache[mergeKey] = text;
-  saveMergeText(mergeKey, text);
-}
-
-function renderMergeSection(mergeKey, key, label, opts = {}) {
-  return editableRichField({
-    label,
-    getValue: () => currentMergeSections(mergeKey)[key] || '',
-    setValue: (v) => commitMergeSection(mergeKey, key, v),
-    plain: !!opts.plain,
-    singleLine: key === 'title',
-    rows: opts.rows || 2
-  });
-}
-
 function renderEditableMerge(mergeKey) {
   const el = document.getElementById('merge-stream');
   if (!el) return;
   el.textContent = '';
-  el.appendChild(renderMergeSection(mergeKey, 'title', 'Title', { plain: true }));
-  el.appendChild(renderMergeSection(mergeKey, 'summary', 'Summary', { plain: true, rows: 3 }));
-  el.appendChild(renderMergeSection(mergeKey, 'description', 'Description', { rows: 10 }));
-  el.appendChild(renderMergeSection(mergeKey, 'resolution', 'Resolution', { rows: 14 }));
+  mergeSectionsEditor.renderInto(el, mergeKey);
 }
 
 async function generateMerge(pair, mergeKey) {
@@ -393,7 +401,7 @@ async function generateMerge(pair, mergeKey) {
   const regenBtn = document.getElementById('merge-regenerate');
   if (regenBtn) { regenBtn.disabled = true; regenBtn.textContent = 'Generating…'; }
   const streamEl = document.getElementById('merge-stream');
-  setMergeStatus(streamEl, 'Generating merge…');
+  streamingStatus(streamEl, 'Generating merge…');
 
   const articles = getState('kb.articles') || [];
   const artA = articles.find(a => String(a.articleNumber) === String(pair.articleA));
@@ -410,7 +418,8 @@ async function generateMerge(pair, mergeKey) {
 
   let descA = '', resA = '', descB = '', resB = '';
   if (artA && artB) {
-    const bodyMap = await fetchArticleBodies([artA.id, artB.id], session);
+    const cachedBoth = _lastBodyMap && _lastBodyMap.has(artA.id) && _lastBodyMap.has(artB.id);
+    const bodyMap = cachedBoth ? _lastBodyMap : await fetchArticleBodies([artA.id, artB.id], session);
     if (abort.signal.aborted) return;
     descA = stripHtml(bodyMap.get(artA.id)?.description || '').slice(0, MAX_BODY_CHARS);
     resA = stripHtml(bodyMap.get(artA.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
@@ -441,6 +450,7 @@ Resolution: ${resB}
 Keep best content from both. Prefer most complete and recent steps.`;
 
   let fullText = '';
+  let throttle = null;
   const isStale = () => _mergeAbort !== abort || abort.signal.aborted;
   try {
     await streamClaude({
@@ -451,7 +461,8 @@ Keep best content from both. Prefer most complete and recent steps.`;
       signal: abort.signal,
       onDelta: (chunk, full) => {
         fullText = full;
-        if (isStale()) return;
+        if (throttle || isStale()) return;
+        throttle = setTimeout(() => { throttle = null; }, STREAM_RENDER_THROTTLE_MS);
         const el = document.getElementById('merge-stream');
         if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
       }
@@ -471,15 +482,6 @@ Keep best content from both. Prefer most complete and recent steps.`;
   if (regenBtn2) { regenBtn2.disabled = false; regenBtn2.textContent = 'Regenerate'; }
 }
 
-function replaceMergePublishButtons(url) {
-  const btn = document.getElementById('merge-publish');
-  if (btn) {
-    const openBtn = h('button', { class: 'btn btn--primary btn--sm', onClick: () => chrome.tabs.create({ url }) }, 'Open in ORGCS ↗');
-    btn.replaceWith(openBtn);
-  }
-  document.getElementById('merge-create-new')?.remove();
-}
-
 async function publishMergedUpdate(pair, mergeKey, keepSelect) {
   const text = _mergeTextCache[mergeKey];
   if (!text) { toast('Generate the merge first.', 'error'); return; }
@@ -488,68 +490,31 @@ async function publishMergedUpdate(pair, mergeKey, keepSelect) {
   const target = articles.find(a => String(a.articleNumber) === String(keepSelect.value));
   if (!target) { toast('Could not resolve the article to update.', 'error'); return; }
 
-  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: target.id } });
-  if (draftCheck?.hasDraft) {
-    const proceed = await confirmModal(
-      'Existing Draft Found',
-      'A draft version of this article already exists. Replace its content with this merge, or leave the existing draft as is?',
-      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
-    );
-    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
-  }
+  const proceed = await confirmDraftOverwriteIfExists(target.id, 'this merge');
+  if (!proceed) return;
 
-  const sections = [];
-  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
-  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
-
-  toast('Creating new draft version in ORGCS…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PUBLISH_UPDATE_DRAFT',
-      payload: {
-        existingArticleId: target.id,
-        title: parsed.title,
-        summary: parsed.summary,
-        sections,
-        taxonomyName: pair.ptName || target.topicName || null
-      }
-    });
-    if (resp?.success) {
-      const actionLabel = (resp.action === 'patched-draft' || resp.action === 'updated-existing-draft') ? 'Existing draft updated!' : 'New draft version created!';
-      toast(actionLabel, 'success');
-      if (resp.warning) toast(resp.warning, 'warning');
-      if (resp.url) replaceMergePublishButtons(resp.url);
-    } else {
-      toast(resp?.error || 'Failed to create draft version.', 'error');
-    }
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
+  const resp = await publishDraftUpdate({
+    existingArticleId: target.id,
+    title: parsed.title,
+    summary: parsed.summary,
+    sections: sectionsToPublishArray(parsed),
+    taxonomyName: pair.ptName || target.topicName || null
+  });
+  if (resp?.success) swapButtonWithLink('merge-publish', { url: resp.url, removeIds: ['merge-create-new'] });
 }
 
 async function publishMergedNew(pair, mergeKey) {
   const text = _mergeTextCache[mergeKey];
   if (!text) { toast('Generate the merge first.', 'error'); return; }
   const parsed = parseRewriteSections(text);
-  const sections = [];
-  if (parsed.description) sections.push({ heading: 'Description', body: parsed.description });
-  if (parsed.resolution) sections.push({ heading: 'Resolution', body: parsed.resolution });
 
-  toast('Creating article in ORGCS…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PUBLISH_NEW_ARTICLE',
-      payload: { title: parsed.title, summary: parsed.summary, sections, taxonomyName: pair.ptName || null }
-    });
-    if (resp?.success) {
-      toast('Article created!', 'success');
-      if (resp.url) replaceMergePublishButtons(resp.url);
-    } else {
-      toast(resp?.error || 'Failed to create article.', 'error');
-    }
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
-  }
+  const resp = await publishNewArticleDraft({
+    title: parsed.title,
+    summary: parsed.summary,
+    sections: sectionsToPublishArray(parsed),
+    taxonomyName: pair.ptName || null
+  });
+  if (resp?.success) swapButtonWithLink('merge-publish', { url: resp.url, removeIds: ['merge-create-new'] });
 }
 
 async function showMerge(pair) {

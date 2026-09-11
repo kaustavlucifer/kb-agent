@@ -1,9 +1,10 @@
 export const SCORING_CRITERIA = [
   { id: 'title', label: 'Title Quality', baseMax: 12 },
   { id: 'summary', label: 'Summary Quality', baseMax: 10 },
-  { id: 'headers', label: 'Header Structure', baseMax: 10 },
-  { id: 'content', label: 'Content Completeness', baseMax: 18 },
-  { id: 'scannability', label: 'Scannability & Structure', baseMax: 10 },
+  { id: 'headers', label: 'Header Structure', baseMax: 8 },
+  { id: 'content', label: 'Content Completeness', baseMax: 12 },
+  { id: 'grammar', label: 'Grammar & Sentence Completeness', baseMax: 10 },
+  { id: 'scannability', label: 'Scannability & Structure', baseMax: 8 },
   { id: 'media', label: 'Alt Text / Media', baseMax: 8 },
   { id: 'code', label: 'Code Block Quality', baseMax: 8 },
   { id: 'tables', label: 'Table Quality', baseMax: 8 },

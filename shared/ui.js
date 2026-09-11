@@ -1,4 +1,4 @@
-import { parseInline, parseBlocks, markdownToHtml, htmlToMarkdown } from './markdown.js';
+import { parseInline, parseBlocks, markdownToHtml, htmlToMarkdown, parseRewriteSections, serializeRewriteSections } from './markdown.js';
 
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -155,6 +155,26 @@ export function spinner(size = 'md') {
   return h('div', { class: `spinner spinner--${size}` });
 }
 
+export function streamingStatus(el, message) {
+  if (!el) return;
+  el.textContent = '';
+  el.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } },
+    spinner('sm'),
+    h('span', { style: { fontSize: '12px', color: 'var(--primary)' } }, message)
+  ));
+}
+
+export function swapButtonWithLink(btnId, opts = {}) {
+  const btn = document.getElementById(btnId);
+  if (btn) {
+    const openBtn = opts.url
+      ? h('button', { class: 'btn btn--primary btn--sm', onClick: () => chrome.tabs.create({ url: opts.url }) }, opts.label || 'Open in ORGCS ↗')
+      : h('button', { class: 'btn btn--primary btn--sm', disabled: true }, opts.disabledLabel || 'Draft Created ✓');
+    btn.replaceWith(openBtn);
+  }
+  (opts.removeIds || []).forEach(id => document.getElementById(id)?.remove());
+}
+
 export function streamingDots() {
   return h('span', { class: 'streaming-dots' },
     h('span', { class: 'streaming-dots__dot' }),
@@ -231,6 +251,14 @@ function renderInlineFormatting(text) {
 
 const CODE_PRE_STYLE = { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' };
 
+function appendListItems(container, listBlock, depth) {
+  listBlock.items.forEach((it, idx) => {
+    const marker = listBlock.ordered ? `${idx + 1}. ` : '• ';
+    container.appendChild(h('div', { style: { paddingLeft: `${12 + depth * 16}px` } }, marker, renderInlineFormatting(it.text)));
+    if (it.children) appendListItems(container, it.children, depth + 1);
+  });
+}
+
 export function renderMarkdown(text) {
   if (!text) return h('span', null, '');
   const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
@@ -246,10 +274,7 @@ export function renderMarkdown(text) {
         break;
       }
       case 'list':
-        b.items.forEach((it, idx) => {
-          const marker = b.ordered ? `${idx + 1}. ` : '• ';
-          container.appendChild(h('div', { style: { paddingLeft: '12px' } }, marker, renderInlineFormatting(it)));
-        });
+        appendListItems(container, b, 0);
         break;
       case 'code': {
         const pre = h('pre', { style: CODE_PRE_STYLE });
@@ -357,6 +382,32 @@ export function editableRichField({ label, getValue, setValue, plain = false, si
   return wrap;
 }
 
+export function sectionsEditor({ getCachedText, setCachedText, fields, deriveDefaults }) {
+  function currentSections(key) {
+    const parsed = parseRewriteSections(getCachedText(key) || '');
+    return deriveDefaults ? deriveDefaults(key, parsed) : parsed;
+  }
+  function commitSection(key, field, value) {
+    const sections = currentSections(key);
+    sections[field] = value.trim();
+    setCachedText(key, serializeRewriteSections(sections));
+  }
+  function renderSection(key, field, label, opts = {}) {
+    return editableRichField({
+      label,
+      getValue: () => currentSections(key)[field] || '',
+      setValue: (v) => commitSection(key, field, v),
+      plain: !!opts.plain,
+      singleLine: field === 'title',
+      rows: opts.rows || 2
+    });
+  }
+  function renderInto(containerEl, key) {
+    for (const f of fields) containerEl.appendChild(renderSection(key, f.field, f.label, f));
+  }
+  return { currentSections, commitSection, renderSection, renderInto };
+}
+
 export function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
   wrap.style.position = 'relative';
@@ -377,7 +428,11 @@ export function multiSelect(id, label, options, selected, onChange) {
   const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '0', maxHeight: '320px', overflowY: 'hidden', zIndex: '500', minWidth: '220px', boxShadow: 'var(--shadow-md)', flexDirection: 'column' } });
 
   const searchInput = h('input', { type: 'text', placeholder: `Search ${label}…`, style: { width: '100%', padding: '6px 8px', fontSize: '11px', border: 'none', borderBottom: '1px solid var(--border)', outline: 'none', background: 'var(--surface)', boxSizing: 'border-box' } });
-  searchInput.addEventListener('input', () => filterOptions(searchInput.value));
+  let filterDebounce = null;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(() => filterOptions(searchInput.value), 120);
+  });
   searchInput.addEventListener('click', e => e.stopPropagation());
   dropdown.appendChild(searchInput);
 

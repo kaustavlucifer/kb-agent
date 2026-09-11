@@ -1,5 +1,5 @@
 import { detectGusSession, pingGusSession } from '../../shared/auth.js';
-import { sfQuery, soqlIdList, escapeSoql } from '../../shared/api.js';
+import { sfQuery, soqlIdList, escapeSoql, mapWithConcurrency } from '../../shared/api.js';
 
 const GUS_WORK_ITEM_RE = /\bW-\d{4,8}\b/g;
 const WORK_OBJECT = 'ADM_Work__c';
@@ -31,13 +31,13 @@ export async function fetchGusWorkItems(workNames, signal) {
   const batches = [];
   for (let i = 0; i < workNames.length; i += 20) batches.push(workNames.slice(i, i + 20));
 
-  const batchResults = await Promise.all(batches.map(async (batch) => {
+  const batchResults = await mapWithConcurrency(batches, 3, async (batch) => {
     const inList = batch.map(n => `'${escapeSoql(n)}'`).join(',');
     try {
       const soql = `SELECT ${GUS_FIELDS.join(', ')} FROM ${WORK_OBJECT} WHERE Name IN (${inList})`;
       return await sfQuery(apiBase, sid, soql, signal);
     } catch { return []; }
-  }));
+  });
   for (const records of batchResults) {
     for (const r of records) {
       items.push({

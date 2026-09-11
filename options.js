@@ -122,8 +122,8 @@ document.getElementById('reset-btn').addEventListener('click', async () => {
 document.getElementById('test-btn').addEventListener('click', async () => {
   setStatus('Testing…', 'var(--text-secondary)');
   const resp = await chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' });
-  if (resp.connected) setStatus('Connected.', 'var(--success)');
-  else setStatus('Failed: ' + (resp.error || 'Unknown error'), 'var(--error)');
+  if (resp?.connected) setStatus('Connected.', 'var(--success)');
+  else setStatus('Failed: ' + (resp?.error || 'Unknown error'), 'var(--error)');
 });
 
 document.getElementById('clear-btn').addEventListener('click', async () => {

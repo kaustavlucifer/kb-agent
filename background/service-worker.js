@@ -125,6 +125,11 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   }
 }
 
+function absolutizeSfUrls(html, base) {
+  if (!html) return html;
+  return html.replace(/((?:src|href)\s*=\s*)(["'])\/(?!\/)/gi, `$1$2${base}/`);
+}
+
 async function fetchArticlePreview(articleId) {
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };
@@ -134,6 +139,9 @@ async function fetchArticlePreview(articleId) {
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (!records.length) return { success: false, error: 'Article not found' };
     const r = records[0];
+    const descriptionHtml = absolutizeSfUrls(r.Description__c || '', session.apiBase);
+    const resolutionHtml = absolutizeSfUrls(r.Resolution__c || '', session.apiBase);
+    const stepsHtml = absolutizeSfUrls(r.Steps__c || '', session.apiBase);
     return {
       success: true,
       article: {
@@ -146,12 +154,12 @@ async function fetchArticlePreview(articleId) {
         createdByName: r.CreatedBy?.Name || '',
         lastModifiedByName: r.LastModifiedBy?.Name || '',
         lastModifiedDate: r.LastModifiedDate || '',
-        descriptionHtml: r.Description__c || '',
-        resolutionHtml: r.Resolution__c || '',
-        stepsHtml: r.Steps__c || '',
-        description: stripHtml(r.Description__c || ''),
-        resolution: stripHtml(r.Resolution__c || ''),
-        steps: stripHtml(r.Steps__c || '')
+        descriptionHtml,
+        resolutionHtml,
+        stepsHtml,
+        description: stripHtml(descriptionHtml),
+        resolution: stripHtml(resolutionHtml),
+        steps: stripHtml(stepsHtml)
       }
     };
   } catch (e) {
@@ -190,17 +198,31 @@ Return ONLY the improved text, no JSON wrapping or explanation.`,
   }
 }
 
-async function searchCases(query) {
-  if (!query || query.length < 3) return { cases: [] };
-  const escaped = escapeSoql(query);
-
+async function withSessionRetry(run, { onNoSession, onError }) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const session = await detectSession();
     if (!session.sid) {
       if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
-      return { cases: [] };
+      return onNoSession();
     }
     try {
+      return await run(session);
+    } catch (e) {
+      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      return onError(e);
+    }
+  }
+}
+
+async function searchCases(query) {
+  if (!query || query.length < 3) return { cases: [] };
+  const escaped = escapeSoql(query);
+
+  return withSessionRetry(
+    async (session) => {
       let soql;
       if (/^\d+$/.test(query)) {
         soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escaped}%' ORDER BY CreatedDate DESC LIMIT 8`;
@@ -211,40 +233,26 @@ async function searchCases(query) {
       }
       const records = await sfQuery(session.apiBase, session.sid, soql);
       return { cases: records };
-    } catch (e) {
-      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      return { cases: [] };
-    }
-  }
-  return { cases: [] };
+    },
+    { onNoSession: () => ({ cases: [] }), onError: () => ({ cases: [] }) }
+  );
 }
 
 async function resolveCase(caseNumber) {
   if (!/^\d{3,15}$/.test(caseNumber)) return { success: false, error: 'Invalid case number format' };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const session = await detectSession();
-    if (!session.sid) {
-      if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
-      return { success: false, error: 'No SF session — log into OrgCS first' };
-    }
-    try {
+  return withSessionRetry(
+    async (session) => {
       const soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${escapeSoql(caseNumber)}' LIMIT 1`;
       const records = await sfQuery(session.apiBase, session.sid, soql);
       if (!records.length) return { success: false, error: `Case #${caseNumber} not found in ${session.key || 'org'}` };
       return { success: true, caseId: records[0].Id, caseNumber: records[0].CaseNumber, subject: records[0].Subject };
-    } catch (e) {
-      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      return { success: false, error: `Query failed: ${e.message}` };
+    },
+    {
+      onNoSession: () => ({ success: false, error: 'No SF session — log into OrgCS first' }),
+      onError: (e) => ({ success: false, error: `Query failed: ${e.message}` })
     }
-  }
-  return { success: false, error: 'Failed to resolve case number after retries' };
+  );
 }
 
 function handlePort(port) {
@@ -288,18 +296,14 @@ function handlePort(port) {
     const session = await detectSession();
     if (!session.sid) return;
 
-    const [tier1Records, tier2Records] = await Promise.all([
-      sfQueryAll(session.apiBase, session.sid,
-        `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language IN ('en_US','en_GB') AND ValidationStatus = 'Validated External' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
-      ),
-      sfQueryAll(session.apiBase, session.sid,
-        `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
-      )
-    ]);
+    const tier2Records = await sfQueryAll(session.apiBase, session.sid,
+      `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
+    );
 
-    const tier1 = tier1Records.map(mapArticleRecord);
+    const allMapped = tier2Records.map(mapArticleRecord);
+    const tier1 = allMapped.filter(a => a.publishStatus === 'Online' && a.validationStatus === 'Validated External');
     const tier1Ids = new Set(tier1.map(a => a.id));
-    const tier2Only = tier2Records.map(mapArticleRecord).filter(a => !tier1Ids.has(a.id));
+    const tier2Only = allMapped.filter(a => !tier1Ids.has(a.id));
     const allArticles = [...tier1, ...tier2Only];
 
     await localSet({

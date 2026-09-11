@@ -24,6 +24,7 @@ li { margin-bottom: 2px; }
 .kb-richtext table, .rich-html-box table { border-collapse: collapse; margin: 8px 0; }
 .kb-richtext th, .kb-richtext td, .rich-html-box th, .rich-html-box td { border: 1px solid var(--border); padding: 4px 8px; }
 .kb-richtext > :first-child, .rich-html-box > :first-child { margin-top: 0; }
+.kb-richtext img, .rich-html-box img { max-width: 100%; height: auto; }
 
 body {
   font-family: var(--font-sans);

@@ -47,6 +47,47 @@ export function inlineToHtml(text) {
   }).join('');
 }
 
+function indentOf(line) {
+  const m = line.match(/^(\s*)/);
+  return m ? m[1].length : 0;
+}
+
+function parseListLevel(lines, start, baseIndent) {
+  const items = [];
+  let ordered = null;
+  let i = start;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) break;
+    const ind = indentOf(line);
+    if (ind < baseIndent) break;
+    if (ind === baseIndent) {
+      const bulletMatch = line.match(/^\s*[-*]\s+(.*)$/);
+      const orderedMatch = line.match(/^\s*\d+\.\s+(.*)$/);
+      if (bulletMatch) {
+        if (ordered === true) break;
+        ordered = false;
+        items.push({ text: bulletMatch[1], children: null });
+        i++;
+      } else if (orderedMatch) {
+        if (ordered === false) break;
+        ordered = true;
+        items.push({ text: orderedMatch[1], children: null });
+        i++;
+      } else {
+        break;
+      }
+    } else if (items.length) {
+      const { list, next } = parseListLevel(lines, i, ind);
+      items[items.length - 1].children = list;
+      i = next;
+    } else {
+      break;
+    }
+  }
+  return { list: { type: 'list', ordered: !!ordered, items }, next: i };
+}
+
 export function parseBlocks(md) {
   const lines = String(md == null ? '' : md).split('\n');
   const blocks = [];
@@ -93,14 +134,9 @@ export function parseBlocks(md) {
     }
 
     if (/^\s*[-*]\s+/.test(line) || /^\s*\d+\.\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line);
-      const items = [];
-      while (i < lines.length &&
-        ((ordered && /^\s*\d+\.\s+/.test(lines[i])) || (!ordered && /^\s*[-*]\s+/.test(lines[i])))) {
-        items.push(lines[i].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''));
-        i++;
-      }
-      blocks.push({ type: 'list', ordered, items });
+      const { list, next } = parseListLevel(lines, i, indentOf(line));
+      blocks.push(list);
+      i = next;
       continue;
     }
 
@@ -235,6 +271,11 @@ export function serializeRewriteSections({ title, summary, description, resoluti
   return `## TITLE\n${title || ''}\n\n## SUMMARY\n${summary || ''}\n\n## DESCRIPTION\n${description || ''}\n\n## RESOLUTION\n${resolution || ''}`;
 }
 
+function renderListBlockToHtml(b) {
+  const tag = b.ordered ? 'ol' : 'ul';
+  return `<${tag}>${b.items.map(it => `<li>${inlineToHtml(it.text)}${it.children ? renderListBlockToHtml(it.children) : ''}</li>`).join('')}</${tag}>`;
+}
+
 export function markdownToHtml(md, { headingBase = 2 } = {}) {
   const blocks = parseBlocks(md);
   const out = [];
@@ -248,11 +289,9 @@ export function markdownToHtml(md, { headingBase = 2 } = {}) {
       case 'paragraph':
         out.push(`<p>${b.text.split('\n').map(inlineToHtml).join('<br>')}</p>`);
         break;
-      case 'list': {
-        const tag = b.ordered ? 'ol' : 'ul';
-        out.push(`<${tag}>${b.items.map(it => `<li>${inlineToHtml(it)}</li>`).join('')}</${tag}>`);
+      case 'list':
+        out.push(renderListBlockToHtml(b));
         break;
-      }
       case 'code':
         out.push(`<pre><code>${escapeHtml(b.code)}</code></pre>`);
         break;

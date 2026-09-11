@@ -126,6 +126,11 @@ export async function recordUsage(model, usage) {
   const cost = costUsd(model, usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheCreationTokens);
   _delta = mergeTotals(_delta, singleTotal(model, usage, cost));
   publish();
+  if (IS_SERVICE_WORKER) {
+    if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null; }
+    await flushCost();
+    return;
+  }
   if (!_flushTimer) _flushTimer = setTimeout(flushCost, 800);
 }
 
