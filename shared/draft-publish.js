@@ -19,12 +19,12 @@ export async function confirmDraftOverwriteIfExists(existingArticleId, contentLa
   return proceed;
 }
 
-export async function publishDraftUpdate({ existingArticleId, title, summary, sections, taxonomyName }) {
+export async function publishDraftUpdate({ existingArticleId, title, summary, sections, taxonomyName, caseNumber }) {
   toast('Creating new draft version in ORGCS…', 'info');
   try {
     const resp = await chrome.runtime.sendMessage({
       action: 'PUBLISH_UPDATE_DRAFT',
-      payload: { existingArticleId, title, summary, sections, taxonomyName: taxonomyName || null }
+      payload: { existingArticleId, title, summary, sections, taxonomyName: taxonomyName || null, caseNumber }
     });
     if (resp?.success) {
       const actionLabel = (resp.action === 'patched-draft' || resp.action === 'updated-existing-draft') ? 'Existing draft updated!' : 'New draft version created!';
@@ -40,12 +40,12 @@ export async function publishDraftUpdate({ existingArticleId, title, summary, se
   }
 }
 
-export async function publishNewArticleDraft({ title, summary, sections, taxonomyName }) {
+export async function publishNewArticleDraft({ title, summary, sections, taxonomyName, caseNumber }) {
   toast('Creating article in ORGCS…', 'info');
   try {
     const resp = await chrome.runtime.sendMessage({
       action: 'PUBLISH_NEW_ARTICLE',
-      payload: { title, summary, sections, taxonomyName: taxonomyName || null }
+      payload: { title, summary, sections, taxonomyName: taxonomyName || null, caseNumber }
     });
     if (resp?.success) toast('Article created!', 'success');
     else toast(resp?.error || 'Failed to create article.', 'error');

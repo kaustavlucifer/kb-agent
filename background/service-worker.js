@@ -4,6 +4,7 @@ import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, ARTICLE_META_FIELDS, applySettings } from '../shared/config.js';
+import { redactPii } from '../shared/pii.js';
 import { mapArticleRecord } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
@@ -85,7 +86,8 @@ async function handleMessage(msg) {
 }
 
 async function generateArticleUpdate(msg) {
-  const { articleTitle, caseSubject, caseAbstract } = msg;
+  const { articleTitle, caseAbstract } = msg;
+  const caseSubject = redactPii(msg.caseSubject);
   const safeId = sanitizeId(msg.articleId);
   const session = await detectSession();
   if (!session.sid) return { success: false, error: 'No SF session' };

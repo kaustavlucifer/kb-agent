@@ -503,9 +503,16 @@ async function loadArticles(forceLive = false) {
 }
 
 
+let _filteredMemo = null;
+
 function getFilteredArticles() {
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
+  const signature = `${_filterText}|${_filterCloud.join(',')}|${_filterPt.join(',')}|${_filterScore.join(',')}|${_filterValidation.join(',')}|${_filterPublish.join(',')}|${_sorter.col}|${_sorter.dir}`;
+  if (_filteredMemo && _filteredMemo.articles === articles && _filteredMemo.scores === scores && _filteredMemo.signature === signature) {
+    return _filteredMemo.result;
+  }
+
   let filtered = [...articles];
   if (_filterCloud.length) filtered = filtered.filter(a => _filterCloud.includes(getCloudFromPt(a.topicName)));
   if (_filterText) {
@@ -543,6 +550,7 @@ function getFilteredArticles() {
     }
     return _sorter.compare(va, vb);
   });
+  _filteredMemo = { articles, scores, signature, result: filtered };
   return filtered;
 }
 

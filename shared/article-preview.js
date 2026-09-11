@@ -51,7 +51,7 @@ export function previewButton(articleId, meta = {}, opts = {}) {
   }, '👁');
 }
 
-export function showArticlePreview(articleId, meta = {}) {
+function showArticlePreview(articleId, meta = {}) {
   const content = loadingModal(meta.articleNumber ? `#${meta.articleNumber}${meta.title ? ' — ' + meta.title : ''}` : 'Article Preview');
 
   fetchArticlePreviewData(articleId)

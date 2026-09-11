@@ -43,7 +43,7 @@ export function dedupePairs(pairs) {
   return [...best.values()];
 }
 
-export const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
+const DEDUP_SYSTEM = `You are a Salesforce Knowledge article deduplication analyst. Find articles that are NEAR-IDENTICAL — not merely related.
 
 STRICT DEFINITIONS:
 - DUPLICATE: Description AND Resolution are essentially the same — same root cause, same fix steps.

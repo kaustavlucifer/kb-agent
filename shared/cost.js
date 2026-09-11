@@ -107,7 +107,14 @@ async function ensureLoaded() {
   await _loadPromise;
 }
 
-async function flushCost() {
+let _flushChain = Promise.resolve();
+
+function flushCost() {
+  _flushChain = _flushChain.then(doFlush, doFlush);
+  return _flushChain;
+}
+
+async function doFlush() {
   _flushTimer = null;
   const delta = _delta;
   if (!delta.calls) return;

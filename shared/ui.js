@@ -39,7 +39,7 @@ const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style'
 
 const SAFE_URL_RE = /^(https?:|mailto:)/i;
 
-export function sanitizeHtml(html) {
+function sanitizeHtml(html) {
   const div = document.createElement('div');
   div.innerHTML = html;
   div.querySelectorAll('script,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());

@@ -23,6 +23,7 @@ let _mergeTextCache = {};
 let _mergeAbort = null;
 let _lastBodyMap = null;
 let _workQueueMemo = null;
+let _wasRunning = false;
 
 const mergeSectionsEditor = sectionsEditor({
   getCachedText: (mergeKey) => _mergeTextCache[mergeKey] || '',
@@ -46,10 +47,37 @@ export function mount(container) {
     setState('dedup.running', null);
     loadCachedResults();
   }
+  _wasRunning = !!getState('dedup.running');
   ensureArticlesLoaded();
   render();
   _unsubs.push(subscribe('dedup.pairs', render));
-  _unsubs.push(subscribe('dedup.running', render));
+  _unsubs.push(subscribe('dedup.running', onRunningChange));
+}
+
+function onRunningChange(running) {
+  const isRunning = !!running;
+  if (isRunning !== _wasRunning) {
+    _wasRunning = isRunning;
+    render();
+    return;
+  }
+  if (isRunning) updateProgressInPlace(running);
+}
+
+function updateProgressInPlace(running) {
+  const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
+  const activeLabel = running.activePts?.length ? `P&T: ${running.activePts.join(', ')}` : 'Preparing…';
+
+  const countEl = document.getElementById('dedup-progress-count');
+  if (countEl) countEl.textContent = `Scanning… ${running.done}/${running.total} batches`;
+  const activeEl = document.getElementById('dedup-scan-activelabel');
+  if (activeEl) activeEl.textContent = activeLabel;
+  const pctEl = document.getElementById('dedup-scan-pct');
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  const bar = _container?.querySelector('#dedup-scan-card .progress__fill');
+  if (bar) bar.style.width = `${pct}%`;
+  const barLabel = _container?.querySelector('#dedup-scan-card .progress__label');
+  if (barLabel) barLabel.textContent = `${pct}%`;
 }
 
 export function unmount() {
@@ -196,7 +224,7 @@ function render() {
       style: { fontSize: '11px', color: 'var(--text-muted)', alignSelf: 'center' },
       title: `${est.calls} calls · ~${est.inputTokens.toLocaleString()} in / ~${est.outputTokens.toLocaleString()} out tokens at current scoring model`
     }, `est. ~${fmtUsd(est.costUsd)}`) : null,
-    h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
+    h('div', { id: 'dedup-progress-count', style: { fontSize: '12px', color: 'var(--text-secondary)', marginRight: 'auto' } },
       running ? `Scanning… ${running.done}/${running.total} batches` : `${pairs.length} potential duplicate pairs`
     ),
     clearBtn,
@@ -207,10 +235,10 @@ function render() {
   if (running) {
     const pct = running.total > 0 ? Math.round((running.done / running.total) * 100) : 0;
     const activeLabel = running.activePts?.length ? `P&T: ${running.activePts.join(', ')}` : 'Preparing…';
-    stickySection.appendChild(h('div', { class: 'card', style: { padding: '12px' } },
+    stickySection.appendChild(h('div', { id: 'dedup-scan-card', class: 'card', style: { padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-        h('span', null, activeLabel),
-        h('span', null, `${pct}%`)
+        h('span', { id: 'dedup-scan-activelabel' }, activeLabel),
+        h('span', { id: 'dedup-scan-pct' }, `${pct}%`)
       ),
       progressBar(pct, 'default', true)
     ));

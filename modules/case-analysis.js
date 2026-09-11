@@ -1,9 +1,10 @@
-import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, confirmModal, renderMarkdown, editableRichField } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { markdownToHtml } from '../shared/markdown.js';
+import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft } from '../shared/draft-publish.js';
 
 let _container = null;
 let _port = null;
@@ -1309,69 +1310,34 @@ function renderFullRewriteCard(rewrite) {
 
 
 async function publishArticle(draft, result) {
-  toast('Creating article in ORGCS…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PUBLISH_NEW_ARTICLE',
-      payload: {
-        title: draft.title,
-        summary: draft.summary || (draft.sections?.[0]?.body || '').slice(0, 300),
-        sections: draft.sections || [],
-        caseNumber: result?.caseNumber,
-        taxonomyName: result?.caseAbstract?.product || null
-      }
-    });
-    if (resp?.success) {
-      toast('Article created!', 'success');
-      if (resp.url) {
-        setState('case.publishedUrl', resp.url);
-        renderByView();
-      }
-    } else {
-      toast(resp?.error || 'Failed to create article.', 'error');
-    }
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
+  const resp = await publishNewArticleDraft({
+    title: draft.title,
+    summary: draft.summary || (draft.sections?.[0]?.body || '').slice(0, 300),
+    sections: draft.sections || [],
+    caseNumber: result?.caseNumber,
+    taxonomyName: result?.caseAbstract?.product || null
+  });
+  if (resp?.success && resp.url) {
+    setState('case.publishedUrl', resp.url);
+    renderByView();
   }
 }
 
 async function publishUpdate(rewrite, result) {
-  const draftCheck = await chrome.runtime.sendMessage({ action: 'CHECK_DRAFT_EXISTS', payload: { existingArticleId: rewrite.articleId } });
-  if (draftCheck?.hasDraft) {
-    const proceed = await confirmModal(
-      'Existing Draft Found',
-      'A draft version of this article already exists. Replace its content with this update, or leave the existing draft as is?',
-      { confirmLabel: 'Replace Draft Content', cancelLabel: 'Leave As Is' }
-    );
-    if (!proceed) { toast('Publish cancelled — existing draft left unchanged.', 'info'); return; }
-  }
+  const proceed = await confirmDraftOverwriteIfExists(rewrite.articleId, 'this update');
+  if (!proceed) return;
 
-  toast('Creating new draft version in ORGCS…', 'info');
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      action: 'PUBLISH_UPDATE_DRAFT',
-      payload: {
-        existingArticleId: rewrite.articleId,
-        title: rewrite.title,
-        summary: rewrite.summary,
-        sections: rewrite.sections || [],
-        caseNumber: result?.caseNumber,
-        taxonomyName: result?.caseAbstract?.product || null
-      }
-    });
-    if (resp?.success) {
-      const actionLabel = resp.action === 'patched-draft' ? 'Existing draft updated!' : 'New draft version created!';
-      toast(actionLabel, 'success');
-      if (resp.warning) toast(resp.warning, 'warning');
-      if (resp.url) {
-        setState('case.publishedUrl', resp.url);
-        renderByView();
-      }
-    } else {
-      toast(resp?.error || 'Failed to create draft version.', 'error');
-    }
-  } catch (e) {
-    toast('Error: ' + e.message, 'error');
+  const resp = await publishDraftUpdate({
+    existingArticleId: rewrite.articleId,
+    title: rewrite.title,
+    summary: rewrite.summary,
+    sections: rewrite.sections || [],
+    caseNumber: result?.caseNumber,
+    taxonomyName: result?.caseAbstract?.product || null
+  });
+  if (resp?.success && resp.url) {
+    setState('case.publishedUrl', resp.url);
+    renderByView();
   }
 }
 

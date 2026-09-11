@@ -32,7 +32,7 @@ export function parseInline(text) {
   return tokens;
 }
 
-export function inlineToHtml(text) {
+function inlineToHtml(text) {
   return parseInline(text).map(t => {
     switch (t.type) {
       case 'bold': return `<strong>${escapeHtml(t.text)}</strong>`;
