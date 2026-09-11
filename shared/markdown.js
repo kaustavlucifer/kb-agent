@@ -9,7 +9,7 @@ export function escapeHtml(str) {
 export function parseInline(text) {
   const src = String(text == null ? '' : text);
   const tokens = [];
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(!\[[^\]]*\]\([^)\s]+\))|(\[(?!!)[^\]]+\]\([^)\s]+\))/g;
   let last = 0;
   let m;
   while ((m = re.exec(src)) !== null) {
@@ -22,6 +22,9 @@ export function parseInline(text) {
     } else if (m[3]) {
       tokens.push({ type: 'italic', text: tok.slice(1, -1) });
     } else if (m[4]) {
+      const split = tok.indexOf('](');
+      tokens.push({ type: 'image', alt: tok.slice(2, split), src: tok.slice(split + 2, -1) });
+    } else if (m[5]) {
       const split = tok.indexOf('](');
       tokens.push({ type: 'link', text: tok.slice(1, split), href: tok.slice(split + 2, -1) });
     }
@@ -41,6 +44,10 @@ function inlineToHtml(text) {
       case 'link': {
         const safeHref = /^(https?:|mailto:)/i.test(t.href) ? t.href : '#';
         return `<a href="${escapeHtml(safeHref)}">${escapeHtml(t.text)}</a>`;
+      }
+      case 'image': {
+        if (!/^https?:/i.test(t.src)) return '';
+        return `<img src="${escapeHtml(t.src)}" alt="${escapeHtml(t.alt)}">`;
       }
       default: return escapeHtml(t.text);
     }
@@ -176,6 +183,7 @@ export function htmlToMarkdown(root) {
       else if (tag === 'em' || tag === 'i') s += `*${inlineOf(n).trim()}*`;
       else if (tag === 'code') s += '`' + n.textContent.replace(/ /g, ' ') + '`';
       else if (tag === 'a') { const href = n.getAttribute('href') || ''; const txt = inlineOf(n).trim(); s += href && href !== '#' ? `[${txt}](${href})` : txt; }
+      else if (tag === 'img') { const src = n.getAttribute('src') || ''; const alt = n.getAttribute('alt') || ''; s += src ? `![${alt}](${src})` : ''; }
       else if (tag === 'br') s += '\n';
       else if (fontWeight || fontItalic) { const inner = inlineOf(n).trim(); s += inner ? `${fontWeight ? '**' : ''}${fontItalic ? '*' : ''}${inner}${fontItalic ? '*' : ''}${fontWeight ? '**' : ''}` : ''; }
       else s += inlineOf(n);

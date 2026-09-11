@@ -2,7 +2,7 @@ import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js'
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml } from '../shared/api.js';
+import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml, absolutizeSfUrls } from '../shared/api.js';
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, ARTICLE_META_FIELDS, applySettings } from '../shared/config.js';
 import { redactPii } from '../shared/pii.js';
 import { mapArticleRecord } from '../shared/scoring.js';
@@ -125,11 +125,6 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
   } catch (e) {
     return { success: false, error: e.message };
   }
-}
-
-function absolutizeSfUrls(html, base) {
-  if (!html) return html;
-  return html.replace(/((?:src|href)\s*=\s*)(["'])\/(?!\/)/gi, `$1$2${base}/`);
 }
 
 async function fetchArticlePreview(articleId) {

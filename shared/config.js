@@ -27,6 +27,10 @@ export const DEDUP_MAX_TOKENS = 4000;
 export const DEDUP_BODY_CHARS = 2000;
 export const DEDUP_MAX_SLICES_PER_PT = 10;
 
+export const MAX_REWRITE_IMAGES_PER_ARTICLE = 2;
+export const MAX_IMAGE_FETCH_BYTES = 4_000_000;
+export const SUPPORTED_IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
 export const MODEL_PRICING = {
   'claude-haiku-4-5-20251001': { in: 1.0, out: 5.0 },
   'claude-sonnet-4-6': { in: 3.0, out: 15.0 },

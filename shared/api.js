@@ -1,4 +1,4 @@
-import { SF_API_VERSION } from './config.js';
+import { SF_API_VERSION, MAX_REWRITE_IMAGES_PER_ARTICLE, MAX_IMAGE_FETCH_BYTES, SUPPORTED_IMAGE_MEDIA_TYPES } from './config.js';
 
 export const ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
@@ -128,6 +128,104 @@ export function stripHtml(html) {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+export function absolutizeSfUrls(html, base) {
+  if (!html) return html;
+  return html.replace(/((?:src|href)\s*=\s*)(["'])\/(?!\/)/gi, `$1$2${base}/`);
+}
+
+export function stripHtmlKeepLinks(html, base) {
+  if (!html) return '';
+  const absolutized = base ? absolutizeSfUrls(html, base) : html;
+  const withImages = absolutized.replace(
+    /<img\b[^>]*\bsrc\s*=\s*(["'])([^"']*)\1[^>]*>/gi,
+    (full, quote, src) => {
+      if (!src) return '';
+      const altMatch = full.match(/\balt\s*=\s*(["'])([^"']*)\1/i);
+      const alt = altMatch ? altMatch[2] : '';
+      return `![${alt}](${src})`;
+    }
+  );
+  const withLinks = withImages.replace(
+    /<a\b[^>]*\bhref\s*=\s*(["'])([^"']*)\1[^>]*>([\s\S]*?)<\/a>/gi,
+    (_, quote, href, inner) => {
+      const text = stripHtml(inner).replace(/\s+/g, ' ').trim();
+      if (!href || href === '#' || !text) return text;
+      return `[${text}](${href})`;
+    }
+  );
+  return stripHtml(withLinks);
+}
+
+function extractMarkdownImageRefs(markdown) {
+  if (!markdown) return [];
+  const refs = [];
+  const seen = new Set();
+  const re = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+  let m;
+  while ((m = re.exec(markdown)) !== null) {
+    const [, alt, src] = m;
+    if (seen.has(src)) continue;
+    seen.add(src);
+    refs.push({ alt, src });
+  }
+  return refs;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchImageAsBase64(src, sid, signal) {
+  let resp = null;
+  try {
+    resp = await fetch(src, { headers: { Authorization: `Bearer ${sid}` }, signal });
+  } catch {}
+  if (!resp?.ok) {
+    try {
+      resp = await fetch(src, { credentials: 'include', signal });
+    } catch {
+      return null;
+    }
+  }
+  if (!resp.ok) return null;
+  try {
+    const mediaType = (resp.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!SUPPORTED_IMAGE_MEDIA_TYPES.includes(mediaType)) return null;
+    const contentLength = Number(resp.headers.get('content-length') || 0);
+    if (contentLength > MAX_IMAGE_FETCH_BYTES) return null;
+    const buf = await resp.arrayBuffer();
+    if (buf.byteLength > MAX_IMAGE_FETCH_BYTES) return null;
+    return { mediaType, data: arrayBufferToBase64(buf) };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchImageContentBlocks(refs, sid, signal, maxImages = MAX_REWRITE_IMAGES_PER_ARTICLE) {
+  const capped = refs.slice(0, maxImages);
+  const images = await mapWithConcurrency(capped, maxImages, (ref) => fetchImageAsBase64(ref.src, sid, signal));
+  const blocks = [];
+  for (let i = 0; i < capped.length; i++) {
+    const img = images[i];
+    if (!img || img.__error) continue;
+    blocks.push({ type: 'text', text: `The image referenced as ![${capped[i].alt}](${capped[i].src}) is attached below:` });
+    blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+  }
+  return blocks;
+}
+
+export async function buildPromptContent(text, sid, signal, maxImages) {
+  const imageRefs = extractMarkdownImageRefs(text);
+  const imageBlocks = imageRefs.length ? await fetchImageContentBlocks(imageRefs, sid, signal, maxImages) : [];
+  return imageBlocks.length ? [{ type: 'text', text }, ...imageBlocks] : text;
 }
 
 export function hasCodeBlocks(html) {

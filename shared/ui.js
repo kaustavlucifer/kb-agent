@@ -164,6 +164,16 @@ export function streamingStatus(el, message) {
   ));
 }
 
+export function markdownStreamThrottle(elId, throttleMs, isStale) {
+  let throttle = null;
+  return (full) => {
+    if (throttle || isStale()) return;
+    throttle = setTimeout(() => { throttle = null; }, throttleMs);
+    const el = document.getElementById(elId);
+    if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
+  };
+}
+
 export function swapButtonWithLink(btnId, opts = {}) {
   const btn = document.getElementById(btnId);
   if (btn) {

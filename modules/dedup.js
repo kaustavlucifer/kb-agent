@@ -1,10 +1,10 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, renderMarkdown, sectionsEditor, streamingStatus, swapButtonWithLink } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, stickyScrollLayout, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { mapWithConcurrency, stripHtml } from '../shared/api.js';
+import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl } from '../shared/config.js';
+import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl, MAX_REWRITE_IMAGES_PER_ARTICLE } from '../shared/config.js';
 import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup.js';
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
@@ -449,17 +449,19 @@ async function generateMerge(pair, mergeKey) {
     const cachedBoth = _lastBodyMap && _lastBodyMap.has(artA.id) && _lastBodyMap.has(artB.id);
     const bodyMap = cachedBoth ? _lastBodyMap : await fetchArticleBodies([artA.id, artB.id], session);
     if (abort.signal.aborted) return;
-    descA = stripHtml(bodyMap.get(artA.id)?.description || '').slice(0, MAX_BODY_CHARS);
-    resA = stripHtml(bodyMap.get(artA.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
-    descB = stripHtml(bodyMap.get(artB.id)?.description || '').slice(0, MAX_BODY_CHARS);
-    resB = stripHtml(bodyMap.get(artB.id)?.resolution || '').slice(0, MAX_BODY_CHARS);
+    descA = stripHtmlKeepLinks(bodyMap.get(artA.id)?.description || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    resA = stripHtmlKeepLinks(bodyMap.get(artA.id)?.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    descB = stripHtmlKeepLinks(bodyMap.get(artB.id)?.description || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    resB = stripHtmlKeepLinks(bodyMap.get(artB.id)?.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
   }
 
   const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide. Output EXACTLY these four sections and nothing else:
 ## TITLE
 ## SUMMARY
 ## DESCRIPTION
-## RESOLUTION`;
+## RESOLUTION
+
+Hyperlinks and images from either source article appear inline as [text](url) and ![alt](url); where possible the actual images are attached below so you can see what they show. Carry over the ones that are still genuinely relevant to the merged content using their EXACT original markdown — never alter a URL, never invent a new link or image. Drop links/images that are redundant between the two articles or no longer relevant.`;
 
   const user = `Merge these duplicates into one article.
 
@@ -477,22 +479,22 @@ Resolution: ${resB}
 
 Keep best content from both. Prefer most complete and recent steps.`;
 
-  let fullText = '';
-  let throttle = null;
   const isStale = () => _mergeAbort !== abort || abort.signal.aborted;
+  const content = await buildPromptContent(user, session.sid, abort.signal, MAX_REWRITE_IMAGES_PER_ARTICLE * 2);
+  if (isStale()) return;
+
+  let fullText = '';
+  const renderThrottled = markdownStreamThrottle('merge-stream', STREAM_RENDER_THROTTLE_MS, isStale);
   try {
     await streamClaude({
       system,
-      messages: [{ role: 'user', content: user }],
+      messages: [{ role: 'user', content }],
       maxTokens: 4000,
       temperature: 0.2,
       signal: abort.signal,
       onDelta: (chunk, full) => {
         fullText = full;
-        if (throttle || isStale()) return;
-        throttle = setTimeout(() => { throttle = null; }, STREAM_RENDER_THROTTLE_MS);
-        const el = document.getElementById('merge-stream');
-        if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
+        renderThrottled(full);
       }
     });
     if (isStale()) return;

@@ -1,7 +1,7 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
-import { mapWithConcurrency, stripHtml } from '../shared/api.js';
+import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
@@ -1103,9 +1103,9 @@ async function generateRewrite(article, session) {
     const body = bodyMap.get(article.id) || {};
     currentTitle = article.title;
     currentSummary = article.summary || '';
-    desc = stripHtml(body.description || '').slice(0, MAX_BODY_CHARS);
-    res = stripHtml(body.resolution || '').slice(0, MAX_BODY_CHARS);
-    steps = stripHtml(body.steps || '').slice(0, 1500);
+    desc = stripHtmlKeepLinks(body.description || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    res = stripHtmlKeepLinks(body.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    steps = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
   }
 
   const system = `You are an expert technical writer rewriting Salesforce Knowledge Articles to maximize Agentforce (AGF) RAG retrieval and consumption quality.
@@ -1128,7 +1128,8 @@ REWRITE RULES (each maps to a scored criterion — satisfy ALL):
 8. GRAMMAR: Every sentence must be grammatically complete (subject + main verb) or a valid imperative/procedural/list construction — no fragments or thoughts truncated mid-sentence. Imperative commands, numbered procedural steps, and noun-phrase bullet labels are already complete; do not force them into full-sentence prose.
 9. DEFINITIONS: Explain every acronym, synonym, and abbreviation on first use, EXCEPT standard Salesforce platform terminology (API, CRM, URL, Lightning Experience, Classic, org, SQL, HTML, SELECT, HTML tags like BR/P/DIV/SPAN/IMG/TABLE, and capitalized emphasis words like NOTE/TIP/WARNING/CAUTION/NEW). Domain-specific acronyms and currency/unit codes (e.g. "PHP", "USD") DO need a first-use definition.
 10. LINK HYGIENE: Keep the article to 4 or fewer hyperlinks total — 5 or more makes it link-heavy and non-compliant. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim, and even then stay within the 4-link budget. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
-11. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
+11. IMAGES: The original article's images appear inline as ![alt text](url), and where possible the actual image is attached below the article text so you can see what it shows — use the real visual content, not just the alt text, to judge relevance. If an image is genuinely informative (a screenshot of the exact error/dialog, an annotated diagram) keep it by reproducing its EXACT ![alt](url) markdown at the equivalent point in the rewrite — never alter the URL, never invent a new image, never describe an image in prose instead of keeping the markdown reference. Drop only images that are purely decorative or no longer relevant to the rewritten content.
+12. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
 
 Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
 ## TITLE
@@ -1157,22 +1158,22 @@ CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
-  let fullText = '';
-  let throttle = null;
   const isStale = () => _rewriteAbort !== abort || abort.signal.aborted;
+  const content = await buildPromptContent(user, session.sid, abort.signal);
+  if (isStale()) return;
+
+  let fullText = '';
+  const renderThrottled = markdownStreamThrottle('rewrite-stream', STREAM_RENDER_THROTTLE_MS, isStale);
   try {
     await streamClaude({
       system,
-      messages: [{ role: 'user', content: user }],
+      messages: [{ role: 'user', content }],
       maxTokens: 4000,
       temperature: 0.2,
       signal: abort.signal,
       onDelta: (chunk, full) => {
         fullText = full;
-        if (throttle || isStale()) return;
-        throttle = setTimeout(() => { throttle = null; }, STREAM_RENDER_THROTTLE_MS);
-        const el = document.getElementById('rewrite-stream');
-        if (el) { el.textContent = ''; el.appendChild(renderMarkdown(full)); }
+        renderThrottled(full);
       }
     });
     if (isStale()) return;

@@ -1,5 +1,5 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
-import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml } from '../../shared/api.js';
+import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml, stripHtmlKeepLinks, buildPromptContent } from '../../shared/api.js';
 import { redactPii, redactCaseRecord, redactComments } from '../../shared/pii.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
@@ -286,7 +286,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       coveringArticles: coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    const suggestions = await generateFullRewrites(topArticles, candidateBodies, aiCaseRecord, aiComments, caseAbstract, send, signal);
+    const suggestions = await generateFullRewrites(topArticles, candidateBodies, aiCaseRecord, aiComments, caseAbstract, send, signal, session);
     structured = {
       action,
       confidence: decision.confidence,
@@ -297,7 +297,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   }
 
   if (action === 'CREATE_NEW' || action === 'BOTH') {
-    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, candidateBodies, send, signal);
+    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, candidateBodies, send, signal, session);
     if (structured && action === 'BOTH') {
       structured.newArticleDraft = draft;
     } else {
@@ -356,7 +356,7 @@ export async function handleGenerateNew(port, msg) {
     ]);
 
     send({ type: 'streaming-start' });
-    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, new Map(), send, signal);
+    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, new Map(), send, signal, session);
 
     const structured = {
       action: 'CREATE_NEW',
@@ -730,15 +730,19 @@ Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
 
 
 
-async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal) {
+async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal, session) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
 
   const tasks = articles.slice(0, 2).map(article => async () => {
     const body = bodyMap.get(article.Id) || {};
-    const descText = stripHtml(body.description).slice(0, MAX_BODY_CHARS);
-    const resText = stripHtml(body.resolution).slice(0, MAX_BODY_CHARS);
-    const stepsText = stripHtml(body.steps || '').slice(0, 1500);
+    const descText = stripHtmlKeepLinks(body.description, session.apiBase).slice(0, MAX_BODY_CHARS);
+    const resText = stripHtmlKeepLinks(body.resolution, session.apiBase).slice(0, MAX_BODY_CHARS);
+    const stepsText = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
+    const refLinksText = body.additionalResources ? stripHtmlKeepLinks(body.additionalResources, session.apiBase).slice(0, 500) : '';
+
+    const userText = `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${refLinksText ? '\nEXISTING REFERENCE LINKS:\n' + refLinksText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}`;
+    const content = await buildPromptContent(userText, session.sid, signal);
 
     try {
       const fullText = await streamClaude({
@@ -760,11 +764,12 @@ KEY RULES:
 - After code blocks, add plain-text explanation
 - Tables should use text, not visual indicators
 - If reference links are provided from existing articles, include relevant ones in the Resolution section or as a "See Also" note at the end
+- The existing article's images appear inline as ![alt](url), and where possible the actual image is attached below the article text so you can see what it shows. If an image is still genuinely relevant to the rewritten content, keep it by reproducing its EXACT ![alt](url) markdown verbatim — never alter the URL or invent a new image. Drop only images that are decorative or no longer relevant.
 
 Return the COMPLETE rewritten article as publication-ready content.
 IMPORTANT: Use EXACTLY these 4 sections — Title, Summary, Description, Resolution. No other section headings.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}],"changesSummary":"brief description of what was changed and why"}`,
-        messages: [{ role: 'user', content: `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${body.additionalResources ? '\nEXISTING REFERENCE LINKS:\n' + stripHtml(body.additionalResources).slice(0, 500) : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}` }],
+        messages: [{ role: 'user', content }],
         maxTokens: 3000,
         temperature: 0.2,
         cache: true,
@@ -863,10 +868,10 @@ Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confid
   }
 }
 
-async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, candidateBodies, send, signal) {
+async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, candidateBodies, send, signal, session) {
   const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
   const refLinks = [...(candidateBodies || new Map()).values()]
-    .map(b => stripHtml(b.additionalResources || '').trim())
+    .map(b => stripHtmlKeepLinks(b.additionalResources || '', session.apiBase).trim())
     .filter(r => r.length > 10)
     .slice(0, 3)
     .join('\n');
