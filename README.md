@@ -1,4 +1,4 @@
-# KB Agent v2.16.0
+# KB Agent v2.17.0
 
 AI-powered Knowledge Base quality management for Salesforce Industry & Revenue Cloud. Chrome Extension (Manifest V3) that analyzes support cases, generates KB articles, scores existing content, and identifies duplicates — optimized for Agentforce retrieval.
 
@@ -90,6 +90,10 @@ The header shows connection chips for each integration:
 
 All auth is cookie-based (detected from browser sessions). No credentials are stored.
 
+If any portal (OrgCS, GUS, Known Issues) is disconnected, a background tab for its login page opens automatically — no need to hunt down the URL yourself. It won't repeat for the same outage (and skips opening if a matching tab is already open), but resets the moment that portal is reconnected, so a later logout triggers a fresh auto-open. Connections are re-checked every ~10-15s while anything is down, with checks stopping once everything is healthy.
+
+A manual "⬆ Check" button sits beside the connection chips — click to force a check against Google Drive; it shows "Checking…", then "✓ Current" or "⬆ v{x.y.z}" if an update is available.
+
 ## Updates
 
 On launch, the popup checks a Google Drive-hosted zip for a newer version (requires being signed in to Google with your work account — the file is domain-shared, not public). If a newer version is found, an "⬆ v{x.y.z} available" chip appears in the header; clicking it opens a modal with a download link and reinstall steps (`chrome://extensions` → remove old → Load Unpacked). The check is cached for 30 minutes and a dismissed version won't re-prompt until a newer one ships.
@@ -111,7 +115,13 @@ Uses the Salesforce internal AI model gateway with Claude Sonnet 4.6. Rate limit
 
 ## Changelog
 
-### v2.16.0 (current)
+### v2.17.0 (current)
+- Auto-open login tabs for disconnected portals (OrgCS, GUS, Known Issues) — no manual tab-hunting needed
+- Update button in connection chips row (⬆ Check) with manual re-check, status feedback (Checking… / Failed / Current / or shows latest version available)
+- Settings page now shows app version below title, collapsible Models & Thresholds sections (collapsed by default), non-collapsible Guard rails header
+- Periodic ~10-15s auth re-checks while any portal is disconnected, auto-reset when all recover
+
+### v2.16.0
 - In-app update check against Google Drive, mirroring Open Case Analyser — header chip + modal with download link and step-by-step reinstall instructions
 - Collapsible sections (Models, Thresholds, Guard rails) on the Settings page
 

@@ -77,10 +77,20 @@ body {
   box-shadow: 0 2px 4px rgba(1, 118, 211, 0.3);
 }
 
+.header__text {
+  display: flex;
+  flex-direction: column;
+}
+
 .header__title {
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
   color: var(--text-primary);
+}
+
+.header__version {
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 /* ─── Tabs ─── */

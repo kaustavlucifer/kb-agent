@@ -138,7 +138,10 @@ function buildHeader() {
   const header = h('header', { class: 'header' },
     h('div', { class: 'header__brand' },
       h('div', { class: 'header__logo' }, 'K'),
-      h('div', { class: 'header__title' }, 'KB Agent')
+      h('div', { class: 'header__text' },
+        h('div', { class: 'header__title' }, 'KB Agent'),
+        h('div', { class: 'header__version' }, `v${chrome.runtime.getManifest().version}`)
+      )
     ),
     buildTabs(),
     h('div', { class: 'header__cost', id: 'cost-chip' }),
@@ -206,6 +209,21 @@ async function checkConnections() {
   const connections = { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp };
   setState('app.connections', connections);
   localSet({ [STORAGE_KEYS.AUTH_CACHE]: connections });
+
+  const sfOk = sfResp?.connected;
+  const gusOk = gusResp?.connected;
+  const kiOk = kiResp?.connected;
+
+  if (!sfOk) autoOpenAuthTab('sf', `https://${sfResp?.lightningHost || 'orgcs.lightning.force.com'}`);
+  else _authAutoOpened.sf = false;
+
+  if (!gusOk) autoOpenAuthTab('gus', `https://${gusResp?.lightningHost || 'gus.lightning.force.com'}`);
+  else _authAutoOpened.gus = false;
+
+  if (!kiOk) autoOpenAuthTab('ki', 'https://known-issues-prd1.lightning.force.com');
+  else _authAutoOpened.ki = false;
+
+  scheduleAuthCheckIfNeeded(sfOk && gusOk && kiOk);
 }
 
 async function refreshConnections() {
@@ -215,11 +233,38 @@ async function refreshConnections() {
 }
 
 let _pendingUpdate = null;
+let _authCheckTimer = null;
+const _authAutoOpened = { sf: false, gus: false, ki: false };
 
 async function checkUpdate(force = false) {
   const r = await chrome.runtime.sendMessage({ action: 'CHECK_FOR_UPDATE', force }).catch(() => null);
   _pendingUpdate = r && r.ok && r.updateAvailable ? r : null;
   renderUpdateChip();
+  renderUpdateButton();
+}
+
+async function autoOpenAuthTab(kind, url) {
+  if (_authAutoOpened[kind]) return;
+  _authAutoOpened[kind] = true;
+  try {
+    const host = new URL(url).hostname;
+    const existing = await chrome.tabs.query({ url: `https://${host}/*` });
+    if (existing && existing.length) return;
+    await chrome.tabs.create({ url, active: false });
+  } catch {}
+}
+
+function scheduleAuthCheckIfNeeded(allHealthy) {
+  if (allHealthy) {
+    if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
+    return;
+  }
+  if (_authCheckTimer) return;
+  const delay = 10000 + Math.random() * 5000;
+  _authCheckTimer = setTimeout(() => {
+    _authCheckTimer = null;
+    checkConnections();
+  }, delay);
 }
 
 function renderUpdateChip() {
@@ -321,6 +366,58 @@ function updateConnectionChips() {
   }, '↻');
   container.appendChild(refreshBtn);
 
+  const updateBtn = h('button', {
+    class: 'btn btn--ghost btn--sm',
+    id: 'update-btn-header',
+    style: { fontSize: '13px', padding: '2px 6px', marginLeft: '4px', lineHeight: '1' },
+    onClick: handleUpdateButtonClick
+  });
+  container.appendChild(updateBtn);
+  renderUpdateButton();
+}
+
+function renderUpdateButton() {
+  const btn = document.getElementById('update-btn-header');
+  if (!btn) return;
+  if (_pendingUpdate) {
+    btn.textContent = `⬆ v${_pendingUpdate.latest}`;
+    btn.title = 'Download the latest version and see how to install it';
+    btn.disabled = false;
+  } else {
+    btn.textContent = '⬆ Check';
+    btn.title = 'Check Google Drive for a newer version';
+    btn.disabled = false;
+  }
+}
+
+async function handleUpdateButtonClick() {
+  const btn = document.getElementById('update-btn-header');
+  if (!btn) return;
+  if (_pendingUpdate) {
+    openUpdateModal();
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '⬆ Checking…';
+  const r = await chrome.runtime.sendMessage({ action: 'CHECK_FOR_UPDATE', force: true }).catch(() => null);
+  if (!r || !r.ok) {
+    btn.textContent = '⬆ Failed';
+    btn.title = `Could not check for updates: ${(r && r.error) || 'no response'}`;
+  } else if (r.updateAvailable) {
+    _pendingUpdate = r;
+    renderUpdateButton();
+    renderUpdateChip();
+    return;
+  } else {
+    btn.textContent = '✓ Current';
+  }
+  btn.disabled = false;
+  setTimeout(() => {
+    if (!_pendingUpdate) {
+      btn.textContent = '⬆ Check';
+      btn.title = 'Check Google Drive for a newer version';
+    }
+  }, 2500);
 }
 
 function openTokenPopover(e) {

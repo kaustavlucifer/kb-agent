@@ -11,7 +11,7 @@
     .settings h1 { font-size: var(--text-xl); margin-bottom: var(--space-xl); }
     .section-title { font-size: var(--text-base); font-weight: var(--weight-semibold); color: var(--text-primary); margin: var(--space-xl) 0 var(--space-md); padding-bottom: var(--space-sm); border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; justify-content: space-between; list-style: none; }
     .section-title::-webkit-details-marker { display: none; }
-    .section-title::after { content: '▸'; font-size: var(--text-sm); color: var(--text-muted); transition: transform 0.15s; }
+    summary.section-title::after { content: '▸'; font-size: var(--text-sm); color: var(--text-muted); transition: transform 0.15s; }
     details[open] > .section-title::after { transform: rotate(90deg); }
     .field { margin-bottom: var(--space-lg); }
     .field label { display: block; font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text-secondary); margin-bottom: var(--space-sm); }
@@ -30,28 +30,26 @@
       <input type="password" id="token" class="input" placeholder="Paste gateway token…" autocomplete="off">
     </div>
 
-    <details open>
+    <details>
       <summary class="section-title">Models per action</summary>
       <div id="models"></div>
     </details>
 
-    <details open>
+    <details>
       <summary class="section-title">Thresholds &amp; tuning</summary>
       <div id="thresholds"></div>
     </details>
 
-    <details open>
-      <summary class="section-title">Guard rails</summary>
-      <div class="field">
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-          <input type="checkbox" id="bypass-guard-rails" style="width: 16px; height: 16px;">
-          <span>Bypass case guard rails (Gov/Premier/Non-Hyperforce)</span>
-        </label>
-        <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px; padding-left: 24px;">
-          When enabled, allows analysis of restricted-tier cases (Gov Cloud, EU/US Premier, US Signature, Non-Hyperforce). Use only when authorized — case content will be sent to the AI gateway.
-        </div>
+    <div class="section-title" style="cursor: default;">Guard rails</div>
+    <div class="field">
+      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+        <input type="checkbox" id="bypass-guard-rails" style="width: 16px; height: 16px;">
+        <span>Bypass case guard rails (Gov/Premier/Non-Hyperforce)</span>
+      </label>
+      <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px; padding-left: 24px;">
+        When enabled, allows analysis of restricted-tier cases (Gov Cloud, EU/US Premier, US Signature, Non-Hyperforce). Use only when authorized — case content will be sent to the AI gateway.
       </div>
-    </details>
+    </div>
     <div class="actions">
       <button class="btn btn--primary" id="save-btn">Save</button>
       <button class="btn btn--secondary" id="test-btn">Test Connection</button>
