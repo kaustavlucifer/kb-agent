@@ -175,6 +175,7 @@ body {
   margin-left: auto;
 }
 .header__cost + .header__status { margin-left: var(--space-md); }
+#update-chip:empty { display: none; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

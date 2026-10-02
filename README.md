@@ -1,4 +1,4 @@
-# KB Agent v2.2.0
+# KB Agent v2.16.0
 
 AI-powered Knowledge Base quality management for Salesforce Industry & Revenue Cloud. Chrome Extension (Manifest V3) that analyzes support cases, generates KB articles, scores existing content, and identifies duplicates — optimized for Agentforce retrieval.
 
@@ -44,6 +44,7 @@ kb-agent/
 │   └── ui.js              h(), chip(), modal(), toast(), spinner()
 ├── background/
 │   ├── service-worker.js  Message router + article preloader
+│   ├── update-check.js    Google Drive version check (mirrors Open Case Analyser)
 │   └── handlers/          Backend logic (no DOM)
 │       ├── case-analysis.js   Full analysis pipeline
 │       ├── kb-scorer.js       Scoring + rewrite streaming
@@ -89,6 +90,10 @@ The header shows connection chips for each integration:
 
 All auth is cookie-based (detected from browser sessions). No credentials are stored.
 
+## Updates
+
+On launch, the popup checks a Google Drive-hosted zip for a newer version (requires being signed in to Google with your work account — the file is domain-shared, not public). If a newer version is found, an "⬆ v{x.y.z} available" chip appears in the header; clicking it opens a modal with a download link and reinstall steps (`chrome://extensions` → remove old → Load Unpacked). The check is cached for 30 minutes and a dismissed version won't re-prompt until a newer one ships.
+
 ## AI Gateway
 
 Uses the Salesforce internal AI model gateway with Claude Sonnet 4.6. Rate limited to 48 requests per minute (shared across all operations). All AI calls support abort signals for immediate cancellation.
@@ -105,6 +110,17 @@ Uses the Salesforce internal AI model gateway with Claude Sonnet 4.6. Rate limit
 - **Refine**: Re-generate articles or sections with a specific focus instruction
 
 ## Changelog
+
+### v2.16.0 (current)
+- In-app update check against Google Drive, mirroring Open Case Analyser — header chip + modal with download link and step-by-step reinstall instructions
+- Collapsible sections (Models, Thresholds, Guard rails) on the Settings page
+
+### v2.15.0
+- Preserve links/images in article rewrites, vision-based image review
+- PII redaction gap fixed in article-update flow, cost-flush race fixed
+- Rulebook compliance alignment, draft-overwrite confirmation, guard-rail/abort fixes
+- Rich-text merge with publish/caching, dedup coverage upgrades, scoring robustness
+- See `git log` for the full per-release history between v2.2.0 and v2.15.0
 
 ### v2.2.0
 - Progressive streaming layout (case details render immediately)

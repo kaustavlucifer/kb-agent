@@ -11,6 +11,7 @@ import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js'
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
 import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handlers/article-publish.js';
 import { checkGusConnection } from './handlers/gus-enrichment.js';
+import { checkForUpdate, dismissUpdate } from './update-check.js';
 
 let _settingsReady = (async () => {
   try {
@@ -81,6 +82,8 @@ async function handleMessage(msg) {
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
     case 'CHECK_KI_CONNECTION': return checkKiConnection();
     case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
+    case 'CHECK_FOR_UPDATE': return checkForUpdate({ force: !!msg.force });
+    case 'DISMISS_UPDATE': { await dismissUpdate(String(msg.version || '')); return { ok: true }; }
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }

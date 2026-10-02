@@ -38,6 +38,7 @@ async function init() {
 
   render();
   checkConnections();
+  checkUpdate();
 
   const params = new URLSearchParams(window.location.search);
   const caseUrl = params.get('caseUrl');
@@ -141,6 +142,7 @@ function buildHeader() {
     ),
     buildTabs(),
     h('div', { class: 'header__cost', id: 'cost-chip' }),
+    h('div', { id: 'update-chip' }),
     h('div', { class: 'header__status', id: 'connection-chips' }),
     settingsBtn
   );
@@ -210,6 +212,58 @@ async function refreshConnections() {
   await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => {});
   await checkConnections();
   toast('Auth status refreshed.', 'info');
+}
+
+let _pendingUpdate = null;
+
+async function checkUpdate(force = false) {
+  const r = await chrome.runtime.sendMessage({ action: 'CHECK_FOR_UPDATE', force }).catch(() => null);
+  _pendingUpdate = r && r.ok && r.updateAvailable ? r : null;
+  renderUpdateChip();
+}
+
+function renderUpdateChip() {
+  const container = document.getElementById('update-chip');
+  if (!container) return;
+  container.textContent = '';
+  if (!_pendingUpdate) return;
+  const el = chip('pending', `⬆ v${_pendingUpdate.latest} available`, {
+    title: `You have v${_pendingUpdate.current}. Click to update.`,
+    onClick: openUpdateModal
+  });
+  el.style.cursor = 'pointer';
+  container.appendChild(el);
+}
+
+function openUpdateModal() {
+  if (!_pendingUpdate) return;
+  const content = h('div', { style: { fontSize: '13px', lineHeight: '1.6' } },
+    h('p', { style: { marginBottom: '12px' } }, `You have v${_pendingUpdate.current}. The latest is v${_pendingUpdate.latest}.`),
+    h('a', {
+      href: _pendingUpdate.downloadUrl, target: '_blank', rel: 'noopener',
+      class: 'btn btn--primary', style: { marginBottom: '16px', textDecoration: 'none' }
+    }, '⬇ Download the latest zip'),
+    h('ol', { style: { paddingLeft: '20px' } },
+      h('li', null, 'Click the button above and save the zip (you need to be signed in to Google with your work account).'),
+      h('li', null, 'Extract the zip into a new folder.'),
+      h('li', null, h('span', null, 'In Chrome, open '), h('b', null, 'chrome://extensions'), h('span', null, ', turn on '), h('b', null, 'Developer mode'), h('span', null, ' (top right) and remove the old '), h('b', null, 'KB Agent'), h('span', null, '.')),
+      h('li', null, h('span', null, 'Click '), h('b', null, 'Load unpacked'), h('span', null, ' and pick the folder you just extracted.'))
+    )
+  );
+  let ref;
+  const footer = h('div', { class: 'modal__footer' },
+    h('button', {
+      class: 'btn btn--ghost',
+      onClick: async () => {
+        await chrome.runtime.sendMessage({ action: 'DISMISS_UPDATE', version: _pendingUpdate.latest }).catch(() => {});
+        _pendingUpdate = null;
+        renderUpdateChip();
+        ref.close();
+      }
+    }, 'Dismiss until next version'),
+    h('button', { class: 'btn btn--secondary', onClick: () => ref.close() }, 'Close')
+  );
+  ref = modal(`Update available — v${_pendingUpdate.latest}`, content, { footer });
 }
 
 function updateConnectionChips() {

@@ -98,7 +98,8 @@ export const STORAGE_KEYS = {
   AUTH_CACHE: 'authCache',
   SETTINGS: 'kba_settings',
   COST_TOTALS_UI: 'kba_cost_totals_ui',
-  COST_TOTALS_SW: 'kba_cost_totals_sw'
+  COST_TOTALS_SW: 'kba_cost_totals_sw',
+  UPDATE_CHECK: 'kba_update_check'
 };
 
 export const MODEL_CHOICES = [
