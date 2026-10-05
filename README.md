@@ -128,7 +128,10 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.22.1 (current)
+### v2.22.2 (current)
+- Fixed a syntax error in `shared/config.js` (unescaped apostrophe in a settings help string) that stopped the service worker from registering in v2.22.1
+
+### v2.22.1
 - Gateway retry: transient errors (408/429/5xx/529) retry up to 3x, honoring `Retry-After`, then the gateway's "Limit resets at" time, then exponential backoff (capped at 30s); abort cancels the wait
 - Client rate limit now sized to 90% of your key's `rpm_limit` from the gateway's `/key/info` (fallback 48/min), shared across popup and service worker
 - New [SF_CLAUDE_API.md](SF_CLAUDE_API.md): internal gateway reference — auth, endpoints, model discovery, temperature caveats, costs, and rate limits
