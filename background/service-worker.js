@@ -13,7 +13,7 @@ import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handl
 import { checkGusConnection } from './handlers/gus-enrichment.js';
 import { checkForUpdate, dismissUpdate } from './update-check.js';
 import { auditSignatures, mergeAuditReports } from './signature-audit.js';
-import { generateKiRewrite, createKnownIssue, updateKnownIssue, loadAllKnownIssues, searchKnownIssuesUnscoped, fetchKnownIssueDetail, scoreKnownIssue } from './handlers/ki-publish.js';
+import { prepareKiRewrite, logKiSignature, createKnownIssue, updateKnownIssue, loadAllKnownIssues, searchKnownIssuesUnscoped, fetchKnownIssueDetail } from './handlers/ki-publish.js';
 
 let _settingsReady = (async () => {
   try {
@@ -86,13 +86,13 @@ async function handleMessage(msg) {
     case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
     case 'CHECK_FOR_UPDATE': return checkForUpdate({ force: !!msg.force });
     case 'DISMISS_UPDATE': { await dismissUpdate(String(msg.version || '')); return { ok: true }; }
-    case 'GENERATE_KI_REWRITE': return generateKiRewrite(msg.kiId, { instructions: msg.instructions || '', current: msg.current || null });
     case 'CREATE_KNOWN_ISSUE': return createKnownIssue(msg.payload);
     case 'UPDATE_KNOWN_ISSUE': return updateKnownIssue(msg.payload);
     case 'LOAD_ALL_KNOWN_ISSUES': return loadAllKnownIssues({ forceLive: !!msg.forceLive });
     case 'SEARCH_KI_UNSCOPED': return searchKnownIssuesUnscoped(msg.query);
     case 'FETCH_KI_DETAIL': return fetchKnownIssueDetail(msg.id);
-    case 'SCORE_KNOWN_ISSUE': return scoreKnownIssue(msg.kiId);
+    case 'PREPARE_KI_REWRITE': return prepareKiRewrite(msg.kiId);
+    case 'LOG_KI_SIGNATURE': return logKiSignature(msg.kind, msg.kiId);
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }

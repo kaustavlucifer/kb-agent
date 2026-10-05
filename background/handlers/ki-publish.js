@@ -1,38 +1,15 @@
 import { sfPost, sfPatch, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtmlKeepLinks } from '../../shared/api.js';
 import { detectKiSession } from '../../shared/auth.js';
-import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, KI_BASE } from '../../shared/config.js';
+import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL, KI_BASE } from '../../shared/config.js';
 import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { redactPii } from '../../shared/pii.js';
+import { KI_PII_OPTS, KI_SYSTEM_PROMPT } from '../../shared/ki-prompts.js';
 import { markdownToHtml } from '../../shared/markdown.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { logSignature } from '../../shared/signature.js';
 import { localGet, localSet } from '../../shared/storage.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { KI_CLOUD_MAPPING, KI_CATEGORIES } from '../../data/ki_mapping.js';
-
-const KI_PII_OPTS = { maskIds: true };
-
-const KI_SYSTEM_PROMPT = `You are drafting a Salesforce Known Issue (KI) record. Known Issues are PUBLIC-FACING — they publish directly to help.salesforce.com/s/issues. Write as a formal technical writer:
-- Do NOT include customer names, employee names, backup IDs, org IDs, or any other customer-identifying detail
-- If a 15 or 18 character Salesforce record ID must be mentioned, keep only the first 3 characters and replace the rest with X
-- Do NOT include internal infrastructure details, internal build/version codes, or internal-only URLs
-- Use clear, easy-to-understand, formal language — no ALL-CAPS, use correct product/feature names
-- Output EXACTLY these 4 fields:
-  subject: title description of the issue
-  summary: one paragraph max — what customers experience and where in the product
-  repro: numbered steps to reproduce
-  workaround: numbered steps, or exactly "There is no workaround at this time" if none is known
-Return JSON: {"subject":"...","summary":"...","repro":"...","workaround":"..."}`;
-
-const KI_SCORING_SYSTEM_PROMPT = `You are a strict reviewer of Salesforce Known Issue (KI) records. KIs are PUBLIC-FACING — they publish directly to help.salesforce.com/s/issues. Score this KI on these criteria, each out of the given max, summing to 100:
-
-- subject (20): clear, specific, correct product/feature names, not ALL-CAPS, no customer-specific or internal detail
-- summary (20): one paragraph max, states what customers experience and where in the product, no customer-specific or internal detail
-- repro (25): clear numbered steps to reproduce the issue
-- workaround (25): clear numbered workaround steps, or explicitly states "There is no workaround at this time" if none
-- safety (10): no customer names, employee names, internal IDs/build codes, or internal URLs leaked; any 15/18-character Salesforce ID is properly masked (first 3 characters kept, rest replaced with X)
-
-Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"subject","label":"Subject","score":<n>,"max":20,"passed":["..."],"issues":["..."]},{"id":"summary","label":"Summary","score":<n>,"max":20,"passed":["..."],"issues":["..."]},{"id":"repro","label":"Repro Steps","score":<n>,"max":25,"passed":["..."],"issues":["..."]},{"id":"workaround","label":"Workaround","score":<n>,"max":25,"passed":["..."],"issues":["..."]},{"id":"safety","label":"PII/Redaction Safety","score":<n>,"max":10,"passed":["..."],"issues":["..."]}]}`;
 
 export function resolveKiCloud(casePt) {
   if (!casePt) return null;
@@ -64,26 +41,6 @@ ${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${chatterNotes ? `\nRelated
       temperature: 0.2,
       model: SCORING_MODEL,
       signal
-    });
-    return extractJson(extractText(resp));
-  } catch {
-    return null;
-  }
-}
-
-async function rewriteKiAi(existing, chatterNotes, instructions) {
-  const user = `EXISTING KNOWN ISSUE:
-Subject: ${redactPii(existing.subject || '', KI_PII_OPTS)}
-Summary: ${redactPii(existing.summary || '', KI_PII_OPTS)}
-Repro: ${redactPii(existing.repro || '', KI_PII_OPTS)}
-Workaround: ${redactPii(existing.workaround || '', KI_PII_OPTS)}${chatterNotes ? `\n\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this KI, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${redactPii(chatterNotes, KI_PII_OPTS)}` : ''}${instructions ? `\n\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rule above): ${redactPii(instructions, KI_PII_OPTS)}` : ''}`;
-  try {
-    const resp = await callClaude({
-      system: `${KI_SYSTEM_PROMPT}\nYou are REVISING an existing Known Issue — preserve accurate technical content, improve clarity, fix any customer-identifying leaks, and fill in Repro/Workaround if missing or weak.`,
-      messages: [{ role: 'user', content: user }],
-      maxTokens: 3000,
-      temperature: 0.2,
-      model: SCORING_MODEL
     });
     return extractJson(extractText(resp));
   } catch {
@@ -143,8 +100,7 @@ export async function fetchKnownIssueDetail(id, session) {
   }
 }
 
-export async function generateKiRewrite(kiId, { instructions = '', current = null } = {}) {
-  const session = await detectKiSession();
+async function loadKiRewriteContext(kiId, session) {
   const detail = await fetchKnownIssueDetail(kiId, session);
   if (!detail.success) return detail;
 
@@ -161,52 +117,31 @@ export async function generateKiRewrite(kiId, { instructions = '', current = nul
 
   const pendingDraft = detail.ki.draft;
   const basedOnDraft = !!(pendingDraft && (pendingDraft.subject || pendingDraft.summary || pendingDraft.repro || pendingDraft.workaround));
-  const rewriteBasis = current || (basedOnDraft
+  const basis = basedOnDraft
     ? {
       subject: pendingDraft.subject || detail.ki.subject,
       summary: pendingDraft.summary || detail.ki.summary,
       repro: pendingDraft.repro || detail.ki.repro,
       workaround: pendingDraft.workaround || detail.ki.workaround
     }
-    : detail.ki);
+    : { subject: detail.ki.subject, summary: detail.ki.summary, repro: detail.ki.repro, workaround: detail.ki.workaround };
 
-  const draft = await rewriteKiAi(rewriteBasis, chatterNotes, instructions.trim().slice(0, 2000));
-  if (!draft) return { success: false, error: 'Could not generate a rewrite for this KI.' };
-  if (session.sid) logSignature('ki-rewrite-generated', session.apiBase, session.sid, detail.ki.id);
-  const result = { success: true, draft, original: rewriteBasis };
-  if (basedOnDraft && !current) result.basedOnDraft = true;
-  if (chatterError) result.chatterError = chatterError;
-  return result;
+  return { success: true, ki: detail.ki, basis, basedOnDraft, chatterNotes, chatterError };
 }
 
-export async function scoreKnownIssue(kiId) {
+export async function prepareKiRewrite(kiId) {
   const session = await detectKiSession();
-  const detail = await fetchKnownIssueDetail(kiId, session);
-  if (!detail.success) return { success: false, error: detail.error };
+  const ctx = await loadKiRewriteContext(kiId, session);
+  if (!ctx.success) return ctx;
+  const { ki, ...rest } = ctx;
+  return { ...rest, live: { subject: ki.subject, summary: ki.summary, repro: ki.repro, workaround: ki.workaround } };
+}
 
-  const ki = detail.ki;
-  const content = `Subject: ${redactPii(ki.subject || '', KI_PII_OPTS)}\nSummary: ${redactPii(ki.summary || '', KI_PII_OPTS)}\nRepro: ${redactPii(ki.repro || '', KI_PII_OPTS)}\nWorkaround: ${redactPii(ki.workaround || '', KI_PII_OPTS)}`;
-  try {
-    let parsed = null;
-    let truncated = false;
-    for (const maxTokens of [SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS]) {
-      const resp = await callClaude({
-        system: KI_SCORING_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content }],
-        maxTokens,
-        temperature: 0.1,
-        model: SCORING_MODEL
-      });
-      truncated = resp.stop_reason === 'max_tokens';
-      parsed = extractJson(extractText(resp));
-      if (parsed?.overall != null) break;
-    }
-    if (parsed?.overall == null) return { success: false, error: truncated ? 'Score response was cut off by the token limit even after retry.' : 'Could not parse score.' };
-    if (session.sid) logSignature('ki-scored', session.apiBase, session.sid, kiId);
-    return { success: true, score: parsed };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
+export async function logKiSignature(kind, kiId) {
+  if (!['ki-rewrite-generated', 'ki-scored'].includes(kind)) return { ok: false };
+  const session = await detectKiSession();
+  if (session.sid) logSignature(kind, session.apiBase, session.sid, kiId);
+  return { ok: true };
 }
 
 const kiCategoryIdCache = new Map();

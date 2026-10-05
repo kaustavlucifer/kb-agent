@@ -103,7 +103,8 @@ export const STORAGE_KEYS = {
   COST_TOTALS_SW: 'kba_cost_totals_sw',
   UPDATE_CHECK: 'kba_update_check',
   ALL_KNOWN_ISSUES: 'kba_all_known_issues',
-  ALL_KNOWN_ISSUES_AT: 'kba_all_known_issues_at'
+  ALL_KNOWN_ISSUES_AT: 'kba_all_known_issues_at',
+  KI_WORK: 'kba_ki_work'
 };
 
 export const MODEL_CHOICES = [

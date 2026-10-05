@@ -128,7 +128,15 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.22.2 (current)
+### v2.23.0 (current)
+- KI rewrite now scores first: if the KI already meets the good-enough threshold you get an "Already high quality" prompt with "Rewrite anyway"; otherwise it rewrites automatically and scores the result
+- KI rewrite and scoring stream from the popup (like KB), with a live section-by-section preview
+- KI rewrite modal matches KB: Compare / Regenerate / Update KI in the header, score badges (current and new), Close-only footer; Compare and score details open inline
+- KI score, rewrite, rewrite score, and edits persist across closing/reopening the modal and popup reloads (until regenerated/rescored); jobs keep running when the modal is closed
+- KI table: sortable Score column that updates as soon as a KI is scored; Rewrite shows "Rewriting…" / "Rewrite •" status
+- KI prompts consolidated in `shared/ki-prompts.js` (shared by popup and service worker)
+
+### v2.22.2
 - Fixed a syntax error in `shared/config.js` (unescaped apostrophe in a settings help string) that stopped the service worker from registering in v2.22.1
 
 ### v2.22.1

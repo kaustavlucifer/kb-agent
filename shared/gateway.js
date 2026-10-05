@@ -253,6 +253,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   let buffer = '';
   let fullText = '';
   let streamModel = m;
+  let stopReason = null;
   const streamUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   let idleTimer = setTimeout(() => { idleAborted = true; controller.abort(); }, STREAM_IDLE_TIMEOUT_MS);
 
@@ -282,8 +283,9 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
             streamUsage.inputTokens = u.input_tokens || 0;
             streamUsage.cacheReadTokens = u.cache_read_input_tokens || 0;
             streamUsage.cacheCreationTokens = u.cache_creation_input_tokens || 0;
-          } else if (event.type === 'message_delta' && event.usage) {
-            streamUsage.outputTokens = event.usage.output_tokens || streamUsage.outputTokens;
+          } else if (event.type === 'message_delta') {
+            if (event.usage) streamUsage.outputTokens = event.usage.output_tokens || streamUsage.outputTokens;
+            if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
           }
         } catch {}
       }
@@ -307,7 +309,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   }
 
   await recordUsage(streamModel, streamUsage);
-  if (onDone) onDone(fullText);
+  if (onDone) onDone(fullText, { stopReason });
   return fullText;
 }
 
