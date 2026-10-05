@@ -27,12 +27,21 @@ export function resolveKiCloud(casePt) {
   return bestCloud;
 }
 
-export async function generateKiDraftContent(caseRecord, comments, chatterNotes, signal) {
+function publicWorkSubject(subject) {
+  return String(subject || '')
+    .replace(/^(?:\s*\[[^\]]*\])+\s*/, '')
+    .replace(/^(?:[A-Za-z]+\s*-\s*)?\d{8,9}\s*-\s*[^-]+?\s+-\s*/, '')
+    .replace(/^-\s*/, '')
+    .trim();
+}
+
+export async function generateKiDraftContent(caseRecord, comments, chatterNotes, signal, gusItems = []) {
   const commentText = comments.slice(0, 8).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n');
+  const gusText = gusItems.slice(0, 3).map(g => `${g.recordType || 'Work'}: ${publicWorkSubject(g.subject)} (${g.status || ''})${(g.linkedBugs || []).map(b => `; follow-up ${b.recordType}: ${publicWorkSubject(b.subject)} (${b.status || ''})`).join('')}`).join('\n');
   const user = `Case Subject: ${redactPii(caseRecord.Subject || '', KI_PII_OPTS)}
 Description: ${redactPii((caseRecord.Description || '').slice(0, 2000), KI_PII_OPTS)}
 Comments:
-${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${chatterNotes ? `\nRelated Chatter notes:\n${redactPii(chatterNotes, KI_PII_OPTS)}` : ''}`;
+${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${gusText ? `\nLinked engineering work:\n${redactPii(gusText, KI_PII_OPTS)}` : ''}${chatterNotes ? `\nRelated Chatter notes:\n${redactPii(chatterNotes, KI_PII_OPTS)}` : ''}`;
   try {
     const resp = await callClaude({
       system: KI_SYSTEM_PROMPT,

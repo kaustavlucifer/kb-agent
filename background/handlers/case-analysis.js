@@ -102,8 +102,13 @@ export async function handleAnalyze(port, msg) {
   const completeness = computeCompleteness(caseRecord, comments);
   send({ type: 'meta', caseCompleteness: completeness });
 
-  const gusWorkNames = extractWorkItemNames(comments);
-  const gusPromise = gusWorkNames.length ? fetchGusWorkItems(gusWorkNames, signal) : Promise.resolve({ items: [], feed: [], error: null });
+  const gusPromise = fetchCaseLinkedWorkNames(session, caseRecord.Id, signal).then(async (linkedNames) => {
+    const gusWorkNames = [...new Set([...linkedNames, ...extractWorkItemNames(comments)])];
+    if (!gusWorkNames.length) return { items: [], feed: [], error: null };
+    const data = await fetchGusWorkItems(gusWorkNames, signal);
+    for (const item of data.items) item.caseLinked = linkedNames.includes(item.name);
+    return data;
+  });
 
   send({ type: 'progress', step: 2, label: 'Analyzing case (parallel)' });
   const [intentsResult, caseAbstract, gusData, structuredResolution] = await Promise.all([
@@ -440,9 +445,19 @@ Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null"
   }
 }
 
+async function fetchCaseLinkedWorkNames(session, caseId, signal) {
+  try {
+    const records = await sfQuery(session.apiBase, session.sid, `SELECT GUS_Work__r.Name FROM Case_Relationship__c WHERE Case__c = '${sanitizeId(caseId)}' ORDER BY CreatedDate ASC`, signal);
+    return records.map(r => r.GUS_Work__r?.Name).filter(n => /^W-\d{4,9}$/.test(n || ''));
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return [];
+  }
+}
+
 async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
   const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
-  const gusContext = redactPii((gusData.items || []).slice(0, 3).map(g => `${g.name}: ${g.subject || ''} (${g.status || ''})`).join('\n'));
+  const gusContext = redactPii((gusData.items || []).slice(0, 3).map(g => `${g.name} [${g.recordType || 'Work'}]: ${g.subject || ''} (${g.status || ''})${(g.linkedBugs || []).length ? ` → follow-up ${g.linkedBugs.map(b => `${b.name} [${b.recordType}] (${b.status || ''})`).join(', ')}` : ''}`).join('\n'));
   const gusFeedText = redactPii((gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n'));
 
   try {
@@ -1001,15 +1016,16 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
     const first = gusItems[0];
     return { action: 'NONE', reason: `Linked GUS work item ${first.name} is ${first.recordType && !['Bug', 'Investigation'].includes(first.recordType) ? `a ${first.recordType}` : `marked "${first.status}"`} — not a product defect.` };
   }
-  if (abstract?.issueType !== 'PRODUCT_DEFECT') {
+  if (abstract?.issueType !== 'PRODUCT_DEFECT' && !defectItems.some(g => g.caseLinked)) {
     return { action: 'NONE', reason: abstract?.issueType === 'CONFIGURATION_OR_HOWTO'
       ? 'Configuration or how-to issue — a KB article is the right vehicle, not a Known Issue.'
       : 'Case was not classified as a product defect — no Known Issue suggested.' };
   }
-  const draft = await generateKiDraftContent(caseRecord, comments, '', signal);
+  const draft = await generateKiDraftContent(caseRecord, comments, '', signal, defectItems);
   if (!draft) return { action: 'NONE', reason: 'Could not determine a Known Issue draft.' };
   const primary = defectItems.find(g => g.recordType !== 'Investigation') || defectItems[0];
-  const linkedBug = (primary.linkedBugs || []).find(b => workItemDefectState(b) === 'defect');
+  const linkedBug = (primary.linkedBugs || []).find(b => b.recordType === 'Bug' && workItemDefectState(b) === 'defect')
+    || (primary.linkedBugs || []).find(b => b.recordType === 'User Story' && !NOT_A_DEFECT_STATUS_RE.test(b.status || ''));
   return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: linkedBug?.name || primary.name };
 }
 

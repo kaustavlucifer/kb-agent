@@ -86,8 +86,8 @@ export async function fetchGusWorkItems(workNames, signal) {
         for (const inv of investigations) {
           inv.linkedBugs = links
             .map(l => l.Parent_Work__c === inv.id ? l.Child_Work__r : l.Child_Work__c === inv.id ? l.Parent_Work__r : null)
-            .filter(w => w?.RecordType?.Name === 'Bug')
-            .map(w => ({ name: w.Name, status: w.Status__c || null, subject: w.Subject__c || null, recordType: 'Bug' }));
+            .filter(w => ['Bug', 'User Story'].includes(w?.RecordType?.Name))
+            .map(w => ({ name: w.Name, status: w.Status__c || null, subject: w.Subject__c || null, recordType: w.RecordType.Name }));
         }
       } catch (e) {
         firstError = firstError || e.message;

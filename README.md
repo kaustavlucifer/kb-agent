@@ -128,7 +128,14 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.24.0 (current)
+### v2.24.1 (current)
+- Case analysis now reads the case's GUS links from OrgCS `Case_Relationship__c` (Case GUS Relationship) in addition to W-numbers in comments; previously cases linked only via that object got no GUS context and no KI suggestion
+- GUS context (record type, status, follow-up work) is passed to the case summary, KB coverage evaluation, KI decision, and KI draft prompts
+- A defect linked through Case GUS Relationship qualifies for a KI even if the AI issue-type classification disagrees
+- "New Bug Logged" investigations whose bug was converted to a User Story use that story as the KI Work ID (a linked Bug is still preferred)
+- GUS subjects have their customer prefix (e.g. "Premier - <case#> - <account> -") stripped before reaching the public KI draft prompt
+
+### v2.24.0
 - Fixed `MALFORMED_QUERY: FeedItem requires a filter by Id` in case analysis and KB scoring/rewrite: article Chatter now reads `Knowledge__Feed` via the master `KnowledgeArticleId`
 - Case analysis article drafts/rewrites no longer show raw HTML tags: prompts require Markdown (shared `MARKDOWN_OUTPUT_RULE`), and any stray HTML is converted to Markdown before display and Refine
 - KB vs KI vs no-action decision tightened:
