@@ -1,4 +1,4 @@
-import { detectSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
+import { detectSession, detectKiSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
@@ -12,6 +12,8 @@ import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
 import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handlers/article-publish.js';
 import { checkGusConnection } from './handlers/gus-enrichment.js';
 import { checkForUpdate, dismissUpdate } from './update-check.js';
+import { auditSignatures, mergeAuditReports } from './signature-audit.js';
+import { generateKiRewrite, createKnownIssue, updateKnownIssue, loadAllKnownIssues, searchKnownIssuesUnscoped, fetchKnownIssueDetail, scoreKnownIssue } from './handlers/ki-publish.js';
 
 let _settingsReady = (async () => {
   try {
@@ -84,6 +86,13 @@ async function handleMessage(msg) {
     case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
     case 'CHECK_FOR_UPDATE': return checkForUpdate({ force: !!msg.force });
     case 'DISMISS_UPDATE': { await dismissUpdate(String(msg.version || '')); return { ok: true }; }
+    case 'GENERATE_KI_REWRITE': return generateKiRewrite(msg.kiId);
+    case 'CREATE_KNOWN_ISSUE': return createKnownIssue(msg.payload);
+    case 'UPDATE_KNOWN_ISSUE': return updateKnownIssue(msg.payload);
+    case 'LOAD_ALL_KNOWN_ISSUES': return loadAllKnownIssues({ forceLive: !!msg.forceLive });
+    case 'SEARCH_KI_UNSCOPED': return searchKnownIssuesUnscoped(msg.query);
+    case 'FETCH_KI_DETAIL': return fetchKnownIssueDetail(msg.id);
+    case 'SCORE_KNOWN_ISSUE': return scoreKnownIssue(msg.kiId);
     default: return { error: `Unknown action: ${msg.action}` };
   }
 }
@@ -281,7 +290,33 @@ function handlePort(port) {
         else if (msg.action === 'GENERATE_NEW_ARTICLE') wrap(handleGenerateNew)(msg);
       });
       break;
+    case 'kba-audit':
+      port.onMessage.addListener((msg) => {
+        if (msg.action === 'RUN_AUDIT') wrap(handleAudit)(msg);
+      });
+      break;
   }
+}
+
+async function handleAudit(port, msg) {
+  const [orgcsSession, kiSession] = await Promise.all([detectSession(), detectKiSession()]);
+  const sources = [orgcsSession, kiSession].filter(s => s.sid);
+  if (!sources.length) { port.postMessage({ type: 'error', error: 'No Salesforce session.' }); return; }
+
+  const reports = [];
+  for (let i = 0; i < sources.length; i++) {
+    const session = sources[i];
+    const report = await auditSignatures(session.apiBase, session.sid, {
+      monthsBack: msg.monthsBack || 3,
+      onProgress: (done, total) => {
+        try { port.postMessage({ type: 'progress', done: i * total + done, total: sources.length * total }); } catch {}
+      }
+    });
+    reports.push(report);
+  }
+
+  const report = reports.length === 2 ? mergeAuditReports(reports[0], reports[1]) : reports[0];
+  port.postMessage({ type: 'done', report });
 }
 
 

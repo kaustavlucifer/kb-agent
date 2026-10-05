@@ -393,14 +393,15 @@ export function editableRichField({ label, getValue, setValue, plain = false, si
 }
 
 export function sectionsEditor({ getCachedText, setCachedText, fields, deriveDefaults }) {
+  const fieldNames = fields.map(f => f.field);
   function currentSections(key) {
-    const parsed = parseRewriteSections(getCachedText(key) || '');
+    const parsed = parseRewriteSections(getCachedText(key) || '', fieldNames);
     return deriveDefaults ? deriveDefaults(key, parsed) : parsed;
   }
   function commitSection(key, field, value) {
     const sections = currentSections(key);
     sections[field] = value.trim();
-    setCachedText(key, serializeRewriteSections(sections));
+    setCachedText(key, serializeRewriteSections(sections, fieldNames));
   }
   function renderSection(key, field, label, opts = {}) {
     return editableRichField({
@@ -408,7 +409,7 @@ export function sectionsEditor({ getCachedText, setCachedText, fields, deriveDef
       getValue: () => currentSections(key)[field] || '',
       setValue: (v) => commitSection(key, field, v),
       plain: !!opts.plain,
-      singleLine: field === 'title',
+      singleLine: opts.singleLine ?? field === 'title',
       rows: opts.rows || 2
     });
   }

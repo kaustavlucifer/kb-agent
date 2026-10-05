@@ -1,4 +1,5 @@
 import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField } from '../shared/ui.js';
+import { openKiDraftModal } from './ki-manager.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
@@ -759,6 +760,9 @@ function renderResult() {
     ));
   }
 
+  const kiSuggestion = getState('case.kiSuggestion');
+  if (kiSuggestion) main.appendChild(renderKiSuggestionCard(kiSuggestion, result));
+
   if (structured.suggestions?.length) {
     for (const sug of structured.suggestions) {
       if (sug.isFullRewrite) {
@@ -876,6 +880,53 @@ function renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstra
     ) : null
   );
   return card;
+}
+
+function renderKiSuggestionCard(kiSuggestion, result) {
+  if (kiSuggestion.action === 'EXISTING_COVERS') {
+    const ki = kiSuggestion.existingKi || {};
+    return h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 16px', border: '1px solid var(--success)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--success) 6%, transparent)' } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--success)' } }, 'Known Issue'),
+        h('span', { class: 'pill pill--success', style: { fontSize: '10px' } }, 'Already Tracked')
+      ),
+      h('p', { style: { fontSize: '11px', color: 'var(--text-secondary)', margin: '4px 0 0 0' } },
+        'Covered by ',
+        h('a', { href: ki.url, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)' } }, `${ki.name}${ki.subject ? ` — ${ki.subject}` : ''}`),
+        '.'
+      )
+    );
+  }
+
+  if (kiSuggestion.action === 'DRAFT_NEW') {
+    return h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 16px', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', background: 'color-mix(in srgb, var(--warning) 6%, transparent)' } },
+      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--warning)' } }, 'Known Issue'),
+          h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, 'Not Yet Tracked'),
+          kiSuggestion.workId ? h('span', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `(${kiSuggestion.workId})`) : null
+        ),
+        h('button', {
+          class: 'btn btn--primary btn--sm',
+          onClick: () => openKiDraftModal({
+            draft: kiSuggestion.draft,
+            cloud: kiSuggestion.cloud,
+            caseNumber: result.caseNumber,
+            workId: kiSuggestion.workId
+          })
+        }, 'Draft Known Issue')
+      ),
+      h('p', { style: { fontSize: '11px', color: 'var(--text-secondary)', margin: '6px 0 0 0' } }, 'This case looks like a reproducible defect tied to a GUS work item, with no matching Known Issue yet.')
+    );
+  }
+
+  return h('div', { class: 'card', style: { marginBottom: '12px', padding: '10px 16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+      h('span', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)' } }, 'Known Issue'),
+      h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'Not a Candidate')
+    ),
+    h('p', { style: { fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0 0' } }, kiSuggestion.reason || 'No Known Issue suggested for this case.')
+  );
 }
 
 function renderProductDocGapCard(prodDocGap) {
@@ -1760,6 +1811,7 @@ function startAnalysis(caseId, isRetry = false) {
   setState('case.detectedPts', null);
   setState('case.caseAbstract', null);
   setState('case.knownIssues', null);
+  setState('case.kiSuggestion', null);
   setState('case.publishedUrl', null);
   setState('case.draftScores', null);
   setState('case.scoringInProgress', null);
@@ -1830,6 +1882,7 @@ function onPortMessage(msg) {
       if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
       if (msg.ptWarning) setState('case.ptWarning', msg.ptWarning);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
+      if (msg.kiSuggestion) setState('case.kiSuggestion', msg.kiSuggestion);
       if (msg.scoringInProgress) {
         setState('case.scoringInProgress', msg.scoringInProgress);
         if (getState('case.view') === 'result') deferredRenderByView();

@@ -1,11 +1,12 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statsBar, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
+import { logSignature } from '../shared/signature.js';
 import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { parseRewriteSections, markdownToHtml } from '../shared/markdown.js';
@@ -24,6 +25,9 @@ let _page = 0;
 const _pageSize = 50;
 let _agfHits = null;
 let _searchDebounce = null;
+let _crossScope = false;
+let _crossResults = [];
+let _crossLoading = false;
 
 const rewriteSectionsEditor = sectionsEditor({
   getCachedText: (article) => _rewriteCache[article.id] || '',
@@ -215,19 +219,14 @@ function render() {
   const scores = getState('kb.scores') || {};
   const scoring = getState('kb.scoring');
   const filtered = getFilteredArticles();
+  const crossMode = _crossScope && _filterText.trim().length >= 2;
+  const activeList = crossMode ? _crossResults : filtered;
 
   const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
   const ptOptions = uniqueSortedValues(articles, 'topicName');
   const filteredScored = filtered.filter(a => scores[a.id]?.overall != null);
   const filteredAvg = filteredScored.length ? Math.round(filteredScored.reduce((s, a) => s + scores[a.id].overall, 0) / filteredScored.length) : null;
-
-  stickySection.appendChild(statsBar([
-    { value: filtered.length, label: filtered.length !== articles.length ? `of ${articles.length} Articles` : 'Articles' },
-    { value: `${filteredScored.length}/${filtered.length}`, label: 'Scored', color: 'var(--primary)' },
-    filteredAvg != null ? { value: filteredAvg, label: 'Avg Score', color: filteredAvg >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : filteredAvg >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } : null,
-    filteredScored.length ? { value: filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length, label: 'Below 60', color: 'var(--error)' } : null
-  ]));
 
   const validationOptions = uniqueSortedValues(articles, 'validationStatus');
 
@@ -236,11 +235,27 @@ function render() {
     _filterText = e.target.value;
     _page = 0;
     clearTimeout(_searchDebounce);
-    _searchDebounce = setTimeout(render, 200);
+    if (_crossScope) _searchDebounce = setTimeout(() => runCrossSearch(_filterText), 300);
+    else _searchDebounce = setTimeout(render, 200);
   });
   if (_searchFocused) {
     setTimeout(() => { const el = document.getElementById('kb-filter'); if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; } }, 0);
   }
+
+  const crossScopeCheckbox = h('input', { type: 'checkbox' });
+  crossScopeCheckbox.checked = _crossScope;
+  crossScopeCheckbox.addEventListener('change', e => {
+    _crossScope = e.target.checked;
+    _page = 0;
+    if (_crossScope) {
+      if (_filterText.trim().length >= 2) runCrossSearch(_filterText);
+      else render();
+    } else {
+      _crossResults = [];
+      render();
+    }
+  });
+  const crossScopeLabel = h('label', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap' }, title: 'Search ALL clouds/products, not just the ones loaded by default — use this to find and score/rewrite an article outside the usual scope.' }, crossScopeCheckbox, 'Search all clouds');
 
   const cloudMulti = multiSelect('kb-cloud-filter', 'Cloud',
     CLOUDS.map(c => ({ value: c, label: c })),
@@ -280,10 +295,10 @@ function render() {
 
   const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: loading }, 'Refresh');
   refreshBtn.addEventListener('click', () => loadArticles(true));
-  const totalPages = Math.ceil(filtered.length / _pageSize) || 1;
+  const totalPages = Math.ceil(activeList.length / _pageSize) || 1;
   if (_page >= totalPages) _page = Math.max(0, totalPages - 1);
   const pageStart = _page * _pageSize;
-  const pageItemsForCount = filtered.slice(pageStart, pageStart + _pageSize);
+  const pageItemsForCount = activeList.slice(pageStart, pageStart + _pageSize);
   const unscoredPageItems = pageItemsForCount.filter(a => scores[a.id]?.overall == null);
   const unscoredOnPage = unscoredPageItems.length;
   const scoreBtnLabel = scoring ? 'Scoring…' : `Score Page (${unscoredOnPage})`;
@@ -300,6 +315,7 @@ function render() {
 
   const filtersRow = h('div', { class: 'tab-toolbar' },
     searchInput,
+    crossScopeLabel,
     cloudMulti,
     ptMulti,
     scoreMulti,
@@ -312,6 +328,14 @@ function render() {
     )
   );
   stickySection.appendChild(filtersRow);
+
+  if (!_crossScope) {
+    const avgPart = filteredAvg != null ? ` · Avg Score ${filteredAvg}` : '';
+    const belowPart = filteredScored.length ? ` · ${filteredScored.filter(a => scores[a.id].overall < SCORE_MID_THRESHOLD).length} Below 60` : '';
+    stickySection.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', margin: '8px 0 0' } },
+      `${filtered.length !== articles.length ? `${filtered.length} of ${articles.length}` : `${articles.length}`} Articles · ${filteredScored.length}/${filtered.length} Scored${avgPart}${belowPart}`
+    ));
+  }
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
@@ -332,6 +356,12 @@ function render() {
             ? [spinner('sm'), h('span', null, `Scoring now: ${activeNumbers.join(', ')}`)]
             : []))
     ));
+  }
+
+  if (crossMode && _crossLoading) {
+    scrollSection.appendChild(h('div', { style: { padding: '48px 24px', textAlign: 'center' } }, spinner('lg'),
+      h('div', { style: { fontSize: '12px', color: 'var(--text-muted)', marginTop: '12px' } }, 'Searching all clouds…')));
+    return;
   }
 
   if (loading) {
@@ -374,7 +404,7 @@ function render() {
 
   const tbody = table.querySelector('tbody');
   const pageEnd = pageStart + _pageSize;
-  const pageItems = filtered.slice(pageStart, pageEnd);
+  const pageItems = activeList.slice(pageStart, pageEnd);
   const scoringIds = getState('kb.scoringIds') || [];
   pageItems.forEach(a => {
     const scoreData = scores[a.id];
@@ -434,9 +464,10 @@ function render() {
   const paginationRow = h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
     totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev') : null,
     h('span', { style: { color: 'var(--text-secondary)' } },
-      totalPages > 1
-        ? `Showing ${pageStart + 1}–${pageStart + pageItems.length} of ${filtered.length} articles (Page ${_page + 1}/${totalPages})`
-        : `${filtered.length} articles`
+      (crossMode ? 'Live search across all clouds — ' : '') +
+      (totalPages > 1
+        ? `Showing ${pageStart + 1}–${pageStart + pageItems.length} of ${activeList.length} articles (Page ${_page + 1}/${totalPages})`
+        : `${activeList.length} articles`)
     ),
     totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPages - 1, onClick: () => { _page++; render(); } }, 'Next →') : null
   );
@@ -478,6 +509,23 @@ function showScoreDetail(article, scoreData) {
   body.appendChild(criteriaTable);
 
   ({ close } = modal(`Score: ${article.articleNumber}`, body, { wide: true }));
+}
+
+async function runCrossSearch(query) {
+  if (!query || query.trim().length < 2) { _crossResults = []; render(); return; }
+  _crossLoading = true;
+  render();
+  try {
+    const session = await detectSession();
+    if (!session.sid) { toast('No SF session.', 'error'); _crossResults = []; return; }
+    _crossResults = await searchArticlesUnscoped(query.trim(), session);
+  } catch (e) {
+    toast('Search failed: ' + e.message, 'error');
+    _crossResults = [];
+  } finally {
+    _crossLoading = false;
+    render();
+  }
 }
 
 async function loadArticles(forceLive = false) {
@@ -555,7 +603,8 @@ function getFilteredArticles() {
 }
 
 async function scoreAll() {
-  const filtered = getFilteredArticles();
+  const crossMode = _crossScope && _filterText.trim().length >= 2;
+  const filtered = crossMode ? _crossResults : getFilteredArticles();
   const pageStart = _page * _pageSize;
   const pageEnd = pageStart + _pageSize;
   const pageArticles = filtered.slice(pageStart, pageEnd);
@@ -568,6 +617,7 @@ async function scoreAll() {
   if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
 
   const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
+  const chatterMap = await fetchArticleChatterBatch(toScore.map(a => a.id), session);
   setState('kb.scoring', { done: 0, total: toScore.length });
   const batchResults = {};
   const inFlight = new Set();
@@ -576,13 +626,14 @@ async function scoreAll() {
     batchResults[id] = result;
     const cur = getState('kb.scores') || {};
     setState('kb.scores', { ...cur, [id]: result });
+    if (result.overall != null) logSignature('article-scored', session.apiBase, session.sid, id);
   };
 
   await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
     inFlight.add(article.id);
     setState('kb.scoringIds', [...inFlight]);
     const body = bodyMap.get(article.id) || {};
-    const enriched = { ...article, ...body };
+    const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
     let result;
     try {
       result = await scoreArticle(enriched);
@@ -603,7 +654,7 @@ async function scoreAll() {
       inFlight.add(article.id);
       setState('kb.scoringIds', [...inFlight]);
       const body = bodyMap.get(article.id) || {};
-      const enriched = { ...article, ...body };
+      const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
       try {
         const result = await scoreArticle(enriched, SCORING_RETRY_MAX_TOKENS);
         commit(article.id, result);
@@ -721,8 +772,9 @@ async function scoreOne(article) {
   markScoring(true);
 
   const bodyMap = await fetchArticleBodies([article.id], session);
+  const chatterMap = await fetchArticleChatterBatch([article.id], session);
   const body = bodyMap.get(article.id) || {};
-  const enriched = { ...article, ...body };
+  const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
   const { system, user, maxes } = buildScoringPrompt(enriched);
 
   const setProgress = (text, mode) => {
@@ -844,6 +896,7 @@ async function scoreOne(article) {
     const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
     setState('kb.scores', scores);
     await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: scores });
+    logSignature('article-scored', session.apiBase, session.sid, article.id);
   } catch (e) {
     if (closed || e.name === 'AbortError') return;
     setProgress('Error: ' + e.message, 'var(--error)');
@@ -1088,6 +1141,9 @@ async function generateRewrite(article, session) {
     }
   }
 
+  const chatterMap = await fetchArticleChatterBatch([article.id], session);
+  const chatterNotes = chatterMap.get(article.id) || '';
+
   const priorRewrite = _rewriteCache[article.id] ? parseRewriteSections(_rewriteCache[article.id]) : null;
   const fromEdited = !!(priorRewrite && (priorRewrite.description || priorRewrite.resolution || priorRewrite.summary));
 
@@ -1152,7 +1208,7 @@ Preserve all technical accuracy from the original. Output EXACTLY these four sec
 Title: ${currentTitle}
 Product & Topic: ${article.topicName || '(none)'}
 Validation: ${article.validationStatus || 'Not Validated'}
-${fromEdited ? 'The content below is the CURRENT working version (a prior rewrite with any manual edits applied). Treat it as the article state to improve — preserve the edits unless a rewrite rule or the instructions below require changing them.\n' : ''}${diagnostics ? `\n${diagnostics}\n` : ''}${refine ? `\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rewrite rule above): ${refine}\n` : ''}
+${fromEdited ? 'The content below is the CURRENT working version (a prior rewrite with any manual edits applied). Treat it as the article state to improve — preserve the edits unless a rewrite rule or the instructions below require changing them.\n' : ''}${diagnostics ? `\n${diagnostics}\n` : ''}${refine ? `\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rewrite rule above): ${refine}\n` : ''}${chatterNotes ? `\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${chatterNotes}\n` : ''}
 CURRENT SUMMARY: ${currentSummary || '(empty)'}
 CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
@@ -1178,6 +1234,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
     });
     if (isStale()) return;
     _rewriteCache[article.id] = fullText;
+    logSignature('rewrite-generated', session.apiBase, session.sid, article.id);
     renderEditableRewrite(article);
   } catch (e) {
     if (isStale() || e.name === 'AbortError') return;
@@ -1247,6 +1304,8 @@ async function publishRewriteToOrgcs(article) {
   });
   if (resp?.success) {
     swapButtonWithLink('rewrite-publish', { url: resp.url, label: 'Open Draft Version ↗' });
+    const session = await detectSession();
+    if (session.sid) logSignature('rewrite-published', session.apiBase, session.sid, article.id);
   }
 }
 

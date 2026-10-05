@@ -1,4 +1,4 @@
-# KB Agent v2.17.0
+# KB Agent v2.19.0
 
 AI-powered Knowledge Base quality management for Salesforce Industry & Revenue Cloud. Chrome Extension (Manifest V3) that analyzes support cases, generates KB articles, scores existing content, and identifies duplicates — optimized for Agentforce retrieval.
 
@@ -23,6 +23,7 @@ AI-powered Knowledge Base quality management for Salesforce Industry & Revenue C
 - SOSL search with Cloud and Status filtering matched to Industry/Revenue verticals
 - AI-ranked relevance scoring against the case context
 - Related KIs displayed in sidebar and used as context during generation
+- **Known Issues tab**: AI-drafts a new KI (Subject/Summary/Repro/Workaround) from a case, or rewrites an existing KI — both land as a Draft `Known_Issue__c` record only; submitting for approval stays a manual step in the Known Issues org, by design. Content is written with KI's public-facing rules (help.salesforce.com/s/issues) — stricter redaction than KB articles, including partial masking of any Salesforce record ID that slips through
 
 ### Duplicate Detection
 - Pairwise similarity detection across the article corpus
@@ -41,14 +42,17 @@ kb-agent/
 │   ├── gateway.js         Claude AI gateway (streaming, abort signals)
 │   ├── rate-limiter.js    48 RPM shared limiter
 │   ├── storage.js         chrome.storage helpers
+│   ├── signature.js       Chatter usage-signature markers (post + classify)
 │   └── ui.js              h(), chip(), modal(), toast(), spinner()
 ├── background/
 │   ├── service-worker.js  Message router + article preloader
 │   ├── update-check.js    Google Drive version check (mirrors Open Case Analyser)
+│   ├── signature-audit.js SOSL sweep + aggregation for Usage Analytics
 │   └── handlers/          Backend logic (no DOM)
 │       ├── case-analysis.js   Full analysis pipeline
 │       ├── kb-scorer.js       Scoring + rewrite streaming
 │       ├── ki-enrichment.js   Known Issues search + ranking
+│       ├── ki-publish.js      Known Issue AI draft/rewrite + create/update
 │       ├── gus-enrichment.js  GUS work item fetch
 │       ├── dedup.js           Duplicate detection
 │       └── article-publish.js Article creation/update in OrgCS
@@ -56,6 +60,7 @@ kb-agent/
 │   ├── app.js             Tab shell, header, connection chips
 │   ├── case-analysis.js   Case tab: progressive UI, streaming, results
 │   ├── kb-scorer.js       KB Articles tab: filters, scoring, rewrite
+│   ├── ki-manager.js      Known Issues tab: draft from case, search, rewrite
 │   └── dedup.js           Duplicates tab
 ├── data/
 │   ├── writing_guide_prompts.js  AI prompt guides (generation, scoring, style)
@@ -113,9 +118,38 @@ Uses the Salesforce internal AI model gateway with Claude Sonnet 4.6. Rate limit
 - **ORGCS navigation**: After publishing, a button navigates directly to the new article
 - **Refine**: Re-generate articles or sections with a specific focus instruction
 
+## Usage Analytics
+
+Every case scan, article score, rewrite generation, and rewrite publish is tagged with an internal (not customer-visible) Chatter post on the Case or Article — a signature marker, not a comment anyone needs to read. Settings → Usage Analytics runs an org-wide SOSL search for these markers across the last 3 months and shows: totals by action type, a by-month breakdown, a by-user breakdown, and a per-record (case/article) drill-down. This is for team-level adoption tracking, not per-interaction audit — the posts carry no case/article content, just a timestamp and the acting user's name.
+
+## KB Chatter as AI Context
+
+When scoring or rewriting a KB article, the tool also reads that article's own Chatter feed (filtered to `Type = 'TextPost'`, excluding its own tracking markers) and passes it to the AI as optional context, redacted for PII first. The AI is told these notes may include SME corrections worth factoring in, or may be irrelevant/automated noise — it decides what to use, nothing is pre-scored as article content.
+
 ## Changelog
 
-### v2.17.0 (current)
+### v2.20.0 (current)
+- Case Analysis now suggests a Known Issue draft or links an existing one directly from the regular case-scan flow (no separate KI case-input step) — only suggested when the case has a linked GUS work item, since KIs can't be created without one
+- Known Issues tab: full-list pagination (not a 25-row cap), category filter scoped to a fixed 33-category list, Name/Subject/Cloud/Category/Status/Created By/Approver/Impacted-count columns, and a combined View/Score/Rewrite Actions column
+- KI View popup now renders Summary/Repro/Workaround in the same bordered preview boxes as the KB article preview, with the linked Work Item (GUS WorkLocator link) shown inline instead of as a table column
+- Fixed `createKnownIssue`/`updateKnownIssue` to write the org's real required `DRAFT*` shadow fields (`DRAFTSubject__c`/`DRAFTSummary__c`/`DRAFTRepro__c`/`DRAFTWorkaround__c`) and `Category__c`, verified against real `Known_Issue__c` schema/data — the previous version targeted the wrong (live) fields and a required field that wasn't being set
+- Cross-scope live search for both KB Articles and Known Issues: a "Search all clouds/categories" checkbox next to each search box bypasses the configured scope and runs a live unscoped Salesforce search, so you can score/rewrite an article or KI outside the usual restriction. Count/stats rows hide while this is active
+- Usage Analytics now also instruments and audits KI actions (created, updated, rewrite generated, scored) across both the OrgCS and Known Issues orgs, merging both into one report
+- Fixed Recent Cases list not clearing on Clear Cache
+- KB Articles stats line is now a single small subtle text row (matching the KI tab) instead of the large stat-card bar, placed below the search/filter row
+
+### v2.19.0
+- New Known Issues tab: AI-drafts a new KI from a case, or rewrites an existing one, each landing as a Draft `Known_Issue__c` record (no auto-submit-for-approval — that stays manual in the Known Issues org)
+- KI content follows public-facing writing/redaction rules (stricter than KB articles): no customer/employee names, partial masking of any 15/18-char Salesforce ID, fixed Subject/Summary/Repro/Workaround structure
+- KI rewrite also factors in that KI's own Chatter notes, reusing the same filtered/redacted chatter-context pipeline built for KB articles
+- Shared-layer reuse pass: generalized `parseRewriteSections`/`serializeRewriteSections` and `sectionsEditor` to accept any field list (not just KB's Title/Summary/Description/Resolution), and extended `redactPii` with an opt-in Salesforce-ID-masking mode — both KB and KI now share the same section-editor and PII primitives instead of parallel copies
+
+### v2.18.0
+- Usage-analytics Chatter signatures: case scans, article scores, rewrite generations, and rewrite publishes are each tagged with an internal Chatter marker on the Case/Article
+- Settings → Usage Analytics: org-wide report (by month, by user, per-record) built from a SOSL search over those markers
+- KB article Chatter is now pulled in (filtered + PII-redacted) as optional AI context during scoring and rewriting, both in the KB Articles tab and during case-driven article updates
+
+### v2.17.0
 - Auto-open login tabs for disconnected portals (OrgCS, GUS, Known Issues) — no manual tab-hunting needed
 - Update button in connection chips row (⬆ Check) with manual re-check, status feedback (Checking… / Failed / Current / or shows latest version available)
 - Settings page now shows app version below title, collapsible Models & Thresholds sections (collapsed by default), non-collapsible Guard rails header

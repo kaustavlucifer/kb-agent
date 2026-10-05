@@ -1,9 +1,11 @@
-import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, ID_RE } from './api.js';
+import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, ID_RE, escapeSoql } from './api.js';
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
 import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, BODY_FETCH_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, ARTICLE_META_FIELDS, ARTICLE_LIST_WHERE, CACHE_TTL_MS, STORAGE_KEYS } from './config.js';
 import { SCORING_CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
 import { detectSession } from './auth.js';
 import { localGet, localSet } from './storage.js';
+import { classifySignature } from './signature.js';
+import { redactPii } from './pii.js';
 
 export { SCORING_CRITERIA, computeDynamicMaxes };
 
@@ -35,6 +37,14 @@ export async function loadAllArticles({ forceLive = false, onProgress } = {}) {
   const articles = records.map(mapArticleRecord);
   await localSet({ [STORAGE_KEYS.ALL_ARTICLES]: articles, [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now() });
   return { articles, fromCache: false };
+}
+
+export async function searchArticlesUnscoped(query, session) {
+  if (!query || query.length < 2) return [];
+  const escaped = escapeSoql(query);
+  const soql = `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Title LIKE '%${escaped}%' OR ArticleNumber LIKE '%${escaped}%') ORDER BY LastModifiedDate DESC LIMIT 50`;
+  const result = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, session.sid);
+  return (result.records || []).map(mapArticleRecord);
 }
 
 export function mapArticleRecord(r) {
@@ -164,7 +174,7 @@ ${descText || '(empty)'}
 RESOLUTION (${resText.length} chars):
 ${resText || '(empty)'}
 ${stepsText ? `\nSTEPS:\n${stepsText}` : ''}
-
+${article.chatterNotes ? `\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${article.chatterNotes}\n` : ''}
 Score now. Return only JSON. overall must equal sum of all scores.`;
 
   return { system, user, maxes };
@@ -258,4 +268,27 @@ export async function fetchArticleBodies(articleIds, session) {
   await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, runBatchWithRetry);
   bodyMap.failedIds = failedIds;
   return bodyMap;
+}
+
+export async function fetchArticleChatterBatch(articleIds, session) {
+  const chatterMap = new Map();
+  const validIds = articleIds.filter(id => ID_RE.test(id));
+  if (!validIds.length) return chatterMap;
+  const batches = [];
+  for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
+  const grouped = new Map();
+  await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, async (batch) => {
+    try {
+      const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM FeedItem WHERE ParentId IN (${soqlIdList(batch)}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
+      const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+      const result = await sfGet(url, session.sid);
+      for (const r of (result.records || [])) {
+        if (!r.Body || classifySignature(r.Body)) continue;
+        if (!grouped.has(r.ParentId)) grouped.set(r.ParentId, []);
+        grouped.get(r.ParentId).push(`${r.CreatedBy?.Name || 'User'}: ${redactPii(stripHtml(r.Body))}`);
+      }
+    } catch {}
+  });
+  for (const [id, lines] of grouped) chatterMap.set(id, lines.join('\n').slice(0, 1500));
+  return chatterMap;
 }

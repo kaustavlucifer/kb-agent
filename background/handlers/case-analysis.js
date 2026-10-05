@@ -1,13 +1,15 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
 import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml, stripHtmlKeepLinks, buildPromptContent } from '../../shared/api.js';
 import { redactPii, redactCaseRecord, redactComments } from '../../shared/pii.js';
+import { logSignature } from '../../shared/signature.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
-import { scoreArticle as sharedScoreArticle, draftToScorable } from '../../shared/scoring.js';
+import { scoreArticle as sharedScoreArticle, draftToScorable, fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
+import { generateKiDraftContent, resolveKiCloud, kiUrl } from './ki-publish.js';
 import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
@@ -240,7 +242,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
   const kbScoredArticles = [...scoredArticles];
-  await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal);
+  await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
@@ -310,9 +312,13 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     }
   }
 
+  const kiSuggestion = await computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, action, gusData.items).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
+  send({ type: 'meta', kiSuggestion });
+
   await caseSummaryPromise;
   const prodDocGap = await prodDocGapPromise;
 
+  logSignature('case-scan', session.apiBase, session.sid, caseId);
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
 
   if (!stopped) {
@@ -365,6 +371,7 @@ export async function handleGenerateNew(port, msg) {
       newArticleDraft: draft
     };
 
+    logSignature('case-scan', session.apiBase, session.sid, caseId);
     send({ type: 'result', success: true, draft, structured });
 
     await autoScoreGeneratedArticles(structured, send, signal).catch(() => {});
@@ -733,6 +740,7 @@ Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
 async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal, session) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
+  const chatterMap = await fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session).catch(() => new Map());
 
   const tasks = articles.slice(0, 2).map(article => async () => {
     const body = bodyMap.get(article.Id) || {};
@@ -740,8 +748,9 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
     const resText = stripHtmlKeepLinks(body.resolution, session.apiBase).slice(0, MAX_BODY_CHARS);
     const stepsText = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
     const refLinksText = body.additionalResources ? stripHtmlKeepLinks(body.additionalResources, session.apiBase).slice(0, 500) : '';
+    const chatterNotes = chatterMap.get(article.Id) || '';
 
-    const userText = `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${refLinksText ? '\nEXISTING REFERENCE LINKS:\n' + refLinksText : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}`;
+    const userText = `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${refLinksText ? '\nEXISTING REFERENCE LINKS:\n' + refLinksText : ''}${chatterNotes ? '\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n' + chatterNotes : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}`;
     const content = await buildPromptContent(userText, session.sid, signal);
 
     try {
@@ -937,8 +946,31 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
-async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal) {
+async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, kbAction, gusItems) {
+  const bestExisting = (kiData.items || [])[0];
+  if (bestExisting && (bestExisting.relevanceScore == null || bestExisting.relevanceScore >= 60)) {
+    return {
+      action: 'EXISTING_COVERS',
+      existingKi: { id: bestExisting.id, name: bestExisting.name, subject: bestExisting.subject, url: kiUrl(null, bestExisting.id) }
+    };
+  }
+  if (!gusItems?.length) {
+    return { action: 'NONE', reason: 'No linked GUS work item found — a Known Issue cannot be created without one.' };
+  }
+  if (abstract?.isCustomerSpecific) {
+    return { action: 'NONE', reason: 'Customer-specific issue — not a good fit for a public Known Issue.' };
+  }
+  if (kbAction === 'NO_ACTION') {
+    return { action: 'NONE', reason: 'Existing KB coverage is sufficient — no gap suggesting a new Known Issue.' };
+  }
+  const draft = await generateKiDraftContent(caseRecord, comments, '');
+  if (!draft) return { action: 'NONE', reason: 'Could not determine a Known Issue draft.' };
+  return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: gusItems[0].name };
+}
+
+async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {
   if (!scoredArticles.length) return;
+  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session).catch(() => new Map());
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
     if (signal?.aborted) return;
     const body = candidateBodies.get(sa.id) || {};
@@ -952,7 +984,8 @@ async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbS
       topicName: body.topicName || sa.topicName || '',
       validationStatus: sa.validationStatus || '',
       containsImage: false,
-      containsVideo: false
+      containsVideo: false,
+      chatterNotes: chatterMap.get(sa.id) || ''
     };
     try {
       const result = await sharedScoreArticle(enriched);

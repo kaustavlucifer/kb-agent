@@ -7,6 +7,7 @@ import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
   { id: 'kb-articles', label: 'KB Articles' },
+  { id: 'known-issues', label: 'Known Issues' },
   { id: 'dedup', label: 'Duplicates' }
 ];
 
@@ -185,6 +186,7 @@ function activateTab(tabId) {
   const moduleMap = {
     'case-analysis': './case-analysis.js',
     'kb-articles': './kb-scorer.js',
+    'known-issues': './ki-manager.js',
     'dedup': './dedup.js'
   };
   const path = moduleMap[tabId];
