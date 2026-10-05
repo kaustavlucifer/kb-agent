@@ -4,9 +4,8 @@ import { SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, SCORE_GOOD
 import { localGet, localSet } from '../shared/storage.js';
 import { KI_REWRITE_SYSTEM_PROMPT, KI_SCORING_SYSTEM_PROMPT, buildKiRewriteUserPrompt, buildKiScoreUserPrompt } from '../shared/ki-prompts.js';
 import { parseRewriteSections, serializeRewriteSections, markdownToHtml } from '../shared/markdown.js';
-import { KI_CLOUD_MAPPING, KI_CATEGORIES } from '../data/ki_mapping.js';
+import { KI_CATEGORIES } from '../data/ki_mapping.js';
 
-const KI_CLOUDS = [...new Set(Object.values(KI_CLOUD_MAPPING).map(e => e.cloud))].sort();
 
 let _container = null;
 let _kiAllItems = [];
@@ -139,14 +138,9 @@ export function unmount() {
   if (_renderDebounce) { clearTimeout(_renderDebounce); _renderDebounce = null; }
 }
 
-export function openKiDraftModal({ draft, cloud, caseNumber, workId, onCreated }) {
+export function openKiDraftModal({ draft, caseNumber, workId, onCreated }) {
   const key = `ext-${Date.now()}`;
   _kiDraftCache[key] = serializeRewriteSections(draft, KI_FIELD_NAMES);
-
-  const cloudSelect = h('select', { class: 'input', style: { maxWidth: '160px' } },
-    ...KI_CLOUDS.map(c => h('option', { value: c }, c))
-  );
-  cloudSelect.value = KI_CLOUDS.includes(cloud) ? cloud : KI_CLOUDS[0];
 
   const categorySelect = h('select', { class: 'input', style: { maxWidth: '200px' } },
     ...KI_CATEGORIES.map(c => h('option', { value: c }, c))
@@ -159,10 +153,6 @@ export function openKiDraftModal({ draft, cloud, caseNumber, workId, onCreated }
   const body = h('div', null,
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '14px', flexWrap: 'wrap' } },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-        h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Cloud'),
-        cloudSelect
-      ),
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
         h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Category *'),
         categorySelect
       ),
@@ -173,7 +163,7 @@ export function openKiDraftModal({ draft, cloud, caseNumber, workId, onCreated }
 
   const footer = h('div', { class: 'modal__footer' },
     h('button', { class: 'btn btn--secondary', onClick: () => close() }, 'Close'),
-    h('button', { class: 'btn btn--primary', id: 'ki-create-btn', onClick: () => createKnownIssue(key, cloudSelect.value, categorySelect.value, workLookup.value(), onCreated) }, 'Create Known Issue (Draft)')
+    h('button', { class: 'btn btn--primary', id: 'ki-create-btn', onClick: () => createKnownIssue(key, categorySelect.value, workLookup.value(), onCreated) }, 'Create Known Issue (Draft)')
   );
 
   let close;
@@ -260,9 +250,9 @@ function gusWorkLookup(initial) {
   };
 }
 
-async function createKnownIssue(key, cloud, category, workId, onCreated) {
+async function createKnownIssue(key, category, workId, onCreated) {
   const sections = parseRewriteSections(_kiDraftCache[key] || '', KI_FIELD_NAMES);
-  const payload = { subject: sections.subject, summary: sections.summary, repro: sections.repro, workaround: sections.workaround, cloud, category, workId };
+  const payload = { subject: sections.subject, summary: sections.summary, repro: sections.repro, workaround: sections.workaround, category, workId };
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'CREATE_KNOWN_ISSUE', payload });
     if (!resp?.success) { toast(resp?.error || 'Something went wrong.', 'error'); return; }

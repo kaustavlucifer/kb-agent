@@ -9,7 +9,7 @@ import { resolveTargetPts } from '../../data/pt_routing.js';
 import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
-import { generateKiDraftContent, resolveKiCloud, kiUrl } from './ki-publish.js';
+import { generateKiDraftContent, kiUrl } from './ki-publish.js';
 import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
@@ -299,7 +299,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       action: 'NO_ACTION',
       confidence: decision.confidence,
       summary: decision.reason,
-      coveringArticles: decision.noCoverage ? [] : (coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)),
+      coveringArticles: decision.noCoverage ? coveringArticles : (coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)),
       noCoverage: !!decision.noCoverage
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
@@ -898,13 +898,16 @@ Then derive action:
 PRODUCT DEFECTS: If the case is a PRODUCT_DEFECT and the only resolution is a pending product fix (no durable workaround, configuration, or guidance that stays useful after the fix), choose NO_ACTION — that belongs in a Known Issue, not a KB article. If a durable workaround or diagnostic guidance exists, judge KB coverage of that content normally.
 GUS SIGNALS: A linked investigation closed as "Doc/Usability", "Working as Documented", "Working as Designed" or "Resolved Without Code Change" means the answer is documentable product behavior or configuration — weigh KB gaps for it seriously rather than treating it as a defect.
 
-Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
+When action is NO_ACTION, set noActionBasis: "COVERED" only if existing articles genuinely cover the case; otherwise "NOT_KB_MATERIAL" (product defect pending a fix, customer-specific, or no documentable resolution yet). List in coveringArticles only articles that actually cover the case.
+
+Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","noActionBasis":"COVERED"|"NOT_KB_MATERIAL"|null,"confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
       messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nIssue type: ${abstract?.issueType || 'unknown'}\nLinked GUS work items: ${redactPii((gusItems || []).slice(0, 3).map(g => `${g.name} [${g.recordType || 'Work'}] (${g.status || 'unknown status'}): ${g.subject || ''}${(g.linkedBugs || []).length ? ` → linked bug ${g.linkedBugs.map(b => `${b.name} (${b.status || 'unknown'})`).join(', ')}` : ''}`).join('; ')) || 'none'}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
       maxTokens: 4500,
       temperature: 0,
       signal
     });
     const parsed = extractJson(extractText(resp));
+    if (parsed?.action === 'NO_ACTION' && parsed.noActionBasis !== 'COVERED') parsed.noCoverage = true;
     return parsed || { action: 'NO_ACTION', confidence: 'LOW', reason: 'Coverage evaluation returned an unreadable response — review the articles manually or override below.', gaps: [], noCoverage: true };
   } catch (e) {
     if (signal?.aborted) throw e;
@@ -1026,7 +1029,7 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
   const primary = defectItems.find(g => g.recordType !== 'Investigation') || defectItems[0];
   const linkedBug = (primary.linkedBugs || []).find(b => b.recordType === 'Bug' && workItemDefectState(b) === 'defect')
     || (primary.linkedBugs || []).find(b => b.recordType === 'User Story' && !NOT_A_DEFECT_STATUS_RE.test(b.status || ''));
-  return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: linkedBug?.name || primary.name };
+  return { action: 'DRAFT_NEW', draft, workId: linkedBug?.name || primary.name };
 }
 
 async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {

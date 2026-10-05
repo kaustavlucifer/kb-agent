@@ -128,7 +128,11 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.24.1 (current)
+### v2.24.2 (current)
+- Fixed Known Issue creation failing with `INVALID_FIELD_FOR_INSERT_UPDATE` on `Cloud__c`: the Cloud selector is removed from the KI create dialog and `Cloud__c` is no longer written (it is not writable in the KI org)
+- Case analysis "no action" now distinguishes "existing articles cover this" from "not KB material yet" (defect pending a fix, customer-specific, no documentable resolution); the latter shows "No KB Action Recommended" with "Related Articles" instead of "Existing Coverage is Adequate" / "Covering Articles"
+
+### v2.24.1
 - Case analysis now reads the case's GUS links from OrgCS `Case_Relationship__c` (Case GUS Relationship) in addition to W-numbers in comments; previously cases linked only via that object got no GUS context and no KI suggestion
 - GUS context (record type, status, follow-up work) is passed to the case summary, KB coverage evaluation, KI decision, and KI draft prompts
 - A defect linked through Case GUS Relationship qualifies for a KI even if the AI issue-type classification disagrees

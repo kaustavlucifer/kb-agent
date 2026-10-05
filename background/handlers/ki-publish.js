@@ -8,24 +8,7 @@ import { markdownToHtml } from '../../shared/markdown.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { logSignature } from '../../shared/signature.js';
 import { localGet, localSet } from '../../shared/storage.js';
-import { resolveTargetPts } from '../../data/pt_routing.js';
-import { KI_CLOUD_MAPPING, KI_CATEGORIES } from '../../data/ki_mapping.js';
-
-export function resolveKiCloud(casePt) {
-  if (!casePt) return null;
-  const ptPatterns = resolveTargetPts(casePt);
-  let bestCloud = null;
-  let bestLength = -1;
-  for (const entry of Object.values(KI_CLOUD_MAPPING)) {
-    for (const p of entry.ptPatterns) {
-      if ((ptPatterns.includes(p) || casePt.includes(p)) && p.length > bestLength) {
-        bestLength = p.length;
-        bestCloud = entry.cloud;
-      }
-    }
-  }
-  return bestCloud;
-}
+import { KI_CATEGORIES } from '../../data/ki_mapping.js';
 
 function publicWorkSubject(subject) {
   return String(subject || '')
@@ -185,7 +168,6 @@ export async function createKnownIssue(payload) {
     Status__c: 'In Review',
     Category__c: categoryId
   };
-  if (payload.cloud) record.Cloud__c = payload.cloud;
   if (/^W-\d{4,9}$/.test(payload.workId || '')) record.Work_ID__c = payload.workId;
 
   try {

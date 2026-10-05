@@ -729,7 +729,7 @@ function renderResult() {
         ),
         h('p', { style: { fontSize: '13px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0 0 12px 0' } }, structured.summary || 'The existing articles already cover this case adequately.'),
         (structured.coveringArticles || []).length ? h('div', { style: { marginBottom: '12px' } },
-          h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '6px', textTransform: 'uppercase' } }, 'Covering Articles'),
+          h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--text-muted)', marginBottom: '6px', textTransform: 'uppercase' } }, structured.noCoverage ? 'Related Articles' : 'Covering Articles'),
           ...structured.coveringArticles.map(a =>
             h('div', { style: { padding: '4px 0', fontSize: '12px' } },
               h('a', { href: articleUrl(a.id), target: '_blank', style: { color: 'var(--primary)', textDecoration: 'none' } }, `#${a.articleNumber} — ${a.title}`)
@@ -908,7 +908,6 @@ function renderKiSuggestionCard(kiSuggestion, result) {
           class: 'btn btn--primary btn--sm',
           onClick: () => openKiDraftModal({
             draft: kiSuggestion.draft,
-            cloud: kiSuggestion.cloud,
             caseNumber: result.caseNumber,
             workId: kiSuggestion.workId
           })
