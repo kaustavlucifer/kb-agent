@@ -1,39 +1,29 @@
 const RPM_LIMIT = 48;
 const WINDOW_MS = 60_000;
-const STORAGE_KEY = '_rateLimiterTs';
+const IS_SERVICE_WORKER = typeof window === 'undefined';
+const OWN_KEY = IS_SERVICE_WORKER ? '_rateLimiterTsSw' : '_rateLimiterTsUi';
+const OTHER_KEY = IS_SERVICE_WORKER ? '_rateLimiterTsUi' : '_rateLimiterTsSw';
 
-let _callTimestamps = [];
-let _loadPromise = null;
+let _ownTimestamps = [];
 
-async function loadTimestamps() {
-  if (!_loadPromise) {
-    _loadPromise = (async () => {
-      try {
-        const data = await chrome.storage.session.get(STORAGE_KEY);
-        if (Array.isArray(data[STORAGE_KEY])) {
-          const now = Date.now();
-          _callTimestamps = data[STORAGE_KEY].filter(ts => now - ts < WINDOW_MS);
-        }
-      } catch {}
-    })();
-  }
-  await _loadPromise;
-}
-
-function persistTimestamps() {
-  chrome.storage.session.set({ [STORAGE_KEY]: _callTimestamps }).catch(() => {});
+async function windowTimestamps() {
+  const now = Date.now();
+  _ownTimestamps = _ownTimestamps.filter(ts => now - ts < WINDOW_MS);
+  let other = [];
+  try {
+    const data = await chrome.storage.session.get(OTHER_KEY);
+    if (Array.isArray(data[OTHER_KEY])) other = data[OTHER_KEY].filter(ts => now - ts < WINDOW_MS);
+  } catch {}
+  return [..._ownTimestamps, ...other].sort((a, b) => a - b);
 }
 
 export async function acquireSlot() {
-  await loadTimestamps();
-  const now = Date.now();
-  _callTimestamps = _callTimestamps.filter(ts => now - ts < WINDOW_MS);
-  if (_callTimestamps.length >= RPM_LIMIT) {
-    const oldest = _callTimestamps[0];
-    const waitMs = WINDOW_MS - (now - oldest) + 50;
-    await new Promise(r => setTimeout(r, waitMs));
+  const all = await windowTimestamps();
+  if (all.length >= RPM_LIMIT) {
+    const waitMs = WINDOW_MS - (Date.now() - all[0]) + 50;
+    await new Promise(r => setTimeout(r, Math.max(waitMs, 50)));
     return acquireSlot();
   }
-  _callTimestamps.push(Date.now());
-  persistTimestamps();
+  _ownTimestamps.push(Date.now());
+  chrome.storage.session.set({ [OWN_KEY]: _ownTimestamps }).catch(() => {});
 }

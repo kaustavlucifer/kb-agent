@@ -1,4 +1,5 @@
 import { parseInline, parseBlocks, markdownToHtml, htmlToMarkdown, parseRewriteSections, serializeRewriteSections } from './markdown.js';
+import { SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD } from './config.js';
 
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -208,6 +209,59 @@ export function stickyScrollLayout(container) {
   return { sticky, scroll };
 }
 
+export function scoreColor(score) {
+  return score >= SCORE_HIGH_THRESHOLD ? 'success' : score >= SCORE_MID_THRESHOLD ? 'warning' : 'error';
+}
+
+export function crossScopeToggle({ label, title, checked, onChange }) {
+  const checkbox = h('input', { type: 'checkbox' });
+  checkbox.checked = checked;
+  checkbox.addEventListener('change', e => onChange(e.target.checked));
+  return h('label', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap' }, title: title || '' }, checkbox, label);
+}
+
+export function requestToken() {
+  let current = 0;
+  return {
+    next() { return ++current; },
+    isCurrent(id) { return id === current; }
+  };
+}
+
+export function paginationBar({ page, totalPages, pageStart, pageCount, total, noun, prefix = '', onPage }) {
+  const label = noun
+    ? `${prefix}${totalPages > 1 ? `Showing ${pageStart + 1}–${pageStart + pageCount} of ${total} ${noun} (Page ${page + 1}/${totalPages})` : `${total} ${noun}`}`
+    : (total ? `${prefix}Showing ${pageStart + 1}–${pageStart + pageCount} of ${total} (Page ${page + 1}/${totalPages})` : '');
+  return h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
+    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: page === 0, onClick: () => onPage(page - 1) }, '← Prev') : null,
+    h('span', { style: { color: 'var(--text-secondary)' } }, label),
+    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: page >= totalPages - 1, onClick: () => onPage(page + 1) }, 'Next →') : null
+  );
+}
+
+export function fieldLabel(text, style = {}) {
+  return h('div', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', ...style } }, text);
+}
+
+export function asyncModal(title, load, render, opts = {}) {
+  const content = h('div', { style: { minHeight: '120px' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '120px' } }, spinner('md'))
+  );
+  const instance = modal(title, content, opts);
+  load()
+    .then(result => {
+      content.style.minHeight = '';
+      content.textContent = '';
+      content.appendChild(render(result));
+    })
+    .catch(e => {
+      content.style.minHeight = '';
+      content.textContent = '';
+      content.appendChild(h('div', { style: { color: 'var(--error)', fontSize: '12px' } }, 'Error: ' + e.message));
+    });
+  return instance;
+}
+
 export function createSorter(defaultCol, defaultDir = 'asc') {
   let col = defaultCol;
   let dir = defaultDir;
@@ -226,17 +280,6 @@ export function createSorter(defaultCol, defaultDir = 'asc') {
       return 0;
     }
   };
-}
-
-export function statsBar(stats) {
-  return h('div', { class: 'card stats-bar' },
-    h('div', { class: 'stats-bar__row' },
-      ...stats.filter(Boolean).map(s => h('div', { class: 'stats-bar__item' },
-        h('div', { class: 'stats-bar__value', style: s.color ? { color: s.color } : null }, String(s.value)),
-        h('div', { class: 'stats-bar__label' }, s.label)
-      ))
-    )
-  );
 }
 
 function renderInlineFormatting(text) {

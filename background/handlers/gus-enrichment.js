@@ -27,6 +27,7 @@ export async function fetchGusWorkItems(workNames, signal) {
 
   const { apiBase, sid } = gusSession;
   const items = [];
+  let firstError = null;
 
   const batches = [];
   for (let i = 0; i < workNames.length; i += 20) batches.push(workNames.slice(i, i + 20));
@@ -36,7 +37,10 @@ export async function fetchGusWorkItems(workNames, signal) {
     try {
       const soql = `SELECT ${GUS_FIELDS.join(', ')} FROM ${WORK_OBJECT} WHERE Name IN (${inList})`;
       return await sfQuery(apiBase, sid, soql, signal);
-    } catch { return []; }
+    } catch (e) {
+      firstError = firstError || e.message;
+      return [];
+    }
   });
   for (const records of batchResults) {
     for (const r of records) {
@@ -66,10 +70,12 @@ export async function fetchGusWorkItems(workNames, signal) {
         author: r.CreatedBy?.Name || null,
         createdDate: r.CreatedDate
       }));
-    } catch {}
+    } catch (e) {
+      firstError = firstError || e.message;
+    }
   }
 
-  return { items, feed, error: null };
+  return { items, feed, error: firstError };
 }
 
 export async function checkGusConnection() {

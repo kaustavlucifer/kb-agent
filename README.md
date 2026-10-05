@@ -128,7 +128,19 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.20.0 (current)
+### v2.21.0 (current)
+- Model choices are now discovered per user from the AI gateway (Settings → Models, with a "Refresh models" button; auto-refreshed daily, static fallback list). All model settings default to Claude Sonnet 5.5; Known Issue drafting/rewriting/scoring now follow the Scoring model setting
+- Cost tracking uses the gateway's own per-model pricing, falling back to a static table and then a model-family rate (never $0). Pending cost is flushed when the popup closes, and scoring/dedup estimates use the live prompt length
+- Fixed Known Issue creation: `Category__c` is a lookup, so the category name is now resolved to its record Id before creating
+- Fixed KI suggestions being suppressed when relevance ranking returned no score, and "Covered by" links now use the authenticated Known Issues org host
+- Cross-scope search race fix (stale results can't overwrite newer ones) on both tabs; cross-scope KB articles now work with scoring progress, score details, and case-analysis deep links
+- Usage Analytics: both orgs swept in parallel with MV3 keepalive and abort-on-close; de-duplicated orgs, page-boundary rows, and cross-org records; partial failures now flagged as incomplete instead of shown as low counts
+- KI suggestion now runs concurrently with KB draft generation (and is cancelled by Stop); KB scoring/rewrite fetch article bodies and Chatter in parallel
+- Shared rate limit between popup and service worker without lost updates; KI list cache invalidated after create/update; swallowed KI/GUS errors now surfaced; Clear Cache covers auth and merge caches; merge stream stops on tab switch
+- UI: KB table now sits in a card like the KI tab; KI table is sortable by any column; "Duplicates" tab renamed "KB Dedupe"
+- Shared UI helpers (score colors, cross-scope toggle, pagination bar, async modal, field labels) replace duplicated KB/KI code; dead code and unused CSS removed
+
+### v2.20.0
 - Case Analysis now suggests a Known Issue draft or links an existing one directly from the regular case-scan flow (no separate KI case-input step) — only suggested when the case has a linked GUS work item, since KIs can't be created without one
 - Known Issues tab: full-list pagination (not a 25-row cap), category filter scoped to a fixed 33-category list, Name/Subject/Cloud/Category/Status/Created By/Approver/Impacted-count columns, and a combined View/Score/Rewrite Actions column
 - KI View popup now renders Summary/Repro/Workaround in the same bordered preview boxes as the KB article preview, with the linked Work Item (GUS WorkLocator link) shown inline instead of as a table column

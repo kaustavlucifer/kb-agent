@@ -1818,7 +1818,7 @@ function startAnalysis(caseId, isRetry = false) {
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
-  _port.onMessage.addListener(onPortMessage);
+  _port.onMessage.addListener((msg) => { if (gen !== _analysisGen) return; onPortMessage(msg); });
   _port.onDisconnect.addListener(() => {
     if (gen !== _analysisGen) return;
     _port = null;

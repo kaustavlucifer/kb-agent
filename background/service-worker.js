@@ -300,23 +300,47 @@ function handlePort(port) {
 
 async function handleAudit(port, msg) {
   const [orgcsSession, kiSession] = await Promise.all([detectSession(), detectKiSession()]);
-  const sources = [orgcsSession, kiSession].filter(s => s.sid);
+  const sources = [orgcsSession, kiSession].filter((s, i, all) => s.sid && all.findIndex(x => x.apiBase === s.apiBase) === i);
   if (!sources.length) { port.postMessage({ type: 'error', error: 'No Salesforce session.' }); return; }
 
-  const reports = [];
-  for (let i = 0; i < sources.length; i++) {
-    const session = sources[i];
-    const report = await auditSignatures(session.apiBase, session.sid, {
-      monthsBack: msg.monthsBack || 3,
-      onProgress: (done, total) => {
-        try { port.postMessage({ type: 'progress', done: i * total + done, total: sources.length * total }); } catch {}
-      }
-    });
-    reports.push(report);
-  }
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+  port.onDisconnect.addListener(() => abortController.abort());
 
-  const report = reports.length === 2 ? mergeAuditReports(reports[0], reports[1]) : reports[0];
-  port.postMessage({ type: 'done', report });
+  const keepalive = setInterval(() => {
+    try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
+  }, 25_000);
+
+  const progressState = sources.map(() => ({ done: 0, total: 0 }));
+  const reportProgress = () => {
+    const done = progressState.reduce((sum, p) => sum + p.done, 0);
+    const total = progressState.reduce((sum, p) => sum + p.total, 0);
+    try { port.postMessage({ type: 'progress', done, total }); } catch {}
+  };
+
+  try {
+    const reports = await Promise.all(sources.map((session, i) =>
+      auditSignatures(session.apiBase, session.sid, {
+        monthsBack: msg.monthsBack || 3,
+        signal,
+        onProgress: (done, total) => {
+          progressState[i] = { done, total };
+          reportProgress();
+        }
+      })
+    ));
+
+    const report = reports.length === 2 ? mergeAuditReports(reports[0], reports[1]) : reports[0];
+    port.postMessage({ type: 'done', report });
+  } catch (e) {
+    if (signal.aborted || e?.name === 'AbortError') {
+      try { port.postMessage({ type: 'stopped', partial: true }); } catch {}
+    } else {
+      try { port.postMessage({ type: 'error', error: e?.message || 'Audit failed.' }); } catch {}
+    }
+  } finally {
+    clearInterval(keepalive);
+  }
 }
 
 

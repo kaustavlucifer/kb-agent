@@ -65,6 +65,8 @@ Rules:
 - NEVER flag an article as a duplicate of ITSELF. articleA and articleB must be DIFFERENT article numbers.
 - If no duplicates: return {"pairs":[]}`;
 
+export const DEDUP_SYSTEM_CHARS = DEDUP_SYSTEM.length;
+
 export async function runDedupBatch(articles) {
   if (articles.length < 2) return { pairs: [], incomplete: false };
   const snippets = articles.map(a => {

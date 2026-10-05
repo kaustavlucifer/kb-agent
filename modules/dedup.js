@@ -5,7 +5,7 @@ import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../s
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl, MAX_REWRITE_IMAGES_PER_ARTICLE } from '../shared/config.js';
-import { runDedupBatch, buildDedupWorkQueue, dedupePairs } from '../shared/dedup.js';
+import { runDedupBatch, buildDedupWorkQueue, dedupePairs, DEDUP_SYSTEM_CHARS } from '../shared/dedup.js';
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
 import { previewButton, showArticleCompare } from '../shared/article-preview.js';
@@ -21,6 +21,7 @@ let _filterPublish = ['Online'];
 let _articlesLoading = false;
 let _mergeTextCache = {};
 let _mergeAbort = null;
+let _mergeModalRef = null;
 let _lastBodyMap = null;
 let _workQueueMemo = null;
 let _wasRunning = false;
@@ -83,6 +84,8 @@ function updateProgressInPlace(running) {
 export function unmount() {
   _unsubs.forEach(u => u());
   _unsubs = [];
+  if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; }
+  if (_mergeModalRef) { _mergeModalRef.close(); _mergeModalRef = null; }
   _container = null;
 }
 
@@ -209,7 +212,7 @@ function render() {
   const scopedArticles = scopeArticles(articles);
   const workQueue = memoizedWorkQueue(scopedArticles);
   const batchCount = workQueue.length;
-  const est = batchCount && !running ? estimateDedup(workQueue.map(w => w.batch)) : null;
+  const est = batchCount && !running ? estimateDedup(workQueue.map(w => w.batch), DEDUP_SYSTEM_CHARS) : null;
   const scopeInfo = (_filterPt.length || _filterValidation.length || _filterPublish.length)
     ? `Filtered: ${scopedArticles.length} of ${articles.length} articles, ${batchCount} batches`
     : `All articles: ${scopedArticles.length} articles, ${batchCount} batches`;
@@ -580,9 +583,9 @@ async function showMerge(pair) {
     streamEl
   );
 
-  modal('Merge Suggestion', content, {
+  _mergeModalRef = modal('Merge Suggestion', content, {
     wide: true,
-    onClose: () => { if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; } }
+    onClose: () => { if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; } _mergeModalRef = null; }
   });
 
   if (hasCached) {

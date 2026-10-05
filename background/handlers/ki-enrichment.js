@@ -15,9 +15,10 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
   const cloudValues = resolveCloudValues(ptPatterns);
   const searchTerms = buildSearchTerms(caseAbstract, caseSubject);
 
-  if (!searchTerms.length) return { items: [], error: null };
+  if (!searchTerms.length) return { items: [], lightningHost: kiSession.lightningHost, error: null };
 
   let candidates = [];
+  let firstError = null;
 
   if (cloudValues.length) {
     const cloudFilter = cloudValues.map(c => `Cloud__c = '${escapeSoql(c)}'`).join(' OR ');
@@ -35,7 +36,9 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
             candidates.push(r);
           }
         }
-      } catch {}
+      } catch (e) {
+        firstError = firstError || e.message;
+      }
     });
   }
 
@@ -53,14 +56,16 @@ export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubj
             candidates.push(r);
           }
         }
-      } catch {}
+      } catch (e) {
+        firstError = firstError || e.message;
+      }
     });
   }
 
-  if (!candidates.length) return { items: [], error: null };
+  if (!candidates.length) return { items: [], lightningHost: kiSession.lightningHost, error: firstError };
 
   const ranked = await rankKiRelevance(candidates, caseAbstract, caseSubject, signal);
-  return { items: ranked, error: null };
+  return { items: ranked, lightningHost: kiSession.lightningHost, error: firstError };
 }
 
 function resolveCloudValues(ptPatterns) {

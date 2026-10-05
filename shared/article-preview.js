@@ -1,9 +1,9 @@
-import { h, modal, spinner, statusPill, richHtmlBox } from './ui.js';
+import { h, asyncModal, statusPill, richHtmlBox, fieldLabel } from './ui.js';
 import { escapeHtml } from './markdown.js';
 
 function htmlField(label, html, opts = {}) {
   return h('div', { style: { marginBottom: opts.compact ? '8px' : '12px' } },
-    h('div', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
+    fieldLabel(label, { marginBottom: '4px' }),
     richHtmlBox(html)
   );
 }
@@ -33,14 +33,6 @@ function fetchArticlePreviewData(articleId) {
   return chrome.runtime.sendMessage({ action: 'FETCH_ARTICLE_PREVIEW', articleId });
 }
 
-function loadingModal(title) {
-  const content = h('div', { style: { minHeight: '120px' } },
-    h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '120px' } }, spinner('md'))
-  );
-  modal(title, content, { wide: true });
-  return content;
-}
-
 export function previewButton(articleId, meta = {}, opts = {}) {
   return h('button', {
     class: 'btn btn--ghost btn--sm',
@@ -52,48 +44,35 @@ export function previewButton(articleId, meta = {}, opts = {}) {
 }
 
 function showArticlePreview(articleId, meta = {}) {
-  const content = loadingModal(meta.articleNumber ? `#${meta.articleNumber}${meta.title ? ' — ' + meta.title : ''}` : 'Article Preview');
-
-  fetchArticlePreviewData(articleId)
-    .then(resp => {
-      content.textContent = '';
-      if (!resp?.success) {
-        content.appendChild(h('span', { style: { color: 'var(--error)' } }, resp?.error || 'Failed to load article.'));
-        return;
-      }
-      content.appendChild(renderArticleColumn(resp.article));
-    })
-    .catch(e => {
-      content.textContent = '';
-      content.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message));
-    });
+  asyncModal(
+    meta.articleNumber ? `#${meta.articleNumber}${meta.title ? ' — ' + meta.title : ''}` : 'Article Preview',
+    () => fetchArticlePreviewData(articleId).then(resp => {
+      if (!resp?.success) throw new Error(resp?.error || 'Failed to load article.');
+      return resp.article;
+    }),
+    (article) => renderArticleColumn(article),
+    { wide: true }
+  );
 }
 
 export function showArticleCompare(metaA = {}, metaB = {}) {
   const title = `Compare: #${metaA.articleNumber || ''} vs #${metaB.articleNumber || ''}`;
-  const content = loadingModal(title);
-
-  Promise.all([fetchArticlePreviewData(metaA.id), fetchArticlePreviewData(metaB.id)])
-    .then(([respA, respB]) => {
-      content.textContent = '';
-      if (!respA?.success || !respB?.success) {
-        content.appendChild(h('span', { style: { color: 'var(--error)' } }, respA?.error || respB?.error || 'Failed to load one or both articles.'));
-        return;
-      }
-      const grid = h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', maxHeight: '70vh', overflow: 'auto' } },
-        h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
-          h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, `#${respA.article.articleNumber}`),
-          renderArticleColumn(respA.article, { compact: true })
-        ),
-        h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
-          h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, `#${respB.article.articleNumber}`),
-          renderArticleColumn(respB.article, { compact: true })
-        )
-      );
-      content.appendChild(grid);
-    })
-    .catch(e => {
-      content.textContent = '';
-      content.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message));
-    });
+  asyncModal(
+    title,
+    () => Promise.all([fetchArticlePreviewData(metaA.id), fetchArticlePreviewData(metaB.id)]).then(([respA, respB]) => {
+      if (!respA?.success || !respB?.success) throw new Error(respA?.error || respB?.error || 'Failed to load one or both articles.');
+      return [respA.article, respB.article];
+    }),
+    ([articleA, articleB]) => h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', maxHeight: '70vh', overflow: 'auto' } },
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--border)' } }, `#${articleA.articleNumber}`),
+        renderArticleColumn(articleA, { compact: true })
+      ),
+      h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
+        h('div', { style: { fontSize: '11px', fontWeight: '700', color: 'var(--primary)', textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: '2px solid var(--primary)' } }, `#${articleB.articleNumber}`),
+        renderArticleColumn(articleB, { compact: true })
+      )
+    ),
+    { wide: true }
+  );
 }

@@ -3,12 +3,15 @@ import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, applySettings, MODEL_PRICING } from '../shared/config.js';
 import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../shared/cost.js';
+import { listGatewayModels } from '../shared/gateway.js';
+
+const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
   { id: 'kb-articles', label: 'KB Articles' },
   { id: 'known-issues', label: 'Known Issues' },
-  { id: 'dedup', label: 'Duplicates' }
+  { id: 'dedup', label: 'KB Dedupe' }
 ];
 
 let _activeModule = null;
@@ -40,6 +43,7 @@ async function init() {
   render();
   checkConnections();
   checkUpdate();
+  refreshModelCatalogIfStale();
 
   const params = new URLSearchParams(window.location.search);
   const caseUrl = params.get('caseUrl');
@@ -53,6 +57,18 @@ async function init() {
       setState('app.activeTab', event.state.tab);
     }
   });
+}
+
+async function refreshModelCatalogIfStale() {
+  const data = await localGet([STORAGE_KEYS.MODEL_CATALOG, STORAGE_KEYS.GATEWAY_TOKEN]);
+  const catalogAt = data[STORAGE_KEYS.MODEL_CATALOG]?.at || 0;
+  if (catalogAt && (Date.now() - catalogAt < MODEL_CATALOG_MAX_AGE_MS)) return;
+  const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
+  if (!token) return;
+  const models = await listGatewayModels(token);
+  if (models && models.length) {
+    await localSet({ [STORAGE_KEYS.MODEL_CATALOG]: { models, at: Date.now() } });
+  }
 }
 
 function render() {
@@ -229,9 +245,10 @@ async function checkConnections() {
 }
 
 async function refreshConnections() {
-  await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => {});
+  const resp = await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => null);
   await checkConnections();
-  toast('Auth status refreshed.', 'info');
+  if (resp) toast('Auth status refreshed.', 'info');
+  else toast('Auth refresh failed.', 'error');
 }
 
 let _pendingUpdate = null;

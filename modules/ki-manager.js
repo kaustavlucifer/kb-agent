@@ -1,4 +1,4 @@
-import { h, spinner, toast, modal, swapButtonWithLink, sectionsEditor, emptyState, multiSelect, richHtmlBox } from '../shared/ui.js';
+import { h, spinner, toast, modal, swapButtonWithLink, sectionsEditor, emptyState, multiSelect, richHtmlBox, createSorter, scoreColor, crossScopeToggle, requestToken, paginationBar, fieldLabel, asyncModal } from '../shared/ui.js';
 import { parseRewriteSections, serializeRewriteSections, markdownToHtml } from '../shared/markdown.js';
 import { KI_CLOUD_MAPPING, KI_CATEGORIES } from '../data/ki_mapping.js';
 
@@ -19,6 +19,13 @@ let _kiRewriteLoadingId = null;
 let _kiScoringId = null;
 let _kiScores = {};
 let _kiDraftCache = {};
+const _kiSorter = createSorter(null);
+const _crossSearchToken = requestToken();
+
+function toggleKiSort(col) {
+  _kiSorter.toggle(col);
+  render();
+}
 
 const KI_FIELDS = [
   { field: 'subject', label: 'Subject', plain: true, singleLine: true },
@@ -102,18 +109,23 @@ async function createKnownIssue(key, cloud, category, workId, onCreated) {
 
 async function runCrossSearch(query) {
   if (!query || query.trim().length < 2) { _kiCrossResults = []; render(); return; }
+  const token = _crossSearchToken.next();
   _kiCrossLoading = true;
   render();
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'SEARCH_KI_UNSCOPED', query: query.trim() });
+    if (!_crossSearchToken.isCurrent(token)) return;
     if (resp?.error) { toast(resp.error, 'error'); _kiCrossResults = []; }
     else { _kiCrossResults = resp?.items || []; }
   } catch (e) {
+    if (!_crossSearchToken.isCurrent(token)) return;
     toast(e.message, 'error');
     _kiCrossResults = [];
   } finally {
-    _kiCrossLoading = false;
-    render();
+    if (_crossSearchToken.isCurrent(token)) {
+      _kiCrossLoading = false;
+      render();
+    }
   }
 }
 
@@ -139,8 +151,21 @@ async function loadKnownIssues(forceLive = false) {
 
 let _filteredMemo = null;
 
+function compareKis(a, b) {
+  const col = _kiSorter.col;
+  let va, vb;
+  if (col === 'reportingCount') {
+    va = a.reportingCount || 0;
+    vb = b.reportingCount || 0;
+  } else {
+    va = (a[col] || '').toLowerCase();
+    vb = (b[col] || '').toLowerCase();
+  }
+  return _kiSorter.compare(va, vb);
+}
+
 function getFilteredKis() {
-  const signature = `${_kiFilterText}|${_kiFilterCategories.join(',')}`;
+  const signature = `${_kiFilterText}|${_kiFilterCategories.join(',')}|${_kiSorter.col}|${_kiSorter.dir}`;
   if (_filteredMemo && _filteredMemo.items === _kiAllItems && _filteredMemo.signature === signature) {
     return _filteredMemo.result;
   }
@@ -150,6 +175,7 @@ function getFilteredKis() {
     const term = _kiFilterText.toLowerCase();
     filtered = filtered.filter(ki => `${ki.name || ''} ${ki.subject || ''}`.toLowerCase().includes(term));
   }
+  if (_kiSorter.col) filtered = [...filtered].sort(compareKis);
   _filteredMemo = { items: _kiAllItems, signature, result: filtered };
   return filtered;
 }
@@ -206,34 +232,26 @@ function workItemCell(item) {
 }
 
 function viewKi(item) {
-  const content = h('div', { style: { minHeight: '100px', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, spinner('md'));
-  modal(`${item.name || item.id}${item.subject ? ' — ' + item.subject : ''}`, content, { wide: true });
-
-  chrome.runtime.sendMessage({ action: 'FETCH_KI_DETAIL', id: item.id }).then(resp => {
-    content.style.display = '';
-    content.style.minHeight = '';
-    content.textContent = '';
-    if (!resp?.success) {
-      content.appendChild(h('div', { style: { color: 'var(--error)', fontSize: '12px' } }, resp?.error || 'Failed to load.'));
-      return;
-    }
-    const ki = resp.ki;
-    const field = (label, value) => h('div', { style: { marginBottom: '12px' } },
-      h('div', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' } }, label),
-      richHtmlBox(value ? markdownToHtml(value) : '')
-    );
-    content.appendChild(h('div', null,
-      item.workId ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px' } }, 'Work Item: ', workItemCell(item)) : null,
-      field('Summary', ki.summary),
-      field('Repro Steps', ki.repro),
-      field('Workaround', ki.workaround)
-    ));
-  }).catch(e => {
-    content.style.display = '';
-    content.style.minHeight = '';
-    content.textContent = '';
-    content.appendChild(h('div', { style: { color: 'var(--error)', fontSize: '12px' } }, e.message));
-  });
+  asyncModal(
+    `${item.name || item.id}${item.subject ? ' — ' + item.subject : ''}`,
+    () => chrome.runtime.sendMessage({ action: 'FETCH_KI_DETAIL', id: item.id }).then(resp => {
+      if (!resp?.success) throw new Error(resp?.error || 'Failed to load.');
+      return resp.ki;
+    }),
+    (ki) => {
+      const field = (label, value) => h('div', { style: { marginBottom: '12px' } },
+        fieldLabel(label, { marginBottom: '4px' }),
+        richHtmlBox(value ? markdownToHtml(value) : '')
+      );
+      return h('div', null,
+        item.workId ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px' } }, 'Work Item: ', workItemCell(item)) : null,
+        field('Summary', ki.summary),
+        field('Repro Steps', ki.repro),
+        field('Workaround', ki.workaround)
+      );
+    },
+    { wide: true }
+  );
 }
 
 function viewButton(item) {
@@ -287,8 +305,7 @@ function scorePill(item) {
   if (s?.overall == null) {
     return h('button', { class: 'btn btn--ghost btn--sm', onClick: () => scoreKi(item) }, 'Score');
   }
-  const color = s.overall >= 80 ? 'success' : s.overall >= 60 ? 'warning' : 'error';
-  return h('span', { class: `pill pill--${color}`, style: { cursor: 'pointer' }, title: 'View score details and rescore', onClick: () => showKiScoreDetail(item, s) }, String(s.overall));
+  return h('span', { class: `pill pill--${scoreColor(s.overall)}`, style: { cursor: 'pointer' }, title: 'View score details and rescore', onClick: () => showKiScoreDetail(item, s) }, String(s.overall));
 }
 
 function truncatedCell(value, widthPct) {
@@ -305,16 +322,18 @@ function renderResultsTable(pageItems) {
   if (!pageItems.length) {
     return emptyState('🔍', 'No Known Issues found.');
   }
+  const ind = (col) => _kiSorter.indicator(col);
+  const sortTh = (col, label, width) => h('th', { style: { width, cursor: 'pointer' }, onClick: () => toggleKiSort(col) }, label + ind(col));
   return h('table', { class: 'data-table', style: { tableLayout: 'fixed', width: '100%' } },
     h('thead', null, h('tr', null,
-      h('th', { style: { width: '9%' } }, 'Name'),
-      h('th', { style: { width: '18%' } }, 'Subject'),
-      h('th', { style: { width: '10%' } }, 'Cloud'),
-      h('th', { style: { width: '14%' } }, 'Category'),
-      h('th', { style: { width: '10%' } }, 'Status'),
-      h('th', { style: { width: '10%' } }, 'Created By'),
-      h('th', { style: { width: '10%' } }, 'Approver'),
-      h('th', { style: { width: '7%' } }, 'Impacted'),
+      sortTh('name', 'Name', '9%'),
+      sortTh('subject', 'Subject', '18%'),
+      sortTh('cloud', 'Cloud', '10%'),
+      sortTh('category', 'Category', '14%'),
+      sortTh('status', 'Status', '10%'),
+      sortTh('createdByName', 'Created By', '10%'),
+      sortTh('approverName', 'Approver', '10%'),
+      sortTh('reportingCount', 'Impacted', '7%'),
       h('th', { style: { width: '12%' } }, 'Actions')
     )),
     h('tbody', null, ...pageItems.map(item => h('tr', null,
@@ -347,7 +366,7 @@ function render() {
   _container.textContent = '';
 
   const crossMode = _kiCrossScope && _kiFilterText.trim().length >= 2;
-  const filtered = crossMode ? _kiCrossResults : getFilteredKis();
+  const filtered = crossMode ? (_kiSorter.col ? [..._kiCrossResults].sort(compareKis) : _kiCrossResults) : getFilteredKis();
   const totalPages = crossMode ? 1 : (Math.ceil(filtered.length / _pageSize) || 1);
   if (_page >= totalPages) _page = Math.max(0, totalPages - 1);
   const pageStart = crossMode ? 0 : _page * _pageSize;
@@ -368,20 +387,23 @@ function render() {
     setTimeout(() => { const el = document.getElementById('ki-search'); if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; } }, 0);
   }
 
-  const crossScopeCheckbox = h('input', { type: 'checkbox' });
-  crossScopeCheckbox.checked = _kiCrossScope;
-  crossScopeCheckbox.addEventListener('change', e => {
-    _kiCrossScope = e.target.checked;
-    _page = 0;
-    if (_kiCrossScope) {
-      if (_kiFilterText.trim().length >= 2) runCrossSearch(_kiFilterText);
-      else render();
-    } else {
-      _kiCrossResults = [];
-      render();
+  const crossScopeLabel = crossScopeToggle({
+    label: 'Search all categories',
+    title: 'Search ALL categories, not just the configured list — use this to find and score/rewrite a KI outside the usual scope.',
+    checked: _kiCrossScope,
+    onChange: (checked) => {
+      _kiCrossScope = checked;
+      _page = 0;
+      if (_kiCrossScope) {
+        if (_kiFilterText.trim().length >= 2) runCrossSearch(_kiFilterText);
+        else render();
+      } else {
+        _crossSearchToken.next();
+        _kiCrossResults = [];
+        render();
+      }
     }
   });
-  const crossScopeLabel = h('label', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap' }, title: 'Search ALL categories, not just the configured list — use this to find and score/rewrite a KI outside the usual scope.' }, crossScopeCheckbox, 'Search all categories');
 
   const categoryFilter = multiSelect('ki-category-filter', 'Category', KI_CATEGORIES.map(c => ({ value: c, label: c })), _kiFilterCategories, (selected) => {
     _kiFilterCategories = selected;
@@ -396,13 +418,10 @@ function render() {
     `${filtered.length !== _kiAllItems.length ? `${filtered.length} of ${_kiAllItems.length}` : `${_kiAllItems.length}`} Known Issues`
   );
 
-  const paginationRow = crossMode ? null : h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
-    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev') : null,
-    h('span', { style: { color: 'var(--text-secondary)' } },
-      filtered.length ? `Showing ${pageStart + 1}–${pageStart + pageItems.length} of ${filtered.length} (Page ${_page + 1}/${totalPages})` : ''
-    ),
-    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPages - 1, onClick: () => { _page++; render(); } }, 'Next →') : null
-  );
+  const paginationRow = crossMode ? null : paginationBar({
+    page: _page, totalPages, pageStart, pageCount: pageItems.length, total: filtered.length,
+    onPage: (p) => { _page = p; render(); }
+  });
 
   const searchCard = h('div', { class: 'card', style: { padding: '16px' } },
     h('h3', { style: { fontSize: '14px', marginBottom: '10px' } }, 'Existing Known Issues'),

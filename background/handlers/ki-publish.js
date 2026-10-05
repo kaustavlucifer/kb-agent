@@ -1,6 +1,6 @@
 import { sfPost, sfPatch, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtmlKeepLinks } from '../../shared/api.js';
 import { detectKiSession } from '../../shared/auth.js';
-import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS } from '../../shared/config.js';
+import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL } from '../../shared/config.js';
 import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { redactPii } from '../../shared/pii.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
@@ -42,7 +42,7 @@ export function resolveKiCloud(casePt) {
   return null;
 }
 
-export async function generateKiDraftContent(caseRecord, comments, chatterNotes) {
+export async function generateKiDraftContent(caseRecord, comments, chatterNotes, signal) {
   const commentText = comments.slice(0, 8).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n');
   const user = `Case Subject: ${redactPii(caseRecord.Subject || '', KI_PII_OPTS)}
 Description: ${redactPii((caseRecord.Description || '').slice(0, 2000), KI_PII_OPTS)}
@@ -53,7 +53,9 @@ ${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${chatterNotes ? `\nRelated
       system: KI_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: user }],
       maxTokens: 1200,
-      temperature: 0.2
+      temperature: 0.2,
+      model: SCORING_MODEL,
+      signal
     });
     return extractJson(extractText(resp));
   } catch {
@@ -72,7 +74,8 @@ Workaround: ${existing.workaround || ''}${chatterNotes ? `\n\nRELATED CHATTER NO
       system: `${KI_SYSTEM_PROMPT}\nYou are REVISING an existing Known Issue — preserve accurate technical content, improve clarity, fix any customer-identifying leaks, and fill in Repro/Workaround if missing or weak.`,
       messages: [{ role: 'user', content: user }],
       maxTokens: 1200,
-      temperature: 0.2
+      temperature: 0.2,
+      model: SCORING_MODEL
     });
     return extractJson(extractText(resp));
   } catch {
@@ -92,8 +95,8 @@ export function kiUrl(lightningHost, id) {
   return `https://${lightningHost || 'known-issues-prd1.lightning.force.com'}/lightning/r/Known_Issue__c/${id}/view`;
 }
 
-export async function fetchKnownIssueDetail(id) {
-  const session = await detectKiSession();
+export async function fetchKnownIssueDetail(id, session) {
+  session = session || await detectKiSession();
   if (!session.sid) return { success: false, error: 'No Known Issues org session.' };
   let safeId;
   try { safeId = sanitizeId(id); } catch (e) { return { success: false, error: e.message }; }
@@ -122,21 +125,32 @@ export async function fetchKnownIssueDetail(id) {
 }
 
 export async function generateKiRewrite(kiId) {
-  const detail = await fetchKnownIssueDetail(kiId);
+  const session = await detectKiSession();
+  const detail = await fetchKnownIssueDetail(kiId, session);
   if (!detail.success) return detail;
 
-  const session = await detectKiSession();
-  const chatterMap = session.sid ? await fetchArticleChatterBatch([detail.ki.id], session).catch(() => new Map()) : new Map();
-  const chatterNotes = chatterMap.get(detail.ki.id) || '';
+  let chatterNotes = '';
+  let chatterError;
+  if (session.sid) {
+    try {
+      const chatterMap = await fetchArticleChatterBatch([detail.ki.id], session);
+      chatterNotes = chatterMap.get(detail.ki.id) || '';
+    } catch (e) {
+      chatterError = e.message;
+    }
+  }
 
   const draft = await rewriteKiAi(detail.ki, chatterNotes);
   if (!draft) return { success: false, error: 'Could not generate a rewrite for this KI.' };
   if (session.sid) logSignature('ki-rewrite-generated', session.apiBase, session.sid, detail.ki.id);
-  return { success: true, draft, original: detail.ki };
+  const result = { success: true, draft, original: detail.ki };
+  if (chatterError) result.chatterError = chatterError;
+  return result;
 }
 
 export async function scoreKnownIssue(kiId) {
-  const detail = await fetchKnownIssueDetail(kiId);
+  const session = await detectKiSession();
+  const detail = await fetchKnownIssueDetail(kiId, session);
   if (!detail.success) return { success: false, error: detail.error };
 
   const ki = detail.ki;
@@ -145,11 +159,11 @@ export async function scoreKnownIssue(kiId) {
       system: KI_SCORING_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Subject: ${ki.subject || ''}\nSummary: ${ki.summary || ''}\nRepro: ${ki.repro || ''}\nWorkaround: ${ki.workaround || ''}` }],
       maxTokens: 1000,
-      temperature: 0.1
+      temperature: 0.1,
+      model: SCORING_MODEL
     });
     const parsed = extractJson(extractText(resp));
     if (!parsed) return { success: false, error: 'Could not parse score.' };
-    const session = await detectKiSession();
     if (session.sid) logSignature('ki-scored', session.apiBase, session.sid, kiId);
     return { success: true, score: parsed };
   } catch (e) {
@@ -157,9 +171,26 @@ export async function scoreKnownIssue(kiId) {
   }
 }
 
+const kiCategoryIdCache = new Map();
+
+async function resolveKiCategoryId(session, categoryName) {
+  if (kiCategoryIdCache.has(categoryName)) return kiCategoryIdCache.get(categoryName);
+  const escaped = escapeSoql(categoryName);
+  const soql = `SELECT Category__c FROM Known_Issue__c WHERE Category__r.Name = '${escaped}' AND Category__c != null LIMIT 1`;
+  const records = await sfQuery(session.apiBase, session.sid, soql);
+  const id = records[0]?.Category__c || null;
+  if (id) kiCategoryIdCache.set(categoryName, id);
+  return id;
+}
+
 export async function createKnownIssue(payload) {
   const session = await detectKiSession();
   if (!session.sid) return { success: false, error: 'No Known Issues org session. Log into the Known Issues org first.' };
+
+  const categoryId = await resolveKiCategoryId(session, payload.category);
+  if (!categoryId) {
+    return { success: false, error: `Could not resolve Known Issue category "${payload.category}" to a record Id.` };
+  }
 
   const record = {
     [KI_DRAFT_SUBJECT_FIELD]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
@@ -169,7 +200,7 @@ export async function createKnownIssue(payload) {
     [KI_OUTSIDE_CORE_FIELD]: true,
     [KI_DISABLE_GUS_SYNC_FIELD]: false,
     Status__c: 'In Review',
-    Category__c: payload.category
+    Category__c: categoryId
   };
   if (payload.cloud) record.Cloud__c = payload.cloud;
   if (payload.workId) record.Work_ID__c = payload.workId;
@@ -177,6 +208,7 @@ export async function createKnownIssue(payload) {
   try {
     const result = await sfPost(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c`, session.sid, record);
     logSignature('ki-created', session.apiBase, session.sid, result.id);
+    await chrome.storage.local.remove([STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT]);
     return { success: true, id: result.id, url: kiUrl(session.lightningHost, result.id) };
   } catch (e) {
     return { success: false, error: e.message };
@@ -199,6 +231,7 @@ export async function updateKnownIssue(payload) {
   try {
     await sfPatch(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c/${safeId}`, session.sid, record);
     logSignature('ki-updated', session.apiBase, session.sid, safeId);
+    await chrome.storage.local.remove([STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT]);
     return { success: true, id: safeId, url: kiUrl(session.lightningHost, safeId) };
   } catch (e) {
     return { success: false, error: e.message };

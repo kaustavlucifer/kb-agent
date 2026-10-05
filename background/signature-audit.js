@@ -26,11 +26,14 @@ function buildFeedSosl(from, to) {
   return `FIND {"${SEARCH_PHRASE}"} IN ALL FIELDS RETURNING FeedItem(Id, ParentId, CreatedBy.Name, CreatedDate, Body WHERE Type = 'TextPost' AND Visibility = 'InternalUsers' AND CreatedDate > ${from.toISOString()} AND CreatedDate <= ${to.toISOString()} ORDER BY CreatedDate DESC LIMIT ${PAGE_LIMIT})`;
 }
 
-async function drainWindow(apiBase, sid, from, to, signal, rowsOut) {
+async function drainWindow(apiBase, sid, from, to, signal, rowsOut, seenIds) {
   let upper = to;
   while (true) {
+    if (signal?.aborted) return;
     const rows = await sfSearch(apiBase, sid, buildFeedSosl(from, upper), signal);
     for (const r of rows) {
+      if (seenIds.has(r.Id)) continue;
+      seenIds.add(r.Id);
       const kind = classifySignature(r.Body);
       if (!kind) continue;
       rowsOut.push({ kind, author: r.CreatedBy?.Name || 'Unknown', parentId: r.ParentId, date: r.CreatedDate });
@@ -42,10 +45,11 @@ async function drainWindow(apiBase, sid, from, to, signal, rowsOut) {
   }
 }
 
-async function runPooled(items, concurrency, fn) {
+async function runPooled(items, concurrency, fn, signal) {
   let idx = 0;
   async function worker() {
     while (idx < items.length) {
+      if (signal?.aborted) return;
       const i = idx++;
       await fn(items[i]);
     }
@@ -63,7 +67,7 @@ async function resolveNames(apiBase, sid, ids, soqlTemplate, mapFn, signal) {
       const records = await sfQuery(apiBase, sid, soqlTemplate(batch), signal);
       for (const r of records) map.set(r.Id, mapFn(r));
     } catch {}
-  });
+  }, signal);
   return map;
 }
 
@@ -83,12 +87,28 @@ const DEFAULT_BY_KIND = Object.fromEntries(Object.keys(KIND_TARGET).map(k => [k,
 export async function auditSignatures(apiBase, sid, { monthsBack = 3, onProgress, signal } = {}) {
   const slices = buildSlices(monthsBack);
   const rows = [];
+  const seenIds = new Set();
   let done = 0;
+  let failedSlices = 0;
+  let firstError = null;
   await runPooled(slices, MAX_CONCURRENT, async (slice) => {
-    try { await drainWindow(apiBase, sid, slice.from, slice.to, signal, rows); } catch {}
+    try {
+      await drainWindow(apiBase, sid, slice.from, slice.to, signal, rows, seenIds);
+    } catch (e) {
+      if (!signal?.aborted) {
+        failedSlices++;
+        if (!firstError) firstError = e?.message || 'Search failed';
+      }
+    }
     done++;
     if (onProgress) onProgress(done, slices.length);
-  });
+  }, signal);
+
+  if (signal?.aborted) {
+    const err = new Error('Audit aborted');
+    err.name = 'AbortError';
+    throw err;
+  }
 
   const caseIds = [...new Set(rows.filter(r => KIND_TARGET[r.kind] === 'case').map(r => r.parentId))];
   const articleIds = [...new Set(rows.filter(r => KIND_TARGET[r.kind] === 'article').map(r => r.parentId))];
@@ -115,7 +135,7 @@ export async function auditSignatures(apiBase, sid, { monthsBack = 3, onProgress
     const names = target === 'case' ? cases : target === 'ki' ? kis : articles;
     const label = names.get(r.parentId) || r.parentId;
     const key = `${r.kind}:${r.parentId}`;
-    if (!perRecord.has(key)) perRecord.set(key, { label, kind: r.kind, count: 0, lastDate: r.date });
+    if (!perRecord.has(key)) perRecord.set(key, { label, kind: r.kind, parentId: r.parentId, count: 0, lastDate: r.date });
     const entry = perRecord.get(key);
     entry.count++;
     if (r.date > entry.lastDate) entry.lastDate = r.date;
@@ -132,7 +152,10 @@ export async function auditSignatures(apiBase, sid, { monthsBack = 3, onProgress
     authors,
     records,
     windowFrom: slices.length ? slices[slices.length - 1].from.toISOString() : null,
-    windowTo: slices.length ? slices[0].to.toISOString() : null
+    windowTo: slices.length ? slices[0].to.toISOString() : null,
+    failedSlices,
+    totalSlices: slices.length,
+    firstError
   };
 }
 
@@ -148,7 +171,18 @@ export function mergeAuditReports(a, b) {
   for (const x of b.authors) authorMap.set(x.label, (authorMap.get(x.label) || 0) + x.count);
   const authors = [...authorMap.entries()].sort((x, y) => y[1] - x[1]).map(([label, count]) => ({ label, count }));
 
-  const records = [...a.records, ...b.records].sort((x, y) => (y.lastDate || '').localeCompare(x.lastDate || ''));
+  const mergedRecords = new Map();
+  for (const r of [...a.records, ...b.records]) {
+    const key = `${r.kind}:${r.parentId}`;
+    const existing = mergedRecords.get(key);
+    if (!existing) {
+      mergedRecords.set(key, { ...r });
+    } else {
+      existing.count += r.count;
+      if ((r.lastDate || '') > (existing.lastDate || '')) existing.lastDate = r.lastDate;
+    }
+  }
+  const records = [...mergedRecords.values()].sort((x, y) => (y.lastDate || '').localeCompare(x.lastDate || ''));
 
   return {
     total: a.total + b.total,
@@ -157,6 +191,9 @@ export function mergeAuditReports(a, b) {
     authors,
     records,
     windowFrom: [a.windowFrom, b.windowFrom].filter(Boolean).sort()[0] || null,
-    windowTo: [a.windowTo, b.windowTo].filter(Boolean).sort().slice(-1)[0] || null
+    windowTo: [a.windowTo, b.windowTo].filter(Boolean).sort().slice(-1)[0] || null,
+    failedSlices: (a.failedSlices || 0) + (b.failedSlices || 0),
+    totalSlices: (a.totalSlices || 0) + (b.totalSlices || 0),
+    firstError: a.firstError || b.firstError || null
   };
 }

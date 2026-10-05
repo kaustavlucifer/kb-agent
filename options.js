@@ -1,5 +1,6 @@
 import { STORAGE_KEYS, SETTINGS_SCHEMA, MODEL_CHOICES, currentSettings, applySettings } from './shared/config.js';
 import { h, modal, progressBar } from './shared/ui.js';
+import { listGatewayModels } from './shared/gateway.js';
 
 const tokenEl = document.getElementById('token');
 const bypassEl = document.getElementById('bypass-guard-rails');
@@ -11,6 +12,33 @@ const modelItems = SETTINGS_SCHEMA.filter(s => s.kind === 'model');
 const numberItems = SETTINGS_SCHEMA.filter(s => s.kind === 'number');
 
 const controls = {};
+const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+let _modelCatalog = null;
+
+function readableModelLabel(id) {
+  const parts = id.replace(/^claude-/, '').split('-').filter(p => !/^\d{8}$/.test(p));
+  const family = parts[0] ? parts[0][0].toUpperCase() + parts[0].slice(1) : id;
+  const version = parts.slice(1).join('.');
+  return `Claude ${family}${version ? ' ' + version : ''}`;
+}
+
+function labelForCatalogEntry(m) {
+  return (m.label && m.label !== m.value) ? m.label : readableModelLabel(m.value);
+}
+
+function modelOptionsFor(item, currentValue) {
+  const dynamic = !!(_modelCatalog && _modelCatalog.length);
+  const catalog = dynamic ? _modelCatalog : MODEL_CHOICES;
+  const options = catalog.map(m => {
+    let label = labelForCatalogEntry(m);
+    if (dynamic && m.value === item.default) label += ' (default)';
+    return { value: m.value, label, title: m.value };
+  });
+  if (currentValue && !options.some(o => o.value === currentValue)) {
+    options.push({ value: currentValue, label: `${currentValue} (saved — not in your gateway list)`, title: currentValue });
+  }
+  return options;
+}
 
 function fieldShell(item, control) {
   const field = document.createElement('div');
@@ -30,15 +58,33 @@ function fieldShell(item, control) {
 function buildModelField(item, value) {
   const select = document.createElement('select');
   select.id = `opt-${item.key}`;
-  for (const m of MODEL_CHOICES) {
+  for (const m of modelOptionsFor(item, value)) {
     const opt = document.createElement('option');
     opt.value = m.value;
     opt.textContent = m.label;
+    opt.title = m.title;
     select.appendChild(opt);
   }
   select.value = value;
   controls[item.key] = { kind: 'model', read: () => select.value };
   return fieldShell(item, select);
+}
+
+function refreshModelDropdowns() {
+  for (const item of modelItems) {
+    const select = document.getElementById(`opt-${item.key}`);
+    if (!select) continue;
+    const currentValue = select.value;
+    select.textContent = '';
+    for (const m of modelOptionsFor(item, currentValue)) {
+      const opt = document.createElement('option');
+      opt.value = m.value;
+      opt.textContent = m.label;
+      opt.title = m.title;
+      select.appendChild(opt);
+    }
+    select.value = currentValue;
+  }
 }
 
 function buildNumberField(item, value) {
@@ -68,12 +114,37 @@ function setStatus(text, color) {
 }
 
 async function load() {
-  const data = await chrome.storage.local.get([STORAGE_KEYS.GATEWAY_TOKEN, STORAGE_KEYS.BYPASS_GUARD_RAILS, STORAGE_KEYS.SETTINGS]);
+  const data = await chrome.storage.local.get([STORAGE_KEYS.GATEWAY_TOKEN, STORAGE_KEYS.BYPASS_GUARD_RAILS, STORAGE_KEYS.SETTINGS, STORAGE_KEYS.MODEL_CATALOG]);
   if (data[STORAGE_KEYS.GATEWAY_TOKEN]) tokenEl.placeholder = '••••••••  (saved)';
   if (data[STORAGE_KEYS.BYPASS_GUARD_RAILS]) bypassEl.checked = true;
   applySettings(data[STORAGE_KEYS.SETTINGS]);
+  _modelCatalog = data[STORAGE_KEYS.MODEL_CATALOG]?.models || null;
   renderForm();
+
+  const catalogAt = data[STORAGE_KEYS.MODEL_CATALOG]?.at || 0;
+  if (!catalogAt || (Date.now() - catalogAt > MODEL_CATALOG_MAX_AGE_MS)) {
+    fetchModelCatalog(data[STORAGE_KEYS.GATEWAY_TOKEN]);
+  }
 }
+
+async function fetchModelCatalog(token) {
+  const statusEl2 = document.getElementById('model-refresh-status');
+  if (statusEl2) statusEl2.textContent = 'Loading…';
+  const models = await listGatewayModels(token);
+  if (models && models.length) {
+    _modelCatalog = models;
+    await chrome.storage.local.set({ [STORAGE_KEYS.MODEL_CATALOG]: { models, at: Date.now() } });
+    refreshModelDropdowns();
+    if (statusEl2) statusEl2.textContent = `${models.length} models`;
+  } else {
+    if (statusEl2) statusEl2.textContent = 'Failed';
+  }
+}
+
+document.getElementById('refresh-models-btn').addEventListener('click', async () => {
+  const data = await chrome.storage.local.get([STORAGE_KEYS.GATEWAY_TOKEN]);
+  fetchModelCatalog(data[STORAGE_KEYS.GATEWAY_TOKEN]);
+});
 
 function collectSettings() {
   const out = {};
@@ -128,7 +199,12 @@ document.getElementById('test-btn').addEventListener('click', async () => {
 });
 
 document.getElementById('clear-btn').addEventListener('click', async () => {
-  await chrome.storage.local.remove(['kba_all_articles', 'kba_all_articles_at', 'kba_all_articles_tier2_at', 'kba_article_scores', 'kba_dedup_results', 'kba_dedup_at', STORAGE_KEYS.RECENT_CASES, STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT]);
+  await chrome.storage.local.remove([
+    STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT, STORAGE_KEYS.ARTICLE_SCORES,
+    STORAGE_KEYS.DEDUP_RESULTS, STORAGE_KEYS.DEDUP_AT, STORAGE_KEYS.RECENT_CASES,
+    STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT,
+    STORAGE_KEYS.AUTH_CACHE, STORAGE_KEYS.MERGE_CACHE
+  ]);
   setStatus('Cache cleared.', 'var(--text-secondary)');
 });
 
@@ -215,6 +291,8 @@ function renderAnalyticsReport(ref, report) {
 
   const body = h('div', null,
     h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '12px' } }, `${(report.windowFrom || '').slice(0, 10)} — ${(report.windowTo || '').slice(0, 10)}`),
+    report.failedSlices ? h('div', { style: { fontSize: '12px', color: 'var(--warning)', marginBottom: '12px' } },
+      `Incomplete: ${report.failedSlices} of ${report.totalSlices} search windows failed${report.firstError ? ` (${report.firstError})` : ''}. Counts below are undercounted — re-run after re-logging in.`) : null,
     summary, tables, detail
   );
 

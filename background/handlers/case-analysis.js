@@ -132,7 +132,7 @@ export async function handleAnalyze(port, msg) {
     send({ type: 'meta', customizationWarning: { isCustomerSpecific: true, indicators: caseAbstract.customizationIndicators || [] } });
   }
 
-  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, aiCaseRecord.Subject, signal).catch(() => ({ items: [], error: null }));
+  const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, aiCaseRecord.Subject, signal).catch(e => ({ items: [], error: e.message }));
 
   const caseContextForDocs = `Subject: ${aiCaseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 800)}`;
   const [soslResults, productDocs, kiData] = await Promise.all([
@@ -274,6 +274,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
+  const kiSuggestionPromise = computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, action, gusData.items, signal).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
   let structured;
 
   if (action === 'NO_ACTION') {
@@ -312,7 +313,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
     }
   }
 
-  const kiSuggestion = await computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, action, gusData.items).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
+  const kiSuggestion = await kiSuggestionPromise;
   send({ type: 'meta', kiSuggestion });
 
   await caseSummaryPromise;
@@ -946,12 +947,12 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
-async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, kbAction, gusItems) {
+async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, kbAction, gusItems, signal) {
   const bestExisting = (kiData.items || [])[0];
-  if (bestExisting && (bestExisting.relevanceScore == null || bestExisting.relevanceScore >= 60)) {
+  if (bestExisting && bestExisting.relevanceScore != null && bestExisting.relevanceScore >= 60) {
     return {
       action: 'EXISTING_COVERS',
-      existingKi: { id: bestExisting.id, name: bestExisting.name, subject: bestExisting.subject, url: kiUrl(null, bestExisting.id) }
+      existingKi: { id: bestExisting.id, name: bestExisting.name, subject: bestExisting.subject, url: kiUrl(kiData.lightningHost, bestExisting.id) }
     };
   }
   if (!gusItems?.length) {
@@ -963,7 +964,7 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
   if (kbAction === 'NO_ACTION') {
     return { action: 'NONE', reason: 'Existing KB coverage is sufficient — no gap suggesting a new Known Issue.' };
   }
-  const draft = await generateKiDraftContent(caseRecord, comments, '');
+  const draft = await generateKiDraftContent(caseRecord, comments, '', signal);
   if (!draft) return { action: 'NONE', reason: 'Could not determine a Known Issue draft.' };
   return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: gusItems[0].name };
 }

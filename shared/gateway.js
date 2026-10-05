@@ -27,6 +27,58 @@ function buildSystemField(system, cache) {
   return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
 }
 
+const MODEL_FAMILY_ORDER = { opus: 0, sonnet: 1, haiku: 2 };
+
+function familyRank(id) {
+  const lower = id.toLowerCase();
+  for (const family of Object.keys(MODEL_FAMILY_ORDER)) {
+    if (lower.includes(family)) return MODEL_FAMILY_ORDER[family];
+  }
+  return 3;
+}
+
+async function fetchGatewayPricing(token) {
+  try {
+    const resp = await fetch(`${GATEWAY_BASE}/model_group/info`, { method: 'GET', headers: buildHeaders(token) });
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    const pricing = {};
+    for (const g of data?.data || []) {
+      if (!g.model_group?.startsWith('claude-')) continue;
+      const inPerTok = Number(g.input_cost_per_token);
+      const outPerTok = Number(g.output_cost_per_token);
+      if (!Number.isFinite(inPerTok) || !Number.isFinite(outPerTok) || inPerTok <= 0) continue;
+      pricing[g.model_group] = { in: inPerTok * 1_000_000, out: outPerTok * 1_000_000 };
+    }
+    return pricing;
+  } catch {
+    return {};
+  }
+}
+
+export async function listGatewayModels(token) {
+  if (!token) return null;
+  try {
+    const [resp, pricing] = await Promise.all([
+      fetch(`${GATEWAY_BASE}/v1/models`, { method: 'GET', headers: buildHeaders(token) }),
+      fetchGatewayPricing(token)
+    ]);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const models = (data?.data || [])
+      .filter(m => m.id && m.id.startsWith('claude-') && !m.id.includes('auto-model'))
+      .map(m => ({ value: m.id, label: m.display_name || m.id, pricing: pricing[m.id] || null }))
+      .sort((a, b) => {
+        const rankDiff = familyRank(a.value) - familyRank(b.value);
+        if (rankDiff !== 0) return rankDiff;
+        return b.value.localeCompare(a.value);
+      });
+    return models;
+  } catch {
+    return null;
+  }
+}
+
 export async function pingGateway(token) {
   const t = token || await getToken();
   if (!t) return { connected: false, hasToken: false, error: 'No token configured' };

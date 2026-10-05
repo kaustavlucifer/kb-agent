@@ -2,13 +2,40 @@ import { localGet, localSet } from './storage.js';
 import { setState } from './state.js';
 import {
   MODEL_PRICING, CACHE_READ_MULTIPLIER, CACHE_WRITE_MULTIPLIER, CHARS_PER_TOKEN, STORAGE_KEYS,
-  SCORING_MODEL, SCORING_SYSTEM_CHARS, SCORING_EST_OUTPUT_TOKENS, MAX_BODY_CHARS,
-  DEDUP_SYSTEM_CHARS, DEDUP_BODY_CHARS, DEDUP_EST_OUTPUT_INPUT_RATIO
+  SCORING_MODEL, SCORING_EST_OUTPUT_TOKENS, MAX_BODY_CHARS,
+  DEDUP_BODY_CHARS, DEDUP_EST_OUTPUT_INPUT_RATIO
 } from './config.js';
 
+const FAMILY_PRICING = {
+  opus: { in: 4.0, out: 20.0 },
+  sonnet: { in: 2.0, out: 10.0 },
+  haiku: { in: 1.0, out: 5.0 }
+};
+
+let _gatewayPricing = {};
+
+function setGatewayPricing(catalog) {
+  const next = {};
+  for (const m of catalog?.models || []) {
+    if (m.pricing) next[m.value] = m.pricing;
+  }
+  _gatewayPricing = next;
+}
+
+localGet([STORAGE_KEYS.MODEL_CATALOG]).then(data => setGatewayPricing(data[STORAGE_KEYS.MODEL_CATALOG])).catch(() => {});
+
+function pricingFor(model) {
+  if (_gatewayPricing[model]) return _gatewayPricing[model];
+  if (MODEL_PRICING[model]) return MODEL_PRICING[model];
+  const lower = (model || '').toLowerCase();
+  for (const family of ['opus', 'sonnet', 'haiku']) {
+    if (lower.includes(family)) return FAMILY_PRICING[family];
+  }
+  return FAMILY_PRICING.sonnet;
+}
+
 export function costUsd(model, inputTokens, outputTokens, cacheReadTokens = 0, cacheCreationTokens = 0) {
-  const p = MODEL_PRICING[model];
-  if (!p) return 0;
+  const p = pricingFor(model);
   return (inputTokens / 1_000_000) * p.in
     + (cacheReadTokens / 1_000_000) * p.in * CACHE_READ_MULTIPLIER
     + (cacheCreationTokens / 1_000_000) * p.in * CACHE_WRITE_MULTIPLIER
@@ -127,6 +154,13 @@ async function doFlush() {
 
 export { flushCost };
 
+if (!IS_SERVICE_WORKER) {
+  window.addEventListener('pagehide', () => { flushCost(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushCost();
+  });
+}
+
 export async function recordUsage(model, usage) {
   if (!usage || (!usage.inputTokens && !usage.outputTokens)) return;
   await ensureLoaded();
@@ -142,6 +176,7 @@ export async function recordUsage(model, usage) {
 }
 
 export function onCostStorageChange(changes) {
+  if (changes[STORAGE_KEYS.MODEL_CATALOG]) setGatewayPricing(changes[STORAGE_KEYS.MODEL_CATALOG].newValue);
   const other = changes[OTHER_KEY];
   if (other) {
     _otherPersisted = other.newValue || emptyTotals();
@@ -168,25 +203,25 @@ export async function resetCostTotals() {
   publish();
 }
 
-export function estimateScoring(articles) {
+export function estimateScoring(articles, systemChars) {
   const bodyCap = MAX_BODY_CHARS * 2 + 1500;
   let inputTokens = 0;
   let outputTokens = 0;
   for (const a of articles) {
     const body = Math.min(Math.max(a.articleLength || 0, 800), bodyCap);
-    const chars = SCORING_SYSTEM_CHARS + 400 + (a.title || '').length + (a.summary || '').length + body;
+    const chars = systemChars + 400 + (a.title || '').length + (a.summary || '').length + body;
     inputTokens += charsToTokens(chars);
     outputTokens += SCORING_EST_OUTPUT_TOKENS;
   }
   return { calls: articles.length, inputTokens, outputTokens, costUsd: costUsd(SCORING_MODEL, inputTokens, outputTokens) };
 }
 
-export function estimateDedup(batches) {
+export function estimateDedup(batches, systemChars) {
   const perArticleBodyCap = DEDUP_BODY_CHARS * 3;
   let inputTokens = 0;
   let outputTokens = 0;
   for (const batch of batches) {
-    let chars = DEDUP_SYSTEM_CHARS + 120;
+    let chars = systemChars + 120;
     for (const a of batch) {
       const body = Math.min(Math.max(a.articleLength || 0, 400), perArticleBodyCap);
       chars += (a.title || '').length + 200 + body + 40;

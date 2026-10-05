@@ -1,4 +1,4 @@
-import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle } from '../shared/ui.js';
+import { h, spinner, emptyState, toast, modal, progressBar, multiSelect, renderMarkdown, stickyScrollLayout, createSorter, statusPill, uniqueSortedValues, sectionsEditor, streamingStatus, swapButtonWithLink, markdownStreamThrottle, scoreColor, crossScopeToggle, requestToken, paginationBar } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { detectSession } from '../shared/auth.js';
 import { logSignature } from '../shared/signature.js';
@@ -6,7 +6,7 @@ import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../s
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped } from '../shared/scoring.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped, SCORING_SYSTEM_CHARS } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { parseRewriteSections, markdownToHtml } from '../shared/markdown.js';
@@ -28,6 +28,16 @@ let _searchDebounce = null;
 let _crossScope = false;
 let _crossResults = [];
 let _crossLoading = false;
+const _crossSearchToken = requestToken();
+
+function findArticle(id) {
+  const articles = getState('kb.articles') || [];
+  return articles.find(a => a.id === id) || _crossResults.find(a => a.id === id);
+}
+
+function allKnownArticles() {
+  return [...(getState('kb.articles') || []), ..._crossResults];
+}
 
 const rewriteSectionsEditor = sectionsEditor({
   getCachedText: (article) => _rewriteCache[article.id] || '',
@@ -98,9 +108,8 @@ export function unmount() {
 }
 
 function handleFocusArticle(articleId) {
-  const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
-  const article = articles.find(a => a.id === articleId);
+  const article = findArticle(articleId);
 
   if (!article) {
     if (scores[articleId]?.overall != null) {
@@ -156,7 +165,7 @@ function updateScoreCellsInPlace() {
   const scores = getState('kb.scores') || {};
   const scoringIds = getState('kb.scoringIds') || [];
   const scoring = getState('kb.scoring');
-  const articleById = new Map((getState('kb.articles') || []).map(a => [a.id, a]));
+  const articleById = new Map(allKnownArticles().map(a => [a.id, a]));
 
   if (scoring) {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
@@ -199,7 +208,7 @@ function updateScoreCellsInPlace() {
     } else if (overall != null) {
       const article = articleById.get(articleId);
       const pill = h('span', {
-        class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`,
+        class: `pill pill--${scoreColor(overall)}`,
         style: { cursor: 'pointer' },
         onClick: article ? () => showScoreDetail(article, scoreData) : undefined
       }, String(overall));
@@ -242,20 +251,23 @@ function render() {
     setTimeout(() => { const el = document.getElementById('kb-filter'); if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; } }, 0);
   }
 
-  const crossScopeCheckbox = h('input', { type: 'checkbox' });
-  crossScopeCheckbox.checked = _crossScope;
-  crossScopeCheckbox.addEventListener('change', e => {
-    _crossScope = e.target.checked;
-    _page = 0;
-    if (_crossScope) {
-      if (_filterText.trim().length >= 2) runCrossSearch(_filterText);
-      else render();
-    } else {
-      _crossResults = [];
-      render();
+  const crossScopeLabel = crossScopeToggle({
+    label: 'Search all clouds',
+    title: 'Search ALL clouds/products, not just the ones loaded by default — use this to find and score/rewrite an article outside the usual scope.',
+    checked: _crossScope,
+    onChange: (checked) => {
+      _crossScope = checked;
+      _page = 0;
+      if (_crossScope) {
+        if (_filterText.trim().length >= 2) runCrossSearch(_filterText);
+        else render();
+      } else {
+        _crossSearchToken.next();
+        _crossResults = [];
+        render();
+      }
     }
   });
-  const crossScopeLabel = h('label', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap' }, title: 'Search ALL clouds/products, not just the ones loaded by default — use this to find and score/rewrite an article outside the usual scope.' }, crossScopeCheckbox, 'Search all clouds');
 
   const cloudMulti = multiSelect('kb-cloud-filter', 'Cloud',
     CLOUDS.map(c => ({ value: c, label: c })),
@@ -305,7 +317,7 @@ function render() {
   const scoreBtn = h('button', { class: 'btn btn--primary btn--sm', disabled: loading || !unscoredOnPage || !!scoring }, scoreBtnLabel);
   scoreBtn.addEventListener('click', scoreAll);
 
-  const scoreEst = unscoredOnPage && !scoring ? estimateScoring(unscoredPageItems) : null;
+  const scoreEst = unscoredOnPage && !scoring ? estimateScoring(unscoredPageItems, SCORING_SYSTEM_CHARS) : null;
   const estHint = scoreEst
     ? h('span', {
         style: { fontSize: '11px', color: 'var(--text-muted)', alignSelf: 'center' },
@@ -341,7 +353,7 @@ function render() {
     const pct = scoring.total > 0 ? Math.round((scoring.done / scoring.total) * 100) : 0;
     const scoringIds = getState('kb.scoringIds') || [];
     const activeNumbers = scoringIds
-      .map(id => articles.find(a => a.id === id)?.articleNumber)
+      .map(id => findArticle(id)?.articleNumber)
       .filter(Boolean);
     stickySection.appendChild(h('div', { id: 'kb-scoring-card', class: 'card', style: { marginTop: '8px', padding: '12px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
@@ -413,7 +425,7 @@ function render() {
     const scoreEl = isBeingScored
       ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, spinner('sm'))
       : overall != null
-        ? h('span', { class: `pill pill--${overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error'}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
+        ? h('span', { class: `pill pill--${scoreColor(overall)}`, style: { cursor: 'pointer' }, onClick: () => showScoreDetail(a, scoreData) }, String(overall))
         : h('span', { style: { color: 'var(--text-muted)', fontSize: '11px' } }, '—');
 
     const pubDate = a.lastPublished ? new Date(a.lastPublished).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—';
@@ -459,19 +471,12 @@ function render() {
     ));
   });
 
-  scrollSection.appendChild(table);
-
-  const paginationRow = h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '12px', fontSize: '12px' } },
-    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page === 0, onClick: () => { _page--; render(); } }, '← Prev') : null,
-    h('span', { style: { color: 'var(--text-secondary)' } },
-      (crossMode ? 'Live search across all clouds — ' : '') +
-      (totalPages > 1
-        ? `Showing ${pageStart + 1}–${pageStart + pageItems.length} of ${activeList.length} articles (Page ${_page + 1}/${totalPages})`
-        : `${activeList.length} articles`)
-    ),
-    totalPages > 1 ? h('button', { class: 'btn btn--ghost btn--sm', disabled: _page >= totalPages - 1, onClick: () => { _page++; render(); } }, 'Next →') : null
-  );
-  scrollSection.appendChild(paginationRow);
+  const paginationRow = paginationBar({
+    page: _page, totalPages, pageStart, pageCount: pageItems.length, total: activeList.length, noun: 'articles',
+    prefix: crossMode ? 'Live search across all clouds — ' : '',
+    onPage: (p) => { _page = p; render(); }
+  });
+  scrollSection.appendChild(h('div', { class: 'card', style: { padding: '16px' } }, table, paginationRow));
 }
 
 function showScoreDetail(article, scoreData) {
@@ -485,7 +490,7 @@ function showScoreDetail(article, scoreData) {
         h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, `#${article.articleNumber}`)
       ),
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
-        h('div', { style: { fontSize: '24px', fontWeight: '700', color: scoreData.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : scoreData.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)' } }, String(scoreData.overall)),
+        h('div', { style: { fontSize: '24px', fontWeight: '700', color: `var(--${scoreColor(scoreData.overall)})` } }, String(scoreData.overall)),
         h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); scoreOne(article); } }, 'Rescore')
       )
     )
@@ -513,18 +518,24 @@ function showScoreDetail(article, scoreData) {
 
 async function runCrossSearch(query) {
   if (!query || query.trim().length < 2) { _crossResults = []; render(); return; }
+  const token = _crossSearchToken.next();
   _crossLoading = true;
   render();
   try {
     const session = await detectSession();
-    if (!session.sid) { toast('No SF session.', 'error'); _crossResults = []; return; }
-    _crossResults = await searchArticlesUnscoped(query.trim(), session);
+    if (!session.sid) { if (_crossSearchToken.isCurrent(token)) { toast('No SF session.', 'error'); _crossResults = []; } return; }
+    const results = await searchArticlesUnscoped(query.trim(), session);
+    if (!_crossSearchToken.isCurrent(token)) return;
+    _crossResults = results;
   } catch (e) {
+    if (!_crossSearchToken.isCurrent(token)) return;
     toast('Search failed: ' + e.message, 'error');
     _crossResults = [];
   } finally {
-    _crossLoading = false;
-    render();
+    if (_crossSearchToken.isCurrent(token)) {
+      _crossLoading = false;
+      render();
+    }
   }
 }
 
@@ -616,8 +627,10 @@ async function scoreAll() {
   const session = await detectSession();
   if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
 
-  const bodyMap = await fetchArticleBodies(toScore.map(a => a.id), session);
-  const chatterMap = await fetchArticleChatterBatch(toScore.map(a => a.id), session);
+  const [bodyMap, chatterMap] = await Promise.all([
+    fetchArticleBodies(toScore.map(a => a.id), session),
+    fetchArticleChatterBatch(toScore.map(a => a.id), session)
+  ]);
   setState('kb.scoring', { done: 0, total: toScore.length });
   const batchResults = {};
   const inFlight = new Set();
@@ -771,8 +784,10 @@ async function scoreOne(article) {
   };
   markScoring(true);
 
-  const bodyMap = await fetchArticleBodies([article.id], session);
-  const chatterMap = await fetchArticleChatterBatch([article.id], session);
+  const [bodyMap, chatterMap] = await Promise.all([
+    fetchArticleBodies([article.id], session),
+    fetchArticleChatterBatch([article.id], session)
+  ]);
   const body = bodyMap.get(article.id) || {};
   const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
   const { system, user, maxes } = buildScoringPrompt(enriched);
@@ -888,8 +903,7 @@ async function scoreOne(article) {
     const overallVal = document.getElementById('score-overall-value');
     if (overallEl && overallVal) {
       overallEl.style.display = 'block';
-      const color = result.overall >= SCORE_HIGH_THRESHOLD ? 'var(--success)' : result.overall >= SCORE_MID_THRESHOLD ? 'var(--warning)' : 'var(--error)';
-      overallVal.style.color = color;
+      overallVal.style.color = `var(--${scoreColor(result.overall)})`;
       overallVal.textContent = String(result.overall);
     }
 
@@ -1094,7 +1108,7 @@ function renderRewriteScore(article, result) {
   if (!scoreEl || result?.overall == null) return;
   scoreEl.textContent = '';
   const overall = result.overall;
-  const color = overall >= SCORE_HIGH_THRESHOLD ? 'success' : overall >= SCORE_MID_THRESHOLD ? 'warning' : 'error';
+  const color = scoreColor(overall);
   scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'New score:'));
   scoreEl.appendChild(h('span', {
     class: `pill pill--${color}`,
@@ -1141,11 +1155,14 @@ async function generateRewrite(article, session) {
     }
   }
 
-  const chatterMap = await fetchArticleChatterBatch([article.id], session);
-  const chatterNotes = chatterMap.get(article.id) || '';
-
   const priorRewrite = _rewriteCache[article.id] ? parseRewriteSections(_rewriteCache[article.id]) : null;
   const fromEdited = !!(priorRewrite && (priorRewrite.description || priorRewrite.resolution || priorRewrite.summary));
+
+  const [chatterMap, bodyMap] = await Promise.all([
+    fetchArticleChatterBatch([article.id], session),
+    fromEdited ? Promise.resolve(null) : fetchArticleBodies([article.id], session)
+  ]);
+  const chatterNotes = chatterMap.get(article.id) || '';
 
   let currentTitle, currentSummary, desc, res, steps;
   if (fromEdited) {
@@ -1155,7 +1172,6 @@ async function generateRewrite(article, session) {
     res = priorRewrite.resolution.slice(0, MAX_BODY_CHARS);
     steps = '';
   } else {
-    const bodyMap = await fetchArticleBodies([article.id], session);
     const body = bodyMap.get(article.id) || {};
     currentTitle = article.title;
     currentSummary = article.summary || '';

@@ -69,32 +69,7 @@ export function mapArticleRecord(r) {
   };
 }
 
-export function buildScoringPrompt(article) {
-  const descRaw = article.description || '';
-  const resRaw = article.resolution || '';
-  const descText = stripHtml(descRaw).slice(0, MAX_BODY_CHARS);
-  const resText = stripHtml(resRaw).slice(0, MAX_BODY_CHARS);
-  const stepsText = stripHtml(article.steps || '').slice(0, 1500);
-
-  const flags = [];
-  if (article.containsImage) flags.push('HAS_IMAGES');
-  if (article.containsVideo) flags.push('HAS_VIDEO');
-  if (hasCodeBlocks(descRaw) || hasCodeBlocks(resRaw)) flags.push('HAS_CODE_BLOCKS');
-  if (hasTables(descRaw) || hasTables(resRaw)) flags.push('HAS_TABLES');
-  if (!hasHeaders(descRaw) && !hasHeaders(resRaw)) flags.push('NO_HTML_HEADERS');
-  if (article.containsImage && !hasAltText(descRaw) && !hasAltText(resRaw)) flags.push('IMAGES_MISSING_ALT');
-  if (/orgcs\.lightning\.force\.com|orgcs\.my\.salesforce\.com/i.test(descRaw + resRaw)) flags.push('HAS_INTERNAL_URLS');
-  if ((article.additionalResources || '').trim().length > 20) flags.push('HAS_ADDITIONAL_RESOURCES');
-
-  const { maxes, naSet } = computeDynamicMaxes(flags);
-  const m = maxes;
-
-  const linkAnchors = (descRaw + resRaw).match(/<a\s[^>]*href\s*=\s*["'][^"']+["'][^>]*>[^<]+<\/a>/gi) || [];
-  const rawUrls = ((descRaw + resRaw).match(/(?<!['"=])https?:\/\/[^\s"'<>]{10,}/gi) || [])
-    .filter(u => !(descRaw + resRaw).includes('href="' + u));
-  const internalUrls = (descRaw + resRaw).match(/https?:\/\/(orgcs|org62)[^\s"'<>]*/gi) || [];
-
-  const system = `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce (AGF) readiness.
+const SCORING_SYSTEM = `You are a strict expert reviewer of Salesforce Knowledge Articles for Agentforce (AGF) readiness.
 Score this article for how well it will be RETRIEVED and CONSUMED by Agentforce's RAG pipeline.
 
 CONTEXT — HOW AGENTFORCE WORKS:
@@ -155,6 +130,35 @@ CALIBRATION — apply this judgment:
 
 Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"...","score":<n>,"passed":["..."],"issues":["..."],"suggestions":["..."]},...]}`;
 
+export const SCORING_SYSTEM_CHARS = SCORING_SYSTEM.length;
+
+export function buildScoringPrompt(article) {
+  const descRaw = article.description || '';
+  const resRaw = article.resolution || '';
+  const descText = stripHtml(descRaw).slice(0, MAX_BODY_CHARS);
+  const resText = stripHtml(resRaw).slice(0, MAX_BODY_CHARS);
+  const stepsText = stripHtml(article.steps || '').slice(0, 1500);
+
+  const flags = [];
+  if (article.containsImage) flags.push('HAS_IMAGES');
+  if (article.containsVideo) flags.push('HAS_VIDEO');
+  if (hasCodeBlocks(descRaw) || hasCodeBlocks(resRaw)) flags.push('HAS_CODE_BLOCKS');
+  if (hasTables(descRaw) || hasTables(resRaw)) flags.push('HAS_TABLES');
+  if (!hasHeaders(descRaw) && !hasHeaders(resRaw)) flags.push('NO_HTML_HEADERS');
+  if (article.containsImage && !hasAltText(descRaw) && !hasAltText(resRaw)) flags.push('IMAGES_MISSING_ALT');
+  if (/orgcs\.lightning\.force\.com|orgcs\.my\.salesforce\.com/i.test(descRaw + resRaw)) flags.push('HAS_INTERNAL_URLS');
+  if ((article.additionalResources || '').trim().length > 20) flags.push('HAS_ADDITIONAL_RESOURCES');
+
+  const { maxes, naSet } = computeDynamicMaxes(flags);
+  const m = maxes;
+
+  const linkAnchors = (descRaw + resRaw).match(/<a\s[^>]*href\s*=\s*["'][^"']+["'][^>]*>[^<]+<\/a>/gi) || [];
+  const rawUrls = ((descRaw + resRaw).match(/(?<!['"=])https?:\/\/[^\s"'<>]{10,}/gi) || [])
+    .filter(u => !(descRaw + resRaw).includes('href="' + u));
+  const internalUrls = (descRaw + resRaw).match(/https?:\/\/(orgcs|org62)[^\s"'<>]*/gi) || [];
+
+
+
   const user = `ARTICLE:
 Title: ${article.title}
 Article#: ${article.articleNumber}
@@ -177,7 +181,7 @@ ${stepsText ? `\nSTEPS:\n${stepsText}` : ''}
 ${article.chatterNotes ? `\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${article.chatterNotes}\n` : ''}
 Score now. Return only JSON. overall must equal sum of all scores.`;
 
-  return { system, user, maxes };
+  return { system: SCORING_SYSTEM, user, maxes };
 }
 
 export function parseScoreResponse(text, dynamicMaxes) {
