@@ -56,6 +56,19 @@ async function fetchGatewayPricing(token) {
   }
 }
 
+export async function fetchGatewayKeyLimits(token) {
+  if (!token) return null;
+  try {
+    const resp = await fetch(`${GATEWAY_BASE}/key/info`, { method: 'GET', headers: buildHeaders(token) });
+    if (!resp.ok) return null;
+    const info = (await resp.json())?.info || {};
+    const num = (v) => (Number.isFinite(Number(v)) && v !== null ? Number(v) : null);
+    return { rpmLimit: num(info.rpm_limit), tpmLimit: num(info.tpm_limit), maxParallel: num(info.max_parallel_requests), maxBudget: num(info.max_budget), spend: num(info.spend) };
+  } catch {
+    return null;
+  }
+}
+
 export async function listGatewayModels(token) {
   if (!token) return null;
   try {
@@ -110,6 +123,46 @@ function supportsTemperature(model) {
   return major < 5;
 }
 
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
+const MAX_GATEWAY_RETRIES = 3;
+const MAX_RETRY_DELAY_MS = 30_000;
+
+function retryDelayMs(attempt, retryAfter, bodyText) {
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, MAX_RETRY_DELAY_MS);
+  const reset = /Limit resets at:\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/i.exec(bodyText || '');
+  if (reset) {
+    const untilReset = Date.parse(`${reset[1]}T${reset[2]}Z`) - Date.now();
+    if (Number.isFinite(untilReset)) return Math.min(Math.max(untilReset + 250, 250), MAX_RETRY_DELAY_MS);
+  }
+  return Math.min(1000 * 2 ** attempt + Math.floor(Math.random() * 500), MAX_RETRY_DELAY_MS);
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function postMessages(token, cache, body, signal) {
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) await acquireSlot();
+    const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
+      method: 'POST',
+      headers: buildHeaders(token, cache),
+      body: JSON.stringify(body),
+      signal
+    });
+    if (resp.ok || !RETRYABLE_STATUSES.has(resp.status) || attempt >= MAX_GATEWAY_RETRIES) return resp;
+    const retryAfter = resp.headers.get('retry-after');
+    const bodyText = await resp.text().catch(() => '');
+    await sleep(retryDelayMs(attempt, retryAfter, bodyText), signal);
+  }
+}
+
 export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, cache, signal }) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
@@ -134,12 +187,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
   try {
-    const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
-      method: 'POST',
-      headers: buildHeaders(t, cache),
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
+    const resp = await postMessages(t, cache, body, controller.signal);
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
       const retryAfter = resp.headers.get('retry-after');
@@ -180,12 +228,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
-  const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
-    method: 'POST',
-    headers: buildHeaders(t, cache),
-    body: JSON.stringify(body),
-    signal: controller.signal
-  }).catch(err => {
+  const resp = await postMessages(t, cache, body, controller.signal).catch(err => {
     if (signal) signal.removeEventListener('abort', onAbort);
     if (onError) onError(err);
     throw err;

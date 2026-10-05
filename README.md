@@ -40,7 +40,7 @@ kb-agent/
 │   ├── auth.js            SF session detection (OrgCS, GUS, KI)
 │   ├── api.js             Salesforce API helpers (SOQL, SOSL, REST)
 │   ├── gateway.js         Claude AI gateway (streaming, abort signals)
-│   ├── rate-limiter.js    48 RPM shared limiter
+│   ├── rate-limiter.js    Shared limiter sized from the gateway key's rpm_limit
 │   ├── storage.js         chrome.storage helpers
 │   ├── signature.js       Chatter usage-signature markers (post + classify)
 │   └── ui.js              h(), chip(), modal(), toast(), spinner()
@@ -105,7 +105,7 @@ On launch, the popup checks a Google Drive-hosted zip for a newer version (requi
 
 ## AI Gateway
 
-Uses the Salesforce internal AI model gateway with Claude Sonnet 4.6. Rate limited to 48 requests per minute (shared across all operations). All AI calls support abort signals for immediate cancellation.
+Uses the Salesforce internal AI model gateway (see [SF_CLAUDE_API.md](SF_CLAUDE_API.md)). Models are discovered per user and default to Claude Sonnet 5.5. Requests are rate limited client-side to 90% of the key's `rpm_limit` from `/key/info` (fallback 48/min), shared across popup and service worker; transient gateway errors (429/5xx/529) are retried with `Retry-After` or exponential backoff. All AI calls support abort signals for immediate cancellation.
 
 ## Key Behaviors
 
@@ -128,7 +128,12 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.22.0 (current)
+### v2.22.1 (current)
+- Gateway retry: transient errors (408/429/5xx/529) retry up to 3x, honoring `Retry-After`, then the gateway's "Limit resets at" time, then exponential backoff (capped at 30s); abort cancels the wait
+- Client rate limit now sized to 90% of your key's `rpm_limit` from the gateway's `/key/info` (fallback 48/min), shared across popup and service worker
+- New [SF_CLAUDE_API.md](SF_CLAUDE_API.md): internal gateway reference — auth, endpoints, model discovery, temperature caveats, costs, and rate limits
+
+### v2.22.0
 - Known Issues: AI scoring/rewrite inputs are PII-masked; rewrites build on a pending DRAFT instead of overwriting it; Summary/Repro/Workaround are saved as Salesforce rich text (so lists render on help.salesforce.com); KI Chatter read from `Known_Issue__Feed`; scoring no longer truncates (larger token budget + retry); category Id cache scoped per org; BRE cases resolve to the correct KI cloud
 - KI rewrite modal now has an instructions box and Regenerate (builds on your current edits), matching the KB rewrite flow
 - KI table: Created and Modified date columns (sortable); layout aligned with KB/Dedupe (sticky toolbar, table in its own card)

@@ -3,7 +3,7 @@ import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, applySettings, MODEL_PRICING, KI_BASE } from '../shared/config.js';
 import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../shared/cost.js';
-import { listGatewayModels } from '../shared/gateway.js';
+import { listGatewayModels, fetchGatewayKeyLimits } from '../shared/gateway.js';
 
 const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -65,9 +65,9 @@ async function refreshModelCatalogIfStale() {
   if (catalogAt && (Date.now() - catalogAt < MODEL_CATALOG_MAX_AGE_MS)) return;
   const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
   if (!token) return;
-  const models = await listGatewayModels(token);
+  const [models, limits] = await Promise.all([listGatewayModels(token), fetchGatewayKeyLimits(token)]);
   if (models && models.length) {
-    await localSet({ [STORAGE_KEYS.MODEL_CATALOG]: { models, at: Date.now() } });
+    await localSet({ [STORAGE_KEYS.MODEL_CATALOG]: { models, limits, at: Date.now() } });
   }
 }
 

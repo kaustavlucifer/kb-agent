@@ -1,6 +1,6 @@
 import { STORAGE_KEYS, SETTINGS_SCHEMA, MODEL_CHOICES, currentSettings, applySettings, articleUrl, ORGCS_BASE, KI_BASE } from './shared/config.js';
 import { h, modal, progressBar } from './shared/ui.js';
-import { listGatewayModels } from './shared/gateway.js';
+import { listGatewayModels, fetchGatewayKeyLimits } from './shared/gateway.js';
 
 const tokenEl = document.getElementById('token');
 const bypassEl = document.getElementById('bypass-guard-rails');
@@ -130,10 +130,10 @@ async function load() {
 async function fetchModelCatalog(token) {
   const statusEl2 = document.getElementById('model-refresh-status');
   if (statusEl2) statusEl2.textContent = 'Loading…';
-  const models = await listGatewayModels(token);
+  const [models, limits] = await Promise.all([listGatewayModels(token), fetchGatewayKeyLimits(token)]);
   if (models && models.length) {
     _modelCatalog = models;
-    await chrome.storage.local.set({ [STORAGE_KEYS.MODEL_CATALOG]: { models, at: Date.now() } });
+    await chrome.storage.local.set({ [STORAGE_KEYS.MODEL_CATALOG]: { models, limits, at: Date.now() } });
     refreshModelDropdowns();
     if (statusEl2) statusEl2.textContent = `${models.length} models`;
   } else {

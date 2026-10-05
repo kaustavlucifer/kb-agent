@@ -152,7 +152,7 @@ export const SETTINGS_SCHEMA = [
   {
     key: 'scoreConcurrency', kind: 'number', binding: 'SCORE_CONCURRENCY', default: 8, min: 1, max: 12, step: 1,
     label: 'Scoring concurrency',
-    help: 'How many articles are scored in parallel during a batch. Higher is faster but is capped by the gateway rate limit (~48/min) — values above ~12 stop helping and risk throttling.'
+    help: 'How many articles are scored in parallel during a batch. Higher is faster but is capped by your gateway key's per-minute request limit (read from the gateway; typically 100/min) — values above ~12 rarely help.'
   }
 ];
 
