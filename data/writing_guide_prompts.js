@@ -42,3 +42,5 @@ export const GUIDE_DECISION = `AGENTFORCE KB COVERAGE ASSESSMENT — use these s
 - Articles missing product-specific context in the title/description may exist but fail to be retrieved by Agentforce chunking
 - If an article exists but has poor structure (no headers, generic title, missing resolution), it may need updating even though the content is there
 - Trivial cosmetic improvements (punctuation, minor wording) do NOT justify an update action`;
+
+export const MARKDOWN_OUTPUT_RULE = 'OUTPUT FORMAT: Write all article text as Markdown, never HTML. Use ## / ### for headings, - for bullets, 1. for numbered steps, **bold**, and [text](url) links. Do not emit HTML tags such as <p>, <h2>, <ul>, <li>, <b>, <br>.';

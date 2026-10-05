@@ -10,7 +10,7 @@ import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
 import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
 import { generateKiDraftContent, resolveKiCloud, kiUrl } from './ki-publish.js';
-import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE } from '../../data/writing_guide_prompts.js';
+import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../../data/writing_guide_prompts.js';
 
 function getGuardRailExtraFields(guardRailFields) {
   const extra = [];
@@ -267,14 +267,22 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       reason: `Existing article #${best.articleNumber} already covers this case (relevance ${best.score}, AGF quality ${best.kbScore}). No rework needed.`,
       coveringArticles: coveringIdx >= 0 ? [coveringIdx] : []
     };
+  } else if (caseAbstract?.isCustomerSpecific) {
+    decision = {
+      action: 'NO_ACTION',
+      confidence: 'MEDIUM',
+      reason: `Customer-specific issue (${(caseAbstract.customizationIndicators || []).slice(0, 2).join('; ') || 'custom implementation'}) — not a fit for a public KB article.`,
+      coveringArticles: [],
+      noCoverage: true
+    };
   } else {
-    decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, aiCaseRecord, caseAbstract, signal);
+    decision = await evaluateKBGaps(structuredResolution, topArticles, candidateBodies, aiCaseRecord, caseAbstract, gusData.items, signal);
   }
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
-  const kiSuggestionPromise = computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, action, gusData.items, signal).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
+  const kiSuggestionPromise = computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, gusData.items, signal).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
   let structured;
 
   if (action === 'NO_ACTION') {
@@ -286,7 +294,8 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       action: 'NO_ACTION',
       confidence: decision.confidence,
       summary: decision.reason,
-      coveringArticles: coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)
+      coveringArticles: decision.noCoverage ? [] : (coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)),
+      noCoverage: !!decision.noCoverage
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
     const suggestions = await generateFullRewrites(topArticles, candidateBodies, aiCaseRecord, aiComments, caseAbstract, send, signal, session);
@@ -413,8 +422,12 @@ async function extractAbstract(caseRecord, comments, signal) {
   try {
     const resp = await callClaudeFast({
       system: `Extract a problem signature from this case. Also determine if this is a CUSTOMER-SPECIFIC issue (custom code, unique org configuration, bespoke integration design) that would NOT be useful as a public KB article vs. a GENERIC issue that many customers could encounter.
+Also classify issueType:
+- PRODUCT_DEFECT: the product behaves incorrectly (regression, bug, error not caused by setup) and the fix needs a product change, typically tracked as a GUS bug
+- CONFIGURATION_OR_HOWTO: expected product behavior; the resolution is configuration, setup, usage guidance, permissions, or a documented limitation
+- OTHER: neither fits (data issue, environment outage, unclear)
 
-Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"...","isCustomerSpecific":true/false,"customizationIndicators":["reason1","reason2"]}`,
+Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null","configurationTopology":"...","audienceHint":"...","issueType":"PRODUCT_DEFECT"|"CONFIGURATION_OR_HOWTO"|"OTHER","isCustomerSpecific":true/false,"customizationIndicators":["reason1","reason2"]}`,
       messages: [{ role: 'user', content: `Subject: ${caseRecord.Subject}\nDescription: ${(caseRecord.Description || '').slice(0, 1500)}\nComments:\n${commentsText.slice(0, 2000)}` }],
       maxTokens: 500,
       temperature: 0,
@@ -742,7 +755,7 @@ Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
 async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal, session) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
-  const chatterMapPromise = fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session, 'FeedItem', signal).catch(() => new Map());
+  const chatterMapPromise = fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session, 'Knowledge__Feed', signal).catch(() => new Map());
 
   const tasks = articles.slice(0, 2).map(article => async () => {
     const body = bodyMap.get(article.Id) || {};
@@ -769,6 +782,7 @@ KEY RULES:
 - Title: product-specific, describes exact issue
 - Summary: 2-4 sentences covering problem context and resolution approach
 - Use H2/H3 headers for structure (used in chunking for Agentforce)
+- ${MARKDOWN_OUTPUT_RULE}
 - Description: state problem, symptoms, context, and WHY
 - Resolution: brief summary of what steps accomplish, then numbered steps
 - NEVER include "contact Salesforce support" or "reach out to support" or "open a case" as a resolution step. Only provide the technical solution.
@@ -830,7 +844,7 @@ Return JSON: {"problem_statement":"...","root_cause":"...or null","resolution_st
   }
 }
 
-async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, abstract, signal) {
+async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, abstract, gusItems, signal) {
   if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.', gaps: [] };
 
   const articleSummaries = topArticles.slice(0, 5).map((a, i) => {
@@ -866,17 +880,20 @@ Then derive action:
 - 4+ gaps or ALL MISSING → CREATE_NEW
 - Mix of covered + uncoverable → BOTH
 
+PRODUCT DEFECTS: If the case is a PRODUCT_DEFECT and the only resolution is a pending product fix (no durable workaround, configuration, or guidance that stays useful after the fix), choose NO_ACTION — that belongs in a Known Issue, not a KB article. If a durable workaround or diagnostic guidance exists, judge KB coverage of that content normally.
+GUS SIGNALS: A linked investigation closed as "Doc/Usability", "Working as Documented", "Working as Designed" or "Resolved Without Code Change" means the answer is documentable product behavior or configuration — weigh KB gaps for it seriously rather than treating it as a defect.
+
 Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","confidence":"HIGH"|"MEDIUM"|"LOW","reason":"one sentence","coveringArticles":[indices],"gaps":[{"dimension":"...","status":"CONFIRMED_CORRECT"|"INCOMPLETE"|"MISSING"|"OUTDATED","finding":"what specifically is missing or wrong","suggestedEdit":"exact text to add if applicable"}]}`,
-      messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
+      messages: [{ role: 'user', content: `CASE RESOLUTION:\n${resolutionContext}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nIssue type: ${abstract?.issueType || 'unknown'}\nLinked GUS work items: ${redactPii((gusItems || []).slice(0, 3).map(g => `${g.name} [${g.recordType || 'Work'}] (${g.status || 'unknown status'}): ${g.subject || ''}${(g.linkedBugs || []).length ? ` → linked bug ${g.linkedBugs.map(b => `${b.name} (${b.status || 'unknown'})`).join(', ')}` : ''}`).join('; ')) || 'none'}\n\nEXISTING ARTICLES:\n${articleSummaries}` }],
       maxTokens: 4500,
       temperature: 0,
       signal
     });
     const parsed = extractJson(extractText(resp));
-    return parsed || { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update.', gaps: [] };
+    return parsed || { action: 'NO_ACTION', confidence: 'LOW', reason: 'Coverage evaluation returned an unreadable response — review the articles manually or override below.', gaps: [], noCoverage: true };
   } catch (e) {
     if (signal?.aborted) throw e;
-    return { action: 'UPDATE_EXISTING', confidence: 'LOW', reason: 'Defaulting to update (evaluation failed).', gaps: [] };
+    return { action: 'NO_ACTION', confidence: 'LOW', reason: `Coverage evaluation failed (${e.message}) — review the articles manually or override below.`, gaps: [], noCoverage: true };
   }
 }
 
@@ -899,6 +916,7 @@ KEY RULES:
 - TITLE: Must be specific to the product + exact issue. Include product name, error text, or scenario.
 - SUMMARY: 2-4 sentences covering problem context and resolution approach.
 - HEADERS: Use H2/H3 headers to break content into logical sections. Headers are used in chunking for Agentforce.
+- ${MARKDOWN_OUTPUT_RULE}
 - DESCRIPTION: State the problem, symptoms, and context. Explain WHY this happens. Include product name with feature terms.
 - RESOLUTION: Begin with a brief statement of what the steps accomplish, then provide numbered steps.
 - NEVER include "contact Salesforce support" or "reach out to support" or "open a case" as a resolution step. The article IS the support resource — only provide the technical solution.
@@ -949,7 +967,20 @@ function computeCompleteness(caseRecord, comments) {
   return { score: Math.min(100, score), label, details };
 }
 
-async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, kbAction, gusItems, signal) {
+const NOT_A_DEFECT_STATUS_RE = /not a bug|no fix|working as|duplicate|never|rejected|defunct|without code change|not reproducible|doc\/usability|feature request|internal tools|db script|resolved by 3rd party|won't fix|transitioned to incident|not needed|obsolete|cancel|inactive|abandoned/i;
+const INVESTIGATION_DEFECT_STATUS_RE = /new bug logged|known bug exists/i;
+
+function workItemDefectState(item) {
+  const status = item.status || '';
+  if (item.recordType === 'Investigation') {
+    if (INVESTIGATION_DEFECT_STATUS_RE.test(status)) return 'defect';
+    return /^closed|rejected|duplicate|never/i.test(status) ? 'not-defect' : 'pending';
+  }
+  if (item.recordType && item.recordType !== 'Bug') return 'not-defect';
+  return NOT_A_DEFECT_STATUS_RE.test(status) ? 'not-defect' : 'defect';
+}
+
+async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, gusItems, signal) {
   const bestExisting = (kiData.items || [])[0];
   if (bestExisting && bestExisting.relevanceScore != null && bestExisting.relevanceScore >= 60) {
     return {
@@ -963,17 +994,28 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
   if (abstract?.isCustomerSpecific) {
     return { action: 'NONE', reason: 'Customer-specific issue — not a good fit for a public Known Issue.' };
   }
-  if (kbAction === 'NO_ACTION') {
-    return { action: 'NONE', reason: 'Existing KB coverage is sufficient — no gap suggesting a new Known Issue.' };
+  const defectItems = gusItems.filter(g => workItemDefectState(g) === 'defect');
+  if (!defectItems.length) {
+    const pending = gusItems.find(g => workItemDefectState(g) === 'pending');
+    if (pending) return { action: 'NONE', reason: `GUS investigation ${pending.name} is still "${pending.status}" — revisit once engineering confirms a bug.` };
+    const first = gusItems[0];
+    return { action: 'NONE', reason: `Linked GUS work item ${first.name} is ${first.recordType && !['Bug', 'Investigation'].includes(first.recordType) ? `a ${first.recordType}` : `marked "${first.status}"`} — not a product defect.` };
+  }
+  if (abstract?.issueType !== 'PRODUCT_DEFECT') {
+    return { action: 'NONE', reason: abstract?.issueType === 'CONFIGURATION_OR_HOWTO'
+      ? 'Configuration or how-to issue — a KB article is the right vehicle, not a Known Issue.'
+      : 'Case was not classified as a product defect — no Known Issue suggested.' };
   }
   const draft = await generateKiDraftContent(caseRecord, comments, '', signal);
   if (!draft) return { action: 'NONE', reason: 'Could not determine a Known Issue draft.' };
-  return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: gusItems[0].name };
+  const primary = defectItems.find(g => g.recordType !== 'Investigation') || defectItems[0];
+  const linkedBug = (primary.linkedBugs || []).find(b => workItemDefectState(b) === 'defect');
+  return { action: 'DRAFT_NEW', draft, cloud: resolveKiCloud(casePt), workId: linkedBug?.name || primary.name };
 }
 
 async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {
   if (!scoredArticles.length) return;
-  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session, 'FeedItem', signal).catch(() => new Map());
+  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session, 'Knowledge__Feed', signal).catch(() => new Map());
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
     if (signal?.aborted) return;
     const body = candidateBodies.get(sa.id) || {};

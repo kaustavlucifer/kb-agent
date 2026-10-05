@@ -278,7 +278,20 @@ export async function fetchArticleBodies(articleIds, session) {
   return bodyMap;
 }
 
-export async function fetchArticleChatterBatch(articleIds, session, feedObject = 'FeedItem', signal) {
+async function resolveFeedParents(batch, session, feedObject, signal) {
+  if (feedObject !== 'Knowledge__Feed') return new Map(batch.map(id => [id, [id]]));
+  const soql = `SELECT Id, KnowledgeArticleId FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
+  const result = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, session.sid, signal);
+  const parents = new Map();
+  for (const r of (result.records || [])) {
+    if (!ID_RE.test(r.KnowledgeArticleId || '')) continue;
+    if (!parents.has(r.KnowledgeArticleId)) parents.set(r.KnowledgeArticleId, []);
+    parents.get(r.KnowledgeArticleId).push(r.Id);
+  }
+  return parents;
+}
+
+export async function fetchArticleChatterBatch(articleIds, session, feedObject = 'Knowledge__Feed', signal) {
   const chatterMap = new Map();
   const validIds = articleIds.filter(id => ID_RE.test(id));
   if (!validIds.length) return chatterMap;
@@ -287,13 +300,18 @@ export async function fetchArticleChatterBatch(articleIds, session, feedObject =
   const grouped = new Map();
   await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, async (batch) => {
     try {
-      const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM ${feedObject} WHERE ParentId IN (${soqlIdList(batch)}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
+      const parents = await resolveFeedParents(batch, session, feedObject, signal);
+      if (!parents.size) return;
+      const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM ${feedObject} WHERE ParentId IN (${soqlIdList([...parents.keys()])}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
       const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
       const result = await sfGet(url, session.sid, signal);
       for (const r of (result.records || [])) {
         if (!r.Body || classifySignature(r.Body)) continue;
-        if (!grouped.has(r.ParentId)) grouped.set(r.ParentId, []);
-        grouped.get(r.ParentId).push(`${r.CreatedBy?.Name || 'User'}: ${redactPii(stripHtml(r.Body))}`);
+        const line = `${r.CreatedBy?.Name || 'User'}: ${redactPii(stripHtml(r.Body))}`;
+        for (const id of (parents.get(r.ParentId) || [])) {
+          if (!grouped.has(id)) grouped.set(id, []);
+          grouped.get(id).push(line);
+        }
       }
     } catch {}
   });

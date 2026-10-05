@@ -177,7 +177,7 @@ export async function createKnownIssue(payload) {
     Category__c: categoryId
   };
   if (payload.cloud) record.Cloud__c = payload.cloud;
-  if (payload.workId) record.Work_ID__c = payload.workId;
+  if (/^W-\d{4,9}$/.test(payload.workId || '')) record.Work_ID__c = payload.workId;
 
   try {
     const result = await sfPost(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c`, session.sid, record);

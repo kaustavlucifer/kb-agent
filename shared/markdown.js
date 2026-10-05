@@ -253,6 +253,13 @@ export function htmlToMarkdown(root) {
   return blocks.join('\n\n');
 }
 
+const HTML_BLOCK_RE = /<\/?(p|h[1-6]|ul|ol|li|br|div|table|strong|b|em|pre)\b[^>]*>/i;
+
+export function htmlBodyToMarkdown(text) {
+  if (!text || !HTML_BLOCK_RE.test(text)) return text;
+  return htmlToMarkdown(new DOMParser().parseFromString(text, 'text/html').body);
+}
+
 const DEFAULT_REWRITE_FIELDS = ['title', 'summary', 'description', 'resolution'];
 
 export function parseRewriteSections(text, fields = DEFAULT_REWRITE_FIELDS) {

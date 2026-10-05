@@ -154,6 +154,7 @@ export function openKiDraftModal({ draft, cloud, caseNumber, workId, onCreated }
 
   const editorHost = h('div', null);
   kiEditor.renderInto(editorHost, key);
+  const workLookup = gusWorkLookup(workId);
 
   const body = h('div', null,
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '14px', flexWrap: 'wrap' } },
@@ -165,18 +166,98 @@ export function openKiDraftModal({ draft, cloud, caseNumber, workId, onCreated }
         h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Category *'),
         categorySelect
       ),
-      workId ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, `Work Item: ${workId}`) : null
+      workLookup.el
     ),
     editorHost
   );
 
   const footer = h('div', { class: 'modal__footer' },
     h('button', { class: 'btn btn--secondary', onClick: () => close() }, 'Close'),
-    h('button', { class: 'btn btn--primary', id: 'ki-create-btn', onClick: () => createKnownIssue(key, cloudSelect.value, categorySelect.value, workId, onCreated) }, 'Create Known Issue (Draft)')
+    h('button', { class: 'btn btn--primary', id: 'ki-create-btn', onClick: () => createKnownIssue(key, cloudSelect.value, categorySelect.value, workLookup.value(), onCreated) }, 'Create Known Issue (Draft)')
   );
 
   let close;
   ({ close } = modal(`Draft Known Issue${caseNumber ? ` — Case #${caseNumber}` : ''}`, body, { wide: true, footer }));
+}
+
+function gusWorkLookup(initial) {
+  let selected = initial ? { name: initial } : null;
+  let debounce = null;
+  const searchToken = requestToken();
+  const labelEl = h('span', { style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'GUS Work');
+  const selectedEl = h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } });
+  const input = h('input', { class: 'input', type: 'text', placeholder: 'Search W-number or subject…', style: { width: '240px' } });
+  const results = h('div', { style: { display: 'none', position: 'absolute', top: '100%', left: '0', zIndex: '20', width: '480px', maxHeight: '260px', overflowY: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)', marginTop: '4px' } });
+  const searchBox = h('div', { style: { position: 'relative', display: 'none' } }, input, results);
+
+  const showResults = (nodes) => {
+    results.textContent = '';
+    nodes.forEach(n => results.appendChild(n));
+    results.style.display = nodes.length ? 'block' : 'none';
+  };
+  const choose = (item) => {
+    selected = item;
+    input.value = '';
+    showResults([]);
+    renderSelected();
+  };
+  const workLink = (name) => h('a', { href: `https://gus.my.salesforce.com/apex/ADM_WorkLocator?BugOrWorknumber=${encodeURIComponent(name)}`, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: 'var(--primary)' } }, name);
+  const renderSelected = () => {
+    selectedEl.textContent = '';
+    if (selected) {
+      selectedEl.appendChild(workLink(selected.name));
+      if (selected.status) selectedEl.appendChild(h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${selected.recordType ? `${selected.recordType} · ` : ''}${selected.status}`));
+    } else {
+      selectedEl.appendChild(h('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, 'None'));
+    }
+    selectedEl.appendChild(h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => {
+      const open = searchBox.style.display === 'none';
+      searchBox.style.display = open ? 'block' : 'none';
+      if (open) input.focus();
+    } }, selected ? 'Change' : 'Link'));
+    if (selected) selectedEl.appendChild(h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => { selected = null; renderSelected(); } }, 'Clear'));
+  };
+
+  const runSearch = async (term) => {
+    const token = searchToken.next();
+    showResults([h('div', { style: { padding: '8px 10px', fontSize: '12px', color: 'var(--text-muted)' } }, 'Searching GUS…')]);
+    try {
+      const resp = await chrome.runtime.sendMessage({ action: 'SEARCH_GUS_WORK', query: term });
+      if (!searchToken.isCurrent(token)) return;
+      if (resp?.error) { showResults([h('div', { style: { padding: '8px 10px', fontSize: '12px', color: 'var(--error)' } }, resp.error)]); return; }
+      const items = resp?.items || [];
+      if (!items.length) { showResults([h('div', { style: { padding: '8px 10px', fontSize: '12px', color: 'var(--text-muted)' } }, 'No matching Bugs or Investigations.')]); return; }
+      showResults(items.map(item => h('div', {
+        style: { padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid var(--border)' },
+        onMouseenter: (e) => { e.currentTarget.style.background = 'var(--surface-raised)'; },
+        onMouseleave: (e) => { e.currentTarget.style.background = ''; },
+        onClick: () => choose(item)
+      },
+        h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '12px' } },
+          h('strong', null, item.name),
+          h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${item.recordType} · ${item.status}`),
+          item.productTag ? h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, item.productTag) : null
+        ),
+        h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' } }, item.subject)
+      )));
+    } catch (e) {
+      if (searchToken.isCurrent(token)) showResults([h('div', { style: { padding: '8px 10px', fontSize: '12px', color: 'var(--error)' } }, e.message)]);
+    }
+  };
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounce);
+    const term = input.value.trim();
+    if (term.length < 3) { searchToken.next(); showResults([]); return; }
+    debounce = setTimeout(() => runSearch(term), 350);
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); showResults([]); searchBox.style.display = 'none'; } });
+
+  renderSelected();
+  return {
+    el: h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, labelEl, selectedEl, searchBox),
+    value: () => selected?.name || ''
+  };
 }
 
 async function createKnownIssue(key, cloud, category, workId, onCreated) {

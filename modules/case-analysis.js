@@ -4,7 +4,7 @@ import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl, KI_BASE } from '../shared/config.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
-import { markdownToHtml } from '../shared/markdown.js';
+import { markdownToHtml, htmlBodyToMarkdown } from '../shared/markdown.js';
 import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft } from '../shared/draft-publish.js';
 
 let _container = null;
@@ -720,11 +720,12 @@ function renderResult() {
   }
 
   if (isNoAction) {
-    const noActionCard = h('div', { class: 'card', style: { marginBottom: '12px', border: '2px solid var(--success)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
-      h('div', { style: { padding: '16px', background: 'color-mix(in srgb, var(--success) 8%, transparent)' } },
+    const tone = structured.noCoverage ? 'var(--text-muted)' : 'var(--success)';
+    const noActionCard = h('div', { class: 'card', style: { marginBottom: '12px', border: `2px solid ${tone}`, borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
+      h('div', { style: { padding: '16px', background: `color-mix(in srgb, ${tone} 8%, transparent)` } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' } },
-          h('span', { style: { fontSize: '18px' } }, '✓'),
-          h('span', { style: { fontSize: '14px', fontWeight: '600', color: 'var(--success)' } }, 'Existing Coverage is Adequate')
+          h('span', { style: { fontSize: '18px' } }, structured.noCoverage ? '–' : '✓'),
+          h('span', { style: { fontSize: '14px', fontWeight: '600', color: tone } }, structured.noCoverage ? 'No KB Action Recommended' : 'Existing Coverage is Adequate')
         ),
         h('p', { style: { fontSize: '13px', lineHeight: '1.5', color: 'var(--text-secondary)', margin: '0 0 12px 0' } }, structured.summary || 'The existing articles already cover this case adequately.'),
         (structured.coveringArticles || []).length ? h('div', { style: { marginBottom: '12px' } },
@@ -1418,6 +1419,8 @@ function renderEditableSection({ heading, getValue, setValue, plain = false, sin
 }
 
 function renderEditableArticleBody(obj, prefix, { titleFallback } = {}) {
+  if (obj.summary) obj.summary = htmlBodyToMarkdown(obj.summary).replace(/^#+\s*/gm, '').trim();
+  for (const sec of (obj.sections || [])) sec.body = htmlBodyToMarkdown(sec.body || '');
   const container = h('div', { style: { padding: '14px 16px' } });
   container.appendChild(renderEditableSection({
     heading: 'Title',
@@ -1475,7 +1478,7 @@ function refineRewrite(rewrite) {
         focus
       });
       if (resp?.success && resp.refined) {
-        const lines = resp.refined.split('\n');
+        const lines = htmlBodyToMarkdown(resp.refined).split('\n');
         let newTitle = rewrite.title;
         let newSummary = rewrite.summary;
         const newSections = [];
@@ -1575,7 +1578,7 @@ function runRefineFlow(getValue, setValue, title) {
         focus
       });
       if (resp?.success && resp.refined) {
-        setValue(resp.refined);
+        setValue(htmlBodyToMarkdown(resp.refined));
         renderByView();
         toast('Section refined.', 'success');
       } else {

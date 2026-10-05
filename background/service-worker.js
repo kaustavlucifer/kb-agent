@@ -6,11 +6,11 @@ import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml, absolutizeSfUrl
 import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, ARTICLE_META_FIELDS, applySettings } from '../shared/config.js';
 import { redactPii } from '../shared/pii.js';
 import { mapArticleRecord } from '../shared/scoring.js';
-import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
+import { GUIDE_GENERATION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
 import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handlers/article-publish.js';
-import { checkGusConnection } from './handlers/gus-enrichment.js';
+import { checkGusConnection, searchGusWorkItems } from './handlers/gus-enrichment.js';
 import { checkForUpdate, dismissUpdate } from './update-check.js';
 import { auditSignatures, mergeAuditReports } from './signature-audit.js';
 import { prepareKiRewrite, logKiSignature, createKnownIssue, updateKnownIssue, loadAllKnownIssues, searchKnownIssuesUnscoped, fetchKnownIssueDetail } from './handlers/ki-publish.js';
@@ -80,6 +80,7 @@ async function handleMessage(msg) {
     case 'PUBLISH_UPDATE_DRAFT': return publishUpdateDraft(msg.payload);
     case 'CHECK_DRAFT_EXISTS': return checkDraftExists(msg.payload);
     case 'CHECK_GUS_CONNECTION': return checkGusConnection();
+    case 'SEARCH_GUS_WORK': return searchGusWorkItems(msg.query);
     case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
     case 'CHECK_KI_CONNECTION': return checkKiConnection();
@@ -122,6 +123,8 @@ async function generateArticleUpdate(msg) {
 ${GUIDE_GENERATION}
 
 ${GUIDE_STYLE}
+
+${MARKDOWN_OUTPUT_RULE}
 
 Return the FULL rewritten article. Use EXACTLY these 4 fields.
 JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body":"..."},{"heading":"Resolution","body":"..."}]}`,
@@ -192,7 +195,9 @@ async function refineSection(msg) {
 
 ${GUIDE_GENERATION}
 
-${GUIDE_STYLE}${focusInstruction}
+${GUIDE_STYLE}
+
+${MARKDOWN_OUTPUT_RULE}${focusInstruction}
 
 Return ONLY the improved text, no JSON wrapping or explanation.`,
       messages: [{ role: 'user', content: `Section Title: ${title}\n\nContent to refine:\n${content}` }],

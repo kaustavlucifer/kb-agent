@@ -128,7 +128,19 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.23.0 (current)
+### v2.24.0 (current)
+- Fixed `MALFORMED_QUERY: FeedItem requires a filter by Id` in case analysis and KB scoring/rewrite: article Chatter now reads `Knowledge__Feed` via the master `KnowledgeArticleId`
+- Case analysis article drafts/rewrites no longer show raw HTML tags: prompts require Markdown (shared `MARKDOWN_OUTPUT_RULE`), and any stray HTML is converted to Markdown before display and Refine
+- KB vs KI vs no-action decision tightened:
+  - Coverage-evaluation failures now fall back to "No KB action" (low confidence) instead of auto-generating updates
+  - Customer-specific cases get no KB action (previously only a warning banner)
+  - Cases are classified as product defect / configuration-how-to / other; a KI draft is only suggested for product defects, independent of KB coverage
+  - GUS record type and status drive KI eligibility: Bugs count unless closed as Duplicate / Not a bug / Never / Not Reproducible / Won't Fix etc.; Investigations count only when closed "New Bug Logged" or "Known Bug Exists"; open Investigations show "revisit once engineering confirms a bug"; User Stories/ToDos never count
+  - Investigations resolve their linked Bug (`ADM_Parent_Work__c`), which becomes the KI's Work ID
+  - The coverage evaluator sees issue type and linked GUS items; Doc/Usability or Working-as-Documented investigations count toward KB, pending-fix-only defects toward KI
+- Known Issue create dialog: GUS Work lookup (search by W-number or subject across Bugs/Investigations) to change, link, or clear the pre-selected work item
+
+### v2.23.0
 - KI rewrite now scores first: if the KI already meets the good-enough threshold you get an "Already high quality" prompt with "Rewrite anyway"; otherwise it rewrites automatically and scores the result
 - KI rewrite and scoring stream from the popup (like KB), with a live section-by-section preview
 - KI rewrite modal matches KB: Compare / Regenerate / Update KI in the header, score badges (current and new), Close-only footer; Compare and score details open inline
