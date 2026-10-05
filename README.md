@@ -128,7 +128,10 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.21.0 (current)
+### v2.21.1 (current)
+- Fixed Gateway 400 "does not support temperature" on newer models: temperature is now only sent to models that accept it (Haiku 4.5, Sonnet ≤4.6, Opus ≤4.6) and omitted for Sonnet 5/5.5 and Opus 4.7+/5.5, which use their default — verified against every Claude model on the gateway
+
+### v2.21.0
 - Model choices are now discovered per user from the AI gateway (Settings → Models, with a "Refresh models" button; auto-refreshed daily, static fallback list). All model settings default to Claude Sonnet 5.5; Known Issue drafting/rewriting/scoring now follow the Scoring model setting
 - Cost tracking uses the gateway's own per-model pricing, falling back to a static table and then a model-family rate (never $0). Pending cost is flushed when the popup closes, and scoring/dedup estimates use the live prompt length
 - Fixed Known Issue creation: `Category__c` is a lookup, so the category name is now resolved to its record Id before creating

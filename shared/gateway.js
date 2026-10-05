@@ -100,6 +100,16 @@ export async function pingGateway(token) {
   }
 }
 
+function supportsTemperature(model) {
+  const match = /claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/.exec(model || '');
+  if (!match) return true;
+  const [, family, majorStr, minorStr] = match;
+  const major = Number(majorStr);
+  const minor = minorStr && minorStr.length <= 2 ? Number(minorStr) : 0;
+  if (family === 'opus') return major < 4 || (major === 4 && minor < 7);
+  return major < 5;
+}
+
 export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, cache, signal }) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   await acquireSlot();
@@ -115,7 +125,7 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
   if (thinking) {
     body.thinking = thinking;
     body.temperature = 1;
-  } else if (temperature != null) {
+  } else if (temperature != null && supportsTemperature(m)) {
     body.temperature = temperature;
   }
 
@@ -163,7 +173,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
     messages
   };
   if (system) body.system = buildSystemField(system, cache);
-  if (temperature != null) body.temperature = temperature;
+  if (temperature != null && supportsTemperature(m)) body.temperature = temperature;
 
   const controller = new AbortController();
   let idleAborted = false;
