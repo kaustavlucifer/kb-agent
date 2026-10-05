@@ -1,4 +1,4 @@
-import { h, spinner, toast, modal, swapButtonWithLink, sectionsEditor, emptyState, multiSelect, richHtmlBox, createSorter, scoreColor, crossScopeToggle, requestToken, paginationBar, fieldLabel, asyncModal } from '../shared/ui.js';
+import { h, spinner, toast, modal, swapButtonWithLink, sectionsEditor, emptyState, multiSelect, richHtmlBox, createSorter, stickyScrollLayout, scoreColor, crossScopeToggle, requestToken, paginationBar, fieldLabel, asyncModal } from '../shared/ui.js';
 import { parseRewriteSections, serializeRewriteSections, markdownToHtml } from '../shared/markdown.js';
 import { KI_CLOUD_MAPPING, KI_CATEGORIES } from '../data/ki_mapping.js';
 
@@ -157,6 +157,9 @@ function compareKis(a, b) {
   if (col === 'reportingCount') {
     va = a.reportingCount || 0;
     vb = b.reportingCount || 0;
+  } else if (col === 'createdDate' || col === 'lastModifiedDate') {
+    va = a[col] || '';
+    vb = b[col] || '';
   } else {
     va = (a[col] || '').toLowerCase();
     vb = (b[col] || '').toLowerCase();
@@ -187,7 +190,7 @@ async function startRewrite(item) {
     const resp = await chrome.runtime.sendMessage({ action: 'GENERATE_KI_REWRITE', kiId: item.id });
     if (!resp?.success) { toast(resp?.error || 'Something went wrong.', 'error'); return; }
     _kiDraftCache[item.id] = serializeRewriteSections(resp.draft, KI_FIELD_NAMES);
-    openRewriteModal(item);
+    openRewriteModal(item, resp.basedOnDraft);
   } catch (e) {
     toast(e.message, 'error');
   } finally {
@@ -196,9 +199,44 @@ async function startRewrite(item) {
   }
 }
 
-function openRewriteModal(item) {
+function openRewriteModal(item, basedOnDraft) {
   const editorHost = h('div', null);
   kiEditor.renderInto(editorHost, item.id);
+
+  const instructionsInput = h('textarea', {
+    class: 'input', rows: '2',
+    placeholder: 'Optional: extra instructions for the rewrite (e.g. "mention the Winter release", "shorten the summary", "add a workaround using a manual refresh"). Applied when you regenerate.',
+    style: { width: '100%', marginBottom: '12px', fontSize: '12px', resize: 'vertical' }
+  });
+
+  const regenBtn = h('button', { class: 'btn btn--ghost btn--sm' }, 'Regenerate');
+  regenBtn.addEventListener('click', async () => {
+    const current = parseRewriteSections(_kiDraftCache[item.id] || '', KI_FIELD_NAMES);
+    regenBtn.disabled = true;
+    regenBtn.textContent = 'Generating…';
+    try {
+      const resp = await chrome.runtime.sendMessage({ action: 'GENERATE_KI_REWRITE', kiId: item.id, instructions: instructionsInput.value, current });
+      if (!resp?.success) { toast(resp?.error || 'Something went wrong.', 'error'); return; }
+      _kiDraftCache[item.id] = serializeRewriteSections(resp.draft, KI_FIELD_NAMES);
+      instructionsInput.value = '';
+      editorHost.textContent = '';
+      kiEditor.renderInto(editorHost, item.id);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      regenBtn.disabled = false;
+      regenBtn.textContent = 'Regenerate';
+    }
+  });
+
+  const body = h('div', null,
+    basedOnDraft ? h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '10px' } }, 'Based on the pending draft for this Known Issue, not the published version.') : null,
+    h('div', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
+      h('div', { style: { flex: '1' } }, instructionsInput),
+      regenBtn
+    ),
+    editorHost
+  );
 
   const footer = h('div', { class: 'modal__footer' },
     h('button', { class: 'btn btn--secondary', onClick: () => close() }, 'Close'),
@@ -206,7 +244,7 @@ function openRewriteModal(item) {
   );
 
   let close;
-  ({ close } = modal(`Rewrite Known Issue — ${item.name || item.id}`, editorHost, { wide: true, footer }));
+  ({ close } = modal(`Rewrite Known Issue — ${item.name || item.id}`, body, { wide: true, footer }));
 }
 
 async function saveKnownIssue(item) {
@@ -315,6 +353,10 @@ function truncatedCell(value, widthPct) {
   }, value || '');
 }
 
+function formatKiDate(iso) {
+  return iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+}
+
 function renderResultsTable(pageItems) {
   if (_kiLoading) {
     return h('div', { style: { padding: '24px', textAlign: 'center' } }, spinner('md'));
@@ -326,24 +368,28 @@ function renderResultsTable(pageItems) {
   const sortTh = (col, label, width) => h('th', { style: { width, cursor: 'pointer' }, onClick: () => toggleKiSort(col) }, label + ind(col));
   return h('table', { class: 'data-table', style: { tableLayout: 'fixed', width: '100%' } },
     h('thead', null, h('tr', null,
-      sortTh('name', 'Name', '9%'),
-      sortTh('subject', 'Subject', '18%'),
-      sortTh('cloud', 'Cloud', '10%'),
-      sortTh('category', 'Category', '14%'),
-      sortTh('status', 'Status', '10%'),
-      sortTh('createdByName', 'Created By', '10%'),
-      sortTh('approverName', 'Approver', '10%'),
-      sortTh('reportingCount', 'Impacted', '7%'),
-      h('th', { style: { width: '12%' } }, 'Actions')
+      sortTh('name', 'Name', '8%'),
+      sortTh('subject', 'Subject', '16%'),
+      sortTh('cloud', 'Cloud', '8%'),
+      sortTh('category', 'Category', '11%'),
+      sortTh('status', 'Status', '8%'),
+      sortTh('createdByName', 'Created By', '9%'),
+      sortTh('approverName', 'Approver', '9%'),
+      sortTh('createdDate', 'Created', '7%'),
+      sortTh('lastModifiedDate', 'Modified', '7%'),
+      sortTh('reportingCount', 'Impacted', '6%'),
+      h('th', { style: { width: '11%' } }, 'Actions')
     )),
     h('tbody', null, ...pageItems.map(item => h('tr', null,
       h('td', { style: { fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, h('a', { href: item.url, target: '_blank', rel: 'noopener' }, item.name || item.id)),
       h('td', { style: { fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: item.subject || '' }, item.subject || ''),
-      truncatedCell(item.cloud, 10),
-      truncatedCell(item.category, 14),
-      truncatedCell(item.status, 10),
-      truncatedCell(item.createdByName, 10),
-      truncatedCell(item.approverName, 10),
+      truncatedCell(item.cloud, 8),
+      truncatedCell(item.category, 11),
+      truncatedCell(item.status, 8),
+      truncatedCell(item.createdByName, 9),
+      truncatedCell(item.approverName, 9),
+      truncatedCell(formatKiDate(item.createdDate), 7),
+      truncatedCell(formatKiDate(item.lastModifiedDate), 7),
       h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)', textAlign: 'right' } }, String(item.reportingCount || 0)),
       h('td', null,
         h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center' } },
@@ -414,22 +460,29 @@ function render() {
   const refreshBtn = h('button', { class: 'btn btn--secondary btn--sm', disabled: _kiLoading }, _kiLoading ? 'Loading…' : 'Refresh');
   refreshBtn.addEventListener('click', () => loadKnownIssues(true));
 
-  const statsRow = _kiCrossScope ? null : h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' } },
-    `${filtered.length !== _kiAllItems.length ? `${filtered.length} of ${_kiAllItems.length}` : `${_kiAllItems.length}`} Known Issues`
-  );
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+
+  stickySection.appendChild(h('div', { class: 'tab-toolbar' },
+    searchInput, crossScopeLabel, categoryFilter,
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'center' } }, refreshBtn)
+  ));
+
+  if (!_kiCrossScope) {
+    stickySection.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', margin: '8px 0 0' } },
+      `${filtered.length !== _kiAllItems.length ? `${filtered.length} of ${_kiAllItems.length}` : `${_kiAllItems.length}`} Known Issues`
+    ));
+  }
+
+  if (crossMode && _kiCrossLoading) {
+    scrollSection.appendChild(h('div', { style: { padding: '48px 24px', textAlign: 'center' } }, spinner('lg'),
+      h('div', { style: { fontSize: '12px', color: 'var(--text-muted)', marginTop: '12px' } }, 'Searching all categories…')));
+    return;
+  }
 
   const paginationRow = crossMode ? null : paginationBar({
     page: _page, totalPages, pageStart, pageCount: pageItems.length, total: filtered.length,
     onPage: (p) => { _page = p; render(); }
   });
 
-  const searchCard = h('div', { class: 'card', style: { padding: '16px' } },
-    h('h3', { style: { fontSize: '14px', marginBottom: '10px' } }, 'Existing Known Issues'),
-    h('div', { class: 'tab-toolbar', style: { marginBottom: '10px' } }, searchInput, crossScopeLabel, categoryFilter, refreshBtn),
-    statsRow,
-    (crossMode && _kiCrossLoading) ? h('div', { style: { padding: '24px', textAlign: 'center' } }, spinner('md')) : renderResultsTable(pageItems),
-    paginationRow
-  );
-
-  _container.appendChild(searchCard);
+  scrollSection.appendChild(h('div', { class: 'card', style: { padding: '16px' } }, renderResultsTable(pageItems), paginationRow));
 }

@@ -80,10 +80,6 @@ export const KI_CLOUD_MAPPING = {
     cloud: 'Consumer Goods',
     ptPatterns: ['Industry-Retail and Consumer Goods']
   },
-  'tpm': {
-    cloud: 'Consumer Goods',
-    ptPatterns: ['Industry-Retail and Consumer Goods']
-  },
   'energy-utilities': {
     cloud: 'Industries',
     ptPatterns: ['Industry-Energy & Utilities Cloud']

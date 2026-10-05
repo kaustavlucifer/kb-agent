@@ -86,7 +86,7 @@ async function handleMessage(msg) {
     case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
     case 'CHECK_FOR_UPDATE': return checkForUpdate({ force: !!msg.force });
     case 'DISMISS_UPDATE': { await dismissUpdate(String(msg.version || '')); return { ok: true }; }
-    case 'GENERATE_KI_REWRITE': return generateKiRewrite(msg.kiId);
+    case 'GENERATE_KI_REWRITE': return generateKiRewrite(msg.kiId, { instructions: msg.instructions || '', current: msg.current || null });
     case 'CREATE_KNOWN_ISSUE': return createKnownIssue(msg.payload);
     case 'UPDATE_KNOWN_ISSUE': return updateKnownIssue(msg.payload);
     case 'LOAD_ALL_KNOWN_ISSUES': return loadAllKnownIssues({ forceLive: !!msg.forceLive });

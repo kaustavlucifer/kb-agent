@@ -1,7 +1,7 @@
 import { h, chip, toast, modal } from '../shared/ui.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS, applySettings, MODEL_PRICING } from '../shared/config.js';
+import { STORAGE_KEYS, applySettings, MODEL_PRICING, KI_BASE } from '../shared/config.js';
 import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../shared/cost.js';
 import { listGatewayModels } from '../shared/gateway.js';
 
@@ -238,7 +238,7 @@ async function checkConnections() {
   if (!gusOk) autoOpenAuthTab('gus', `https://${gusResp?.lightningHost || 'gus.lightning.force.com'}`);
   else _authAutoOpened.gus = false;
 
-  if (!kiOk) autoOpenAuthTab('ki', 'https://known-issues-prd1.lightning.force.com');
+  if (!kiOk) autoOpenAuthTab('ki', KI_BASE);
   else _authAutoOpened.ki = false;
 
   scheduleAuthCheckIfNeeded(sfOk && gusOk && kiOk);
@@ -374,7 +374,7 @@ function updateConnectionChips() {
   const kiLabel = conn.ki?.connected ? 'KI' : 'KI Offline';
   container.appendChild(chip(kiState, kiLabel, {
     title: conn.ki?.connected ? 'Connected to Known Issues org' : 'Log into Known Issues org for KI enrichment',
-    onClick: () => chrome.tabs.create({ url: 'https://known-issues-prd1.lightning.force.com' })
+    onClick: () => chrome.tabs.create({ url: KI_BASE })
   }));
 
   const refreshBtn = h('button', {

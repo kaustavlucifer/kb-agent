@@ -507,28 +507,9 @@ body {
 
 /* ─── Stats Bar ─── */
 
-.stats-bar {
-  padding: var(--space-lg);
-  margin-bottom: var(--space-lg);
-}
 
-.stats-bar__row {
-  display: flex;
-  gap: var(--space-2xl);
-  font-size: var(--text-sm);
-}
 
-.stats-bar__value {
-  font-size: var(--text-xl);
-  font-weight: var(--weight-bold);
-  color: var(--text-primary);
-  line-height: 1.2;
-}
 
-.stats-bar__label {
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-}
 
 
 /* ─── Empty State ─── */

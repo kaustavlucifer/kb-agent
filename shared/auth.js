@@ -76,7 +76,7 @@ export async function detectSession() {
 
   const orgcs = orgs.find(o => o.isOrgcs);
   if (orgcs) return { ...orgcs, orgs };
-  return orgs.length ? { ...orgs[0], orgs } : { sid: null, apiBase: null, lightningHost: null, orgs: [] };
+  return { sid: null, apiBase: null, lightningHost: null, orgs };
 }
 
 async function detectOrgSession(matchKey) {

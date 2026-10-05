@@ -183,14 +183,31 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-async function fetchImageAsBase64(src, sid, signal) {
-  let resp = null;
+function isSessionOrgHost(src, session) {
   try {
-    resp = await fetch(src, { headers: { Authorization: `Bearer ${sid}` }, signal });
-  } catch {}
+    const { protocol, hostname } = new URL(src);
+    if (protocol !== 'https:' || !session?.apiBase) return false;
+    const apiHost = new URL(session.apiBase).hostname.toLowerCase();
+    const host = hostname.toLowerCase();
+    if (host === apiHost || host === (session.lightningHost || '').toLowerCase()) return true;
+    const orgKey = apiHost.split('.')[0];
+    return host.startsWith(`${orgKey}--`) && /\.(salesforce|force|documentforce|visualforce)\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+async function fetchImageAsBase64(src, session, signal) {
+  const trusted = isSessionOrgHost(src, session);
+  let resp = null;
+  if (trusted) {
+    try {
+      resp = await fetch(src, { headers: { Authorization: `Bearer ${session.sid}` }, signal });
+    } catch {}
+  }
   if (!resp?.ok) {
     try {
-      resp = await fetch(src, { credentials: 'include', signal });
+      resp = await fetch(src, { credentials: trusted ? 'include' : 'omit', signal });
     } catch {
       return null;
     }
@@ -209,9 +226,9 @@ async function fetchImageAsBase64(src, sid, signal) {
   }
 }
 
-async function fetchImageContentBlocks(refs, sid, signal, maxImages = MAX_REWRITE_IMAGES_PER_ARTICLE) {
+async function fetchImageContentBlocks(refs, session, signal, maxImages = MAX_REWRITE_IMAGES_PER_ARTICLE) {
   const capped = refs.slice(0, maxImages);
-  const images = await mapWithConcurrency(capped, maxImages, (ref) => fetchImageAsBase64(ref.src, sid, signal));
+  const images = await mapWithConcurrency(capped, maxImages, (ref) => fetchImageAsBase64(ref.src, session, signal));
   const blocks = [];
   for (let i = 0; i < capped.length; i++) {
     const img = images[i];
@@ -222,9 +239,9 @@ async function fetchImageContentBlocks(refs, sid, signal, maxImages = MAX_REWRIT
   return blocks;
 }
 
-export async function buildPromptContent(text, sid, signal, maxImages) {
+export async function buildPromptContent(text, session, signal, maxImages) {
   const imageRefs = extractMarkdownImageRefs(text);
-  const imageBlocks = imageRefs.length ? await fetchImageContentBlocks(imageRefs, sid, signal, maxImages) : [];
+  const imageBlocks = imageRefs.length ? await fetchImageContentBlocks(imageRefs, session, signal, maxImages) : [];
   return imageBlocks.length ? [{ type: 'text', text }, ...imageBlocks] : text;
 }
 

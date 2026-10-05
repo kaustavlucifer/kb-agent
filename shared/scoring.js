@@ -184,25 +184,29 @@ Score now. Return only JSON. overall must equal sum of all scores.`;
   return { system: SCORING_SYSTEM, user, maxes };
 }
 
+export function normalizeCriterion(raw, def, maxes) {
+  const effectiveMax = maxes?.[def.id] ?? def.baseMax;
+  const isNa = raw.na === true || effectiveMax === 0;
+  const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(raw.score) || 0)));
+  return {
+    id: def.id,
+    label: def.label,
+    score,
+    max: effectiveMax,
+    na: isNa,
+    passed: Array.isArray(raw.passed) ? raw.passed.filter(Boolean) : [],
+    issues: Array.isArray(raw.issues) ? raw.issues.filter(Boolean) : [],
+    suggestions: Array.isArray(raw.suggestions) ? raw.suggestions.filter(Boolean) : []
+  };
+}
+
 export function parseScoreResponse(text, dynamicMaxes) {
   const obj = extractJson(text);
   if (!obj) return { overall: null, criteria: [], error: 'No JSON in response' };
 
   const criteria = SCORING_CRITERIA.map(c => {
     const found = (obj.criteria || []).find(x => x.id === c.id) || {};
-    const effectiveMax = dynamicMaxes?.[c.id] ?? c.baseMax;
-    const isNa = found.na === true || effectiveMax === 0;
-    const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(found.score) || 0)));
-    return {
-      id: c.id,
-      label: c.label,
-      score,
-      max: effectiveMax,
-      na: isNa,
-      passed: Array.isArray(found.passed) ? found.passed.filter(Boolean) : [],
-      issues: Array.isArray(found.issues) ? found.issues.filter(Boolean) : [],
-      suggestions: Array.isArray(found.suggestions) ? found.suggestions.filter(Boolean) : []
-    };
+    return normalizeCriterion(found, c, dynamicMaxes);
   });
   const overall = Math.min(100, criteria.reduce((s, c) => s + c.score, 0));
   return { overall, criteria, error: null };
@@ -274,7 +278,7 @@ export async function fetchArticleBodies(articleIds, session) {
   return bodyMap;
 }
 
-export async function fetchArticleChatterBatch(articleIds, session) {
+export async function fetchArticleChatterBatch(articleIds, session, feedObject = 'FeedItem', signal) {
   const chatterMap = new Map();
   const validIds = articleIds.filter(id => ID_RE.test(id));
   if (!validIds.length) return chatterMap;
@@ -283,9 +287,9 @@ export async function fetchArticleChatterBatch(articleIds, session) {
   const grouped = new Map();
   await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, async (batch) => {
     try {
-      const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM FeedItem WHERE ParentId IN (${soqlIdList(batch)}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
+      const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM ${feedObject} WHERE ParentId IN (${soqlIdList(batch)}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
       const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, session.sid);
+      const result = await sfGet(url, session.sid, signal);
       for (const r of (result.records || [])) {
         if (!r.Body || classifySignature(r.Body)) continue;
         if (!grouped.has(r.ParentId)) grouped.set(r.ParentId, []);

@@ -618,7 +618,7 @@ async function searchProductDocs(apiBase, sid, queries, casePt, caseContext, sig
 
   if (!merged.length) return [];
 
-  const scored = await scoreProductDocsRelevance(merged, caseContext);
+  const scored = await scoreProductDocsRelevance(merged, caseContext, signal);
   return scored;
 }
 
@@ -696,7 +696,7 @@ async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
   }
 }
 
-async function scoreProductDocsRelevance(articles, caseContext) {
+async function scoreProductDocsRelevance(articles, caseContext, signal) {
   if (!caseContext || !articles.length) return articles.slice(0, 15);
 
   const candidates = articles.slice(0, 50);
@@ -706,6 +706,7 @@ async function scoreProductDocsRelevance(articles, caseContext) {
 
   try {
     const resp = await callClaudeFast({
+      signal,
       system: `You are a product documentation relevance assessor for Salesforce support cases.
 
 Given a support case and a list of product documentation article titles, identify which articles would help an engineer understand the product behavior, feature setup, or limitations described in the case.
@@ -741,7 +742,7 @@ Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
 async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal, session) {
   const allSuggestions = [];
   const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
-  const chatterMap = await fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session).catch(() => new Map());
+  const chatterMapPromise = fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session, 'FeedItem', signal).catch(() => new Map());
 
   const tasks = articles.slice(0, 2).map(article => async () => {
     const body = bodyMap.get(article.Id) || {};
@@ -749,10 +750,11 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
     const resText = stripHtmlKeepLinks(body.resolution, session.apiBase).slice(0, MAX_BODY_CHARS);
     const stepsText = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
     const refLinksText = body.additionalResources ? stripHtmlKeepLinks(body.additionalResources, session.apiBase).slice(0, 500) : '';
+    const chatterMap = await chatterMapPromise;
     const chatterNotes = chatterMap.get(article.Id) || '';
 
     const userText = `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${refLinksText ? '\nEXISTING REFERENCE LINKS:\n' + refLinksText : ''}${chatterNotes ? '\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n' + chatterNotes : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}`;
-    const content = await buildPromptContent(userText, session.sid, signal);
+    const content = await buildPromptContent(userText, session, signal);
 
     try {
       const fullText = await streamClaude({
@@ -971,7 +973,7 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
 
 async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {
   if (!scoredArticles.length) return;
-  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session).catch(() => new Map());
+  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session, 'FeedItem', signal).catch(() => new Map());
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
     if (signal?.aborted) return;
     const body = candidateBodies.get(sa.id) || {};

@@ -55,13 +55,19 @@
       </div>
     </div>
 
-    <details>
-      <summary class="section-title">Usage Analytics</summary>
-      <div class="field">
-        <div class="help" style="margin-bottom: 10px;">Counts cases scanned, articles scored, rewrites generated, and rewrites published — tracked via internal Chatter posts on the Case/Article, org-wide. Reads the last 3 months.</div>
-        <button class="btn btn--secondary" id="analytics-btn">Run Analytics</button>
+    <div class="section-title" style="cursor: default;">Usage Analytics</div>
+    <div class="field">
+      <div class="help" style="margin-bottom: 10px;">Counts cases scanned, articles scored, rewrites generated and published, and Known Issues created, updated, rewritten, and scored — tracked via internal Chatter posts on each record, across OrgCS and the Known Issues org. Reads the last 3 months.</div>
+      <button class="btn btn--secondary" id="analytics-btn">Run Analytics</button>
+    </div>
+
+    <div class="section-title" style="cursor: default;">Updates</div>
+    <div class="field">
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <button class="btn btn--secondary" id="update-check-btn" type="button">Check for updates</button>
+        <span id="update-status" style="font-size: 12px; color: var(--text-secondary);"></span>
       </div>
-    </details>
+    </div>
     <div class="actions">
       <button class="btn btn--primary" id="save-btn">Save</button>
       <button class="btn btn--secondary" id="test-btn">Test Connection</button>

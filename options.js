@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, SETTINGS_SCHEMA, MODEL_CHOICES, currentSettings, applySettings } from './shared/config.js';
+import { STORAGE_KEYS, SETTINGS_SCHEMA, MODEL_CHOICES, currentSettings, applySettings, articleUrl, ORGCS_BASE, KI_BASE } from './shared/config.js';
 import { h, modal, progressBar } from './shared/ui.js';
 import { listGatewayModels } from './shared/gateway.js';
 
@@ -203,7 +203,7 @@ document.getElementById('clear-btn').addEventListener('click', async () => {
     STORAGE_KEYS.ALL_ARTICLES, STORAGE_KEYS.ALL_ARTICLES_AT, STORAGE_KEYS.ARTICLE_SCORES,
     STORAGE_KEYS.DEDUP_RESULTS, STORAGE_KEYS.DEDUP_AT, STORAGE_KEYS.RECENT_CASES,
     STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT,
-    STORAGE_KEYS.AUTH_CACHE, STORAGE_KEYS.MERGE_CACHE
+    STORAGE_KEYS.AUTH_CACHE, STORAGE_KEYS.MERGE_CACHE, STORAGE_KEYS.MODEL_CATALOG
   ]);
   setStatus('Cache cleared.', 'var(--text-secondary)');
 });
@@ -219,7 +219,57 @@ const KIND_LABELS = {
   'ki-scored': 'KIs scored'
 };
 
+const kiRecordUrl = id => `${KI_BASE}/lightning/r/Known_Issue__c/${id}/view`;
+
+const KIND_RECORD_URL = {
+  'case-scan': id => `${ORGCS_BASE}/lightning/r/Case/${id}/view`,
+  'article-scored': articleUrl,
+  'rewrite-generated': articleUrl,
+  'rewrite-published': articleUrl,
+  'ki-created': kiRecordUrl,
+  'ki-updated': kiRecordUrl,
+  'ki-rewrite-generated': kiRecordUrl,
+  'ki-scored': kiRecordUrl
+};
+
+function recordLink(record) {
+  const toUrl = KIND_RECORD_URL[record.kind];
+  if (!toUrl || !record.parentId) return record.label;
+  return h('a', { href: toUrl(record.parentId), target: '_blank', rel: 'noopener' }, record.label);
+}
+
 document.getElementById('analytics-btn').addEventListener('click', runAnalytics);
+
+const updateBtn = document.getElementById('update-check-btn');
+const updateStatus = document.getElementById('update-status');
+
+async function runUpdateCheck(force) {
+  updateBtn.disabled = true;
+  updateStatus.textContent = 'Checking…';
+  updateStatus.style.color = 'var(--text-secondary)';
+  try {
+    const r = await chrome.runtime.sendMessage({ action: 'CHECK_FOR_UPDATE', force });
+    updateStatus.textContent = '';
+    if (!r?.ok) {
+      updateStatus.style.color = 'var(--error)';
+      updateStatus.textContent = `Check failed${r?.error ? `: ${r.error}` : ''} (current v${r?.current || chrome.runtime.getManifest().version})`;
+    } else if (r.latest && r.updateAvailable) {
+      updateStatus.style.color = 'var(--warning)';
+      updateStatus.append(`v${r.latest} available (current v${r.current}) — `, h('a', { href: r.downloadUrl, target: '_blank', rel: 'noopener' }, 'Download'));
+    } else {
+      updateStatus.style.color = 'var(--success)';
+      updateStatus.textContent = `Up to date (v${r.current})`;
+    }
+  } catch (e) {
+    updateStatus.style.color = 'var(--error)';
+    updateStatus.textContent = `Check failed: ${e.message}`;
+  } finally {
+    updateBtn.disabled = false;
+  }
+}
+
+updateBtn.addEventListener('click', () => runUpdateCheck(true));
+runUpdateCheck(false);
 
 function runAnalytics() {
   const btn = document.getElementById('analytics-btn');
@@ -264,7 +314,7 @@ function renderAnalyticsReport(ref, report) {
   const monthRows = report.months.map(m => h('tr', null, h('td', null, m.label), h('td', { style: { textAlign: 'right' } }, String(m.count))));
   const authorRows = report.authors.slice(0, 15).map(a => h('tr', null, h('td', null, a.label), h('td', { style: { textAlign: 'right' } }, String(a.count))));
   const recordRows = report.records.slice(0, 50).map(r => h('tr', null,
-    h('td', null, r.label),
+    h('td', null, recordLink(r)),
     h('td', null, KIND_LABELS[r.kind] || r.kind),
     h('td', { style: { textAlign: 'right' } }, String(r.count)),
     h('td', null, (r.lastDate || '').slice(0, 10))

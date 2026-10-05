@@ -11,6 +11,7 @@ import { estimateDedup, fmtUsd } from '../shared/cost.js';
 import { previewButton, showArticleCompare } from '../shared/article-preview.js';
 import { parseRewriteSections } from '../shared/markdown.js';
 import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft, sectionsToPublishArray } from '../shared/draft-publish.js';
+import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 let _container = null;
 let _unsubs = [];
@@ -458,7 +459,15 @@ async function generateMerge(pair, mergeKey) {
     resB = stripHtmlKeepLinks(bodyMap.get(artB.id)?.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
   }
 
-  const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide. Output EXACTLY these four sections and nothing else:
+  const system = `You are an expert Salesforce Knowledge editor. Merge two duplicate articles into one optimal article following the Agentforce Writing Guide below.
+
+${GUIDE_GENERATION}
+
+${GUIDE_STYLE}
+
+Combine the two source articles: keep the most accurate, complete, and up-to-date content from each, resolving any conflicts between them in favor of the more correct or recent information. Eliminate redundancy between the two articles rather than concatenating them.
+
+Output EXACTLY these four sections and nothing else:
 ## TITLE
 ## SUMMARY
 ## DESCRIPTION
@@ -483,7 +492,7 @@ Resolution: ${resB}
 Keep best content from both. Prefer most complete and recent steps.`;
 
   const isStale = () => _mergeAbort !== abort || abort.signal.aborted;
-  const content = await buildPromptContent(user, session.sid, abort.signal, MAX_REWRITE_IMAGES_PER_ARTICLE * 2);
+  const content = await buildPromptContent(user, session, abort.signal, MAX_REWRITE_IMAGES_PER_ARTICLE * 2);
   if (isStale()) return;
 
   let fullText = '';

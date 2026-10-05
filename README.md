@@ -128,7 +128,17 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.21.1 (current)
+### v2.22.0 (current)
+- Known Issues: AI scoring/rewrite inputs are PII-masked; rewrites build on a pending DRAFT instead of overwriting it; Summary/Repro/Workaround are saved as Salesforce rich text (so lists render on help.salesforce.com); KI Chatter read from `Known_Issue__Feed`; scoring no longer truncates (larger token budget + retry); category Id cache scoped per org; BRE cases resolve to the correct KI cloud
+- KI rewrite modal now has an instructions box and Regenerate (builds on your current edits), matching the KB rewrite flow
+- KI table: Created and Modified date columns (sortable); layout aligned with KB/Dedupe (sticky toolbar, table in its own card)
+- Case Analysis: layout aligned with other tabs; previous case's warnings no longer leak into the next analysis; auto-retry only on early disconnects (no silent full AI re-run); Stop now cancels all AI and Chatter calls
+- KB: publish lock prevents duplicate drafts from double-clicks (KB rewrite, Dedupe merge, Case Analysis); rewrite state resets after publish; KB rewrite and Dedupe merge now share the writing guide rules (merges previously received none)
+- Security: rewrite image fetches only send the OrgCS session to OrgCS's own hosts; no silent fallback to a non-OrgCS org when OrgCS isn't logged in
+- Settings: new Updates section; Usage Analytics always expanded; analytics records link to their Case, KB article, or Known Issue
+- Org hosts centralized in config; dead CSS and duplicate mapping entries removed
+
+### v2.21.1
 - Fixed Gateway 400 "does not support temperature" on newer models: temperature is now only sent to models that accept it (Haiku 4.5, Sonnet ≤4.6, Opus ≤4.6) and omitted for Sonnet 5/5.5 and Opus 4.7+/5.5, which use their default — verified against every Claude model on the gateway
 
 ### v2.21.0

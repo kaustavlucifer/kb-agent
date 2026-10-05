@@ -6,11 +6,12 @@ import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../s
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped, SCORING_SYSTEM_CHARS } from '../shared/scoring.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, normalizeCriterion, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped, SCORING_SYSTEM_CHARS } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { parseRewriteSections, markdownToHtml } from '../shared/markdown.js';
 import { confirmDraftOverwriteIfExists, publishDraftUpdate, sectionsToPublishArray } from '../shared/draft-publish.js';
+import { GUIDE_GENERATION, GUIDE_STYLE } from '../data/writing_guide_prompts.js';
 
 let _container = null;
 let _unsubs = [];
@@ -233,11 +234,12 @@ function render() {
 
   const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
 
-  const ptOptions = uniqueSortedValues(articles, 'topicName');
+  const filterOptions = getFilterOptionLists(articles);
+  const ptOptions = filterOptions.topicName;
   const filteredScored = filtered.filter(a => scores[a.id]?.overall != null);
   const filteredAvg = filteredScored.length ? Math.round(filteredScored.reduce((s, a) => s + scores[a.id].overall, 0) / filteredScored.length) : null;
 
-  const validationOptions = uniqueSortedValues(articles, 'validationStatus');
+  const validationOptions = filterOptions.validationStatus;
 
   const searchInput = h('input', { type: 'text', class: 'input', style: { flex: '1', minWidth: '160px', maxWidth: '240px' }, placeholder: 'Search title / article #…', id: 'kb-filter', value: _filterText });
   searchInput.addEventListener('input', e => {
@@ -298,7 +300,7 @@ function render() {
     (sel) => { _filterValidation = sel; _page = 0; render(); }
   );
 
-  const publishOptions = uniqueSortedValues(articles, 'publishStatus');
+  const publishOptions = filterOptions.publishStatus;
   const publishMulti = multiSelect('kb-publish-filter', 'Status',
     publishOptions.map(v => ({ value: v, label: v })),
     _filterPublish,
@@ -562,12 +564,27 @@ async function loadArticles(forceLive = false) {
 }
 
 
+let _filterOptionsMemo = null;
+
+function getFilterOptionLists(articles) {
+  if (_filterOptionsMemo && _filterOptionsMemo.articles === articles) {
+    return _filterOptionsMemo.result;
+  }
+  const result = {
+    topicName: uniqueSortedValues(articles, 'topicName'),
+    validationStatus: uniqueSortedValues(articles, 'validationStatus'),
+    publishStatus: uniqueSortedValues(articles, 'publishStatus')
+  };
+  _filterOptionsMemo = { articles, result };
+  return result;
+}
+
 let _filteredMemo = null;
 
 function getFilteredArticles() {
   const articles = getState('kb.articles') || [];
   const scores = getState('kb.scores') || {};
-  const signature = `${_filterText}|${_filterCloud.join(',')}|${_filterPt.join(',')}|${_filterScore.join(',')}|${_filterValidation.join(',')}|${_filterPublish.join(',')}|${_sorter.col}|${_sorter.dir}`;
+  const signature = `${_filterText}|${_filterCloud.join(',')}|${_filterPt.join(',')}|${_filterScore.join(',')}|${_filterValidation.join(',')}|${_filterPublish.join(',')}|${_sorter.col}|${_sorter.dir}|${_agfHits ? 1 : 0}`;
   if (_filteredMemo && _filteredMemo.articles === articles && _filteredMemo.scores === scores && _filteredMemo.signature === signature) {
     return _filteredMemo.result;
   }
@@ -837,15 +854,7 @@ async function scoreOne(article) {
             const raw = parsed[i];
             const def = CRITERIA.find(c => c.id === raw.id);
             if (!def) continue;
-            const effectiveMax = maxes?.[raw.id] ?? def.baseMax;
-            const isNa = raw.na === true || effectiveMax === 0;
-            const score = isNa ? 0 : Math.min(effectiveMax, Math.max(0, Math.round(Number(raw.score) || 0)));
-            const c = {
-              id: raw.id, label: def.label, score, max: effectiveMax, na: isNa,
-              passed: Array.isArray(raw.passed) ? raw.passed.filter(Boolean) : [],
-              issues: Array.isArray(raw.issues) ? raw.issues.filter(Boolean) : [],
-              suggestions: Array.isArray(raw.suggestions) ? raw.suggestions.filter(Boolean) : []
-            };
+            const c = normalizeCriterion(raw, def, maxes);
             const row = document.getElementById(`score-row-${c.id}`);
             if (row) {
               const newRow = renderCriterionRow(c);
@@ -1189,19 +1198,19 @@ HOW AGENTFORCE RETRIEVES CONTENT (optimize for this):
 - Videos, screenshots, and attachments are ignored — only text and alt-text are indexed.
 - Code blocks consume poorly — always explain them in plain text.
 
-REWRITE RULES (each maps to a scored criterion — satisfy ALL):
-1. TITLE: ≤60 chars, front-load keywords, no question format, symptom-based for troubleshooting. Must include at least one of: product name, cloud, audience, or mode — prefer including the specific product name.
-2. SUMMARY: ≤170 chars, use DIFFERENT words/synonyms than the title. This is where the intent statement belongs — state WHAT question or problem the article resolves and WHY it matters, and include exact error text for error articles. Do NOT name a target audience or role (never "for developers", "for admins", "scoped for architects", etc.).
-3. HEADERS: Use ## for each section (renders as <h2>) — NEVER bold text as a header. Make headers descriptive with intent keywords. Keep each section ≤~2000 chars; split with ### if longer.
-4. DESCRIPTION: Open directly with the problem, symptom, or observed behavior — do NOT open with a meta sentence such as "This article addresses…", "This article explains…", or "This article is scoped for…". Explain WHY it happens (root-cause context: when, where, and how it occurs). Present tense. State the product name explicitly. Do NOT describe the intended audience, reader role, or who the article is "for".
-5. RESOLUTION: Begin with a brief context paragraph, then numbered steps. Each step is a complete, actionable instruction with its expected outcome. Use realistic Salesforce-format example data (never "xxxxx"). After any code, add a plain-text explanation of what it does. A concrete reproduction/error-message walkthrough already counts as real-life context — do not pad it with extra "scenario" framing.
-6. SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists, no wall-of-text. Each section must read as a self-contained chunk.
-7. VOICE: Write in impersonal, product-facing documentation language. Avoid pronouns wherever possible — no first-person ("I", "we", "our") and no second-person ("you", "your"). Prefer imperative mood for steps ("Open Setup", not "You open Setup") and noun/passive phrasing for descriptions ("The report displays no results", not "You will see no results"). Do NOT address the reader directly or reference "the customer".
-8. GRAMMAR: Every sentence must be grammatically complete (subject + main verb) or a valid imperative/procedural/list construction — no fragments or thoughts truncated mid-sentence. Imperative commands, numbered procedural steps, and noun-phrase bullet labels are already complete; do not force them into full-sentence prose.
-9. DEFINITIONS: Explain every acronym, synonym, and abbreviation on first use, EXCEPT standard Salesforce platform terminology (API, CRM, URL, Lightning Experience, Classic, org, SQL, HTML, SELECT, HTML tags like BR/P/DIV/SPAN/IMG/TABLE, and capitalized emphasis words like NOTE/TIP/WARNING/CAUTION/NEW). Domain-specific acronyms and currency/unit codes (e.g. "PHP", "USD") DO need a first-use definition.
-10. LINK HYGIENE: Keep the article to 4 or fewer hyperlinks total — 5 or more makes it link-heavy and non-compliant. NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim, and even then stay within the 4-link budget. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
-11. IMAGES: The original article's images appear inline as ![alt text](url), and where possible the actual image is attached below the article text so you can see what it shows — use the real visual content, not just the alt text, to judge relevance. If an image is genuinely informative (a screenshot of the exact error/dialog, an annotated diagram) keep it by reproducing its EXACT ![alt](url) markdown at the equivalent point in the rewrite — never alter the URL, never invent a new image, never describe an image in prose instead of keeping the markdown reference. Drop only images that are purely decorative or no longer relevant to the rewritten content.
-12. NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, "contact Salesforce support" as a step, PII/credentials, or speculative statements.
+${GUIDE_GENERATION}
+
+${GUIDE_STYLE}
+
+ADDITIONAL REWRITE-SPECIFIC RULES (not covered above, or overriding above where noted — satisfy ALL):
+- TITLE OVERRIDE: ≤60 chars, front-load the searchable keywords, no question format, symptom-based for troubleshooting articles (describe the observed behavior, not the fix).
+- SUMMARY OVERRIDE: ≤170 chars, use DIFFERENT words/synonyms than the title (do not restate it), include the exact error text verbatim for error articles.
+- HEADERS FORMAT: Use ## for each section (renders as <h2>) — NEVER bold text as a header. Keep each section ≤~2000 chars; split with ### if longer.
+- RESOLUTION: Each numbered step must be a complete, actionable instruction that also states its expected outcome.
+- SCANNABILITY: Short paragraphs (3-5 sentences), bulleted/numbered lists for steps, no wall-of-text — each section must read as a self-contained chunk.
+- LINK HYGIENE OVERRIDE: NEVER add an "Additional Resources", "References", "See Also", or "Related Links" section unless the ORIGINAL article body contains real, valid hyperlinks you can carry over verbatim, and even then stay within the 4-link budget. Do NOT invent links and do NOT emit "search Salesforce Help for X"-style placeholder bullets — a resources section with no genuine hyperlink is noise; omit it entirely.
+- IMAGES: The original article's images appear inline as ![alt text](url), and where possible the actual image is attached below the article text so you can see what it shows — use the real visual content, not just the alt text, to judge relevance. If an image is genuinely informative (a screenshot of the exact error/dialog, an annotated diagram) keep it by reproducing its EXACT ![alt](url) markdown at the equivalent point in the rewrite — never alter the URL, never invent a new image, never describe an image in prose instead of keeping the markdown reference. Drop only images that are purely decorative or no longer relevant to the rewritten content.
+- NEVER include: internal-only URLs (orgcs.lightning.force.com), screenshot-only solutions, unexplained code, PII, credentials, or speculative statements.
 
 Preserve all technical accuracy from the original. Output EXACTLY these four sections and nothing else:
 ## TITLE
@@ -1231,7 +1240,7 @@ CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
   const isStale = () => _rewriteAbort !== abort || abort.signal.aborted;
-  const content = await buildPromptContent(user, session.sid, abort.signal);
+  const content = await buildPromptContent(user, session, abort.signal);
   if (isStale()) return;
 
   let fullText = '';
@@ -1307,21 +1316,38 @@ async function publishRewriteToOrgcs(article) {
   const cached = _rewriteCache[article.id];
   if (!cached) { toast('No generated content to publish. Generate first.', 'error'); return; }
 
-  const proceed = await confirmDraftOverwriteIfExists(article.id, 'this rewrite');
-  if (!proceed) return;
+  const btn = document.getElementById('rewrite-publish');
+  const btnOriginalLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Publishing…'; }
 
-  const parsed = parseRewriteSections(cached);
-  const resp = await publishDraftUpdate({
-    existingArticleId: article.id,
-    title: parsed.title || article.title,
-    summary: parsed.summary,
-    sections: sectionsToPublishArray(parsed),
-    taxonomyName: article.topicName || null
-  });
-  if (resp?.success) {
-    swapButtonWithLink('rewrite-publish', { url: resp.url, label: 'Open Draft Version ↗' });
-    const session = await detectSession();
-    if (session.sid) logSignature('rewrite-published', session.apiBase, session.sid, article.id);
+  const restoreButton = () => { if (btn) { btn.disabled = false; btn.textContent = btnOriginalLabel; } };
+
+  try {
+    const parsed = parseRewriteSections(cached);
+    const proceed = await confirmDraftOverwriteIfExists(article.id, 'this rewrite');
+    if (!proceed) { restoreButton(); return; }
+
+    const resp = await publishDraftUpdate({
+      existingArticleId: article.id,
+      title: parsed.title || article.title,
+      summary: parsed.summary,
+      sections: sectionsToPublishArray(parsed),
+      taxonomyName: article.topicName || null
+    });
+    if (resp?.success) {
+      swapButtonWithLink('rewrite-publish', { url: resp.url, label: 'Open Draft Version ↗' });
+      delete _rewriteCache[article.id];
+      delete _rewriteScoreCache[article.id];
+      delete _rewriteRefineApplied[article.id];
+      await chrome.storage.local.remove(STORAGE_KEYS.ALL_ARTICLES_AT);
+      const session = await detectSession();
+      if (session.sid) logSignature('rewrite-published', session.apiBase, session.sid, article.id);
+    } else {
+      restoreButton();
+    }
+  } catch (e) {
+    restoreButton();
+    toast('Publish failed: ' + e.message, 'error');
   }
 }
 

@@ -1,8 +1,8 @@
-import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField, stickyScrollLayout } from '../shared/ui.js';
 import { openKiDraftModal } from './ki-manager.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
+import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl, KI_BASE } from '../shared/config.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { markdownToHtml } from '../shared/markdown.js';
 import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft } from '../shared/draft-publish.js';
@@ -218,15 +218,16 @@ function renderIdle() {
   if (!_container) return;
   _container.textContent = '';
 
-  const searchWrap = h('div', { style: { position: 'relative' } },
+  const searchWrap = h('div', { style: { position: 'relative', overflow: 'visible', flex: '1' } },
     h('div', { style: { display: 'flex', gap: '8px' } },
       h('input', { type: 'text', class: 'input', id: 'case-input', placeholder: 'Case number, ID, or URL…', autocomplete: 'off' }),
       h('button', { class: 'btn btn--primary', onClick: onAnalyzeClick, id: 'analyze-btn' }, 'Analyze')
     ),
     h('div', { id: 'case-typeahead', style: { display: 'none', position: 'absolute', top: '100%', left: '0', right: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)', zIndex: '500', maxHeight: '220px', overflowY: 'auto' } })
   );
-  const searchBar = h('div', { class: 'card', style: { padding: '12px' } }, searchWrap);
-  _container.appendChild(searchBar);
+
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+  stickySection.appendChild(h('div', { class: 'tab-toolbar' }, searchWrap));
 
   const caseInput = document.getElementById('case-input');
   caseInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { hideTypeahead(); onAnalyzeClick(); } });
@@ -240,7 +241,7 @@ function renderIdle() {
 
   const recent = getState('case.recent') || [];
   if (recent.length) {
-    const recentCard = h('div', { class: 'card', style: { marginTop: '12px' } },
+    const recentCard = h('div', { class: 'card' },
       h('div', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' } }, 'Recent Cases')
     );
     recent.slice(0, 8).forEach(c => {
@@ -252,10 +253,10 @@ function renderIdle() {
       row.addEventListener('mouseleave', () => { row.style.background = ''; });
       recentCard.appendChild(row);
     });
-    _container.appendChild(recentCard);
+    scrollSection.appendChild(recentCard);
   }
 
-  _container.appendChild(h('div', { style: { marginTop: '24px' } },
+  scrollSection.appendChild(h('div', { style: { marginTop: recent.length ? '24px' : '0' } },
     emptyState('🔍', 'Enter a Case number and click Analyze to get AI-powered KB recommendations.')
   ));
 }
@@ -264,7 +265,8 @@ function renderAnalyzing() {
   if (!_container) return;
   _container.textContent = '';
 
-  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0 12px' } },
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+  stickySection.appendChild(h('div', { class: 'tab-toolbar' },
     buildInlineSearch(),
     buildStopButton()
   ));
@@ -288,14 +290,15 @@ function renderAnalyzing() {
       ))
     )
   );
-  _container.appendChild(card);
+  scrollSection.appendChild(card);
 }
 
 function renderProgressive() {
   if (!_container) return;
   _container.textContent = '';
 
-  _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 0 12px' } },
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+  stickySection.appendChild(h('div', { class: 'tab-toolbar' },
     buildInlineSearch(),
     buildStopButton()
   ));
@@ -341,7 +344,7 @@ function renderProgressive() {
   );
   main.appendChild(progressCard);
 
-  _container.appendChild(grid);
+  scrollSection.appendChild(grid);
 }
 
 function updateProgressiveSummary() {
@@ -425,12 +428,13 @@ function renderStreaming() {
   let mainEl = _container.querySelector('#case-stream-main');
   if (!mainEl) {
     _container.textContent = '';
-    const streamWarning = renderOpenCaseWarning(getState('case.caseRecord')?.status);
-    if (streamWarning) _container.appendChild(streamWarning);
-    _container.appendChild(h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' } },
+    const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+    stickySection.appendChild(h('div', { class: 'tab-toolbar' },
       buildInlineSearch(),
       buildStopButton()
     ));
+    const streamWarning = renderOpenCaseWarning(getState('case.caseRecord')?.status);
+    if (streamWarning) scrollSection.appendChild(streamWarning);
     const grid = buildResizableGrid();
     const sidebar = grid.querySelector('[data-role="sidebar"]');
     sidebar.id = 'case-stream-sidebar';
@@ -455,7 +459,7 @@ function renderStreaming() {
     const prodDocGap = getState('case.prodDocGap');
     if (prodDocGap && prodDocGap.hasGap) mainEl.appendChild(renderProductDocGapCard(prodDocGap));
 
-    _container.appendChild(grid);
+    scrollSection.appendChild(grid);
   } else {
     const sidebar = _container.querySelector('#case-stream-sidebar');
     if (sidebar) {
@@ -510,7 +514,8 @@ function renderStreaming() {
     const contentEl = progressCard.querySelector('.sug-progress-content');
     if (contentEl) {
       const fragment = document.createDocumentFragment();
-      renderStreamingSuggestion(deltaText, fragment);
+      const cleanedDelta = deltaText.replace(/^```json\s*/, '').replace(/```\s*$/, '');
+      renderStreamingFields(cleanedDelta, fragment, { compact: true, includeChanges: true });
       contentEl.replaceChildren(fragment);
       contentEl.scrollTop = contentEl.scrollHeight;
     }
@@ -533,7 +538,8 @@ function renderStreaming() {
     const contentEl = draftEl.querySelector('#stream-draft-content');
     if (contentEl) {
       contentEl.textContent = '';
-      renderStreamingDraft(streamText, contentEl);
+      const cleanedStream = streamText.replace(/^```json\s*/, '').replace(/```\s*$/, '');
+      renderStreamingFields(cleanedStream, contentEl, { compact: false, includeChanges: false });
     }
   }
 
@@ -605,16 +611,6 @@ function renderStreamingFields(cleaned, container, { compact = false, includeCha
   }
 }
 
-function renderStreamingSuggestion(text, container) {
-  const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
-  renderStreamingFields(cleaned, container, { compact: true, includeChanges: true });
-}
-
-function renderStreamingDraft(text, container) {
-  const cleaned = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
-  renderStreamingFields(cleaned, container, { compact: false, includeChanges: false });
-}
-
 function renderResult() {
   if (!_container) return;
 
@@ -637,15 +633,16 @@ function renderResult() {
   }
 
   _container.textContent = '';
-  _container.appendChild(buildInlineSearch());
+  const { sticky: stickySection, scroll: scrollSection } = stickyScrollLayout(_container);
+  stickySection.appendChild(h('div', { class: 'tab-toolbar' }, buildInlineSearch()));
 
   const openCaseWarning = renderOpenCaseWarning(getState('case.caseRecord')?.status);
-  if (openCaseWarning) _container.appendChild(openCaseWarning);
+  if (openCaseWarning) scrollSection.appendChild(openCaseWarning);
 
   const custWarning = getState('case.customizationWarning');
   if (custWarning?.isCustomerSpecific) {
     const indicators = (custWarning.indicators || []).slice(0, 3).join(', ');
-    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--error) 8%, transparent)', border: '1px solid var(--error)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+    scrollSection.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--error) 8%, transparent)', border: '1px solid var(--error)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
       h('span', { style: { fontSize: '14px' } }, '⚙'),
       h('div', null,
         h('div', { style: { fontWeight: '600' } }, 'Customer-specific configuration detected'),
@@ -656,7 +653,7 @@ function renderResult() {
 
   const ptWarning = getState('case.ptWarning');
   if (ptWarning) {
-    _container.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--primary) 8%, transparent)', border: '1px solid var(--primary)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
+    scrollSection.appendChild(h('div', { style: { padding: '10px 14px', marginBottom: '12px', background: 'color-mix(in srgb, var(--primary) 8%, transparent)', border: '1px solid var(--primary)', borderRadius: 'var(--radius-sm)', fontSize: '12px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' } },
       h('span', { style: { fontSize: '14px' } }, 'i'),
       h('span', null, ptWarning)
     ));
@@ -815,7 +812,7 @@ function renderResult() {
     ));
   }
 
-  _container.appendChild(grid);
+  scrollSection.appendChild(grid);
 }
 
 let _sidebarWidth = 320;
@@ -1020,7 +1017,7 @@ function renderSidebarKnownIssues(kiItems) {
   if (!isCollapsed) {
     const body = h('div', null);
     kiItems.forEach(ki => {
-      const kiUrl = `https://known-issues-prd1.lightning.force.com/lightning/r/Known_Issue__c/${ki.id}/view`;
+      const kiUrl = `${KI_BASE}/lightning/r/Known_Issue__c/${ki.id}/view`;
       const statusColor = ki.status === 'Fixed' ? 'success' : ki.status === 'Solution in Progress' ? 'warning' : 'info';
       body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
@@ -1815,6 +1812,8 @@ function startAnalysis(caseId, isRetry = false) {
   setState('case.publishedUrl', null);
   setState('case.draftScores', null);
   setState('case.scoringInProgress', null);
+  setState('case.customizationWarning', null);
+  setState('case.ptWarning', null);
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
   _port.postMessage({ action: 'ANALYZE_CASE', caseId });
@@ -1828,11 +1827,13 @@ function startAnalysis(caseId, isRetry = false) {
       const lastStep = getState('case.progress')?.label || 'unknown';
       const disconnectReason = chrome.runtime.lastError?.message || 'service worker terminated';
 
+      const isEarlyDisconnect = !getState('case.streamText') && !getState('case.caseSummary');
+
       if (suggestions.length) {
         const caseRecord = getState('case.caseRecord');
         setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Connection lost. Showing partial results.', suggestions }, caseNumber: caseRecord?.caseNumber || getState('case.progress')?.caseNumber, subject: caseRecord?.subject || '' });
         setState('case.view', 'result');
-      } else if (_retryCount < MAX_AUTO_RETRIES) {
+      } else if (isEarlyDisconnect && _retryCount < MAX_AUTO_RETRIES) {
         _retryCount++;
         toast(`Connection dropped at "${lastStep}". Retrying…`, 'info');
         setTimeout(() => {

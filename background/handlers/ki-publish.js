@@ -1,8 +1,9 @@
 import { sfPost, sfPatch, sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtmlKeepLinks } from '../../shared/api.js';
 import { detectKiSession } from '../../shared/auth.js';
-import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL } from '../../shared/config.js';
+import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, KI_BASE } from '../../shared/config.js';
 import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { redactPii } from '../../shared/pii.js';
+import { markdownToHtml } from '../../shared/markdown.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { logSignature } from '../../shared/signature.js';
 import { localGet, localSet } from '../../shared/storage.js';
@@ -36,10 +37,17 @@ Return ONLY JSON: {"overall":<sum>,"criteria":[{"id":"subject","label":"Subject"
 export function resolveKiCloud(casePt) {
   if (!casePt) return null;
   const ptPatterns = resolveTargetPts(casePt);
+  let bestCloud = null;
+  let bestLength = -1;
   for (const entry of Object.values(KI_CLOUD_MAPPING)) {
-    if (entry.ptPatterns.some(p => ptPatterns.includes(p) || casePt.includes(p))) return entry.cloud;
+    for (const p of entry.ptPatterns) {
+      if ((ptPatterns.includes(p) || casePt.includes(p)) && p.length > bestLength) {
+        bestLength = p.length;
+        bestCloud = entry.cloud;
+      }
+    }
   }
-  return null;
+  return bestCloud;
 }
 
 export async function generateKiDraftContent(caseRecord, comments, chatterNotes, signal) {
@@ -52,7 +60,7 @@ ${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${chatterNotes ? `\nRelated
     const resp = await callClaude({
       system: KI_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: user }],
-      maxTokens: 1200,
+      maxTokens: 3000,
       temperature: 0.2,
       model: SCORING_MODEL,
       signal
@@ -63,17 +71,17 @@ ${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${chatterNotes ? `\nRelated
   }
 }
 
-async function rewriteKiAi(existing, chatterNotes) {
+async function rewriteKiAi(existing, chatterNotes, instructions) {
   const user = `EXISTING KNOWN ISSUE:
-Subject: ${existing.subject || ''}
-Summary: ${existing.summary || ''}
-Repro: ${existing.repro || ''}
-Workaround: ${existing.workaround || ''}${chatterNotes ? `\n\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this KI, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${redactPii(chatterNotes, KI_PII_OPTS)}` : ''}`;
+Subject: ${redactPii(existing.subject || '', KI_PII_OPTS)}
+Summary: ${redactPii(existing.summary || '', KI_PII_OPTS)}
+Repro: ${redactPii(existing.repro || '', KI_PII_OPTS)}
+Workaround: ${redactPii(existing.workaround || '', KI_PII_OPTS)}${chatterNotes ? `\n\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this KI, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n${redactPii(chatterNotes, KI_PII_OPTS)}` : ''}${instructions ? `\n\nADDITIONAL USER INSTRUCTIONS (follow these while still satisfying every rule above): ${redactPii(instructions, KI_PII_OPTS)}` : ''}`;
   try {
     const resp = await callClaude({
       system: `${KI_SYSTEM_PROMPT}\nYou are REVISING an existing Known Issue — preserve accurate technical content, improve clarity, fix any customer-identifying leaks, and fill in Repro/Workaround if missing or weak.`,
       messages: [{ role: 'user', content: user }],
-      maxTokens: 1200,
+      maxTokens: 3000,
       temperature: 0.2,
       model: SCORING_MODEL
     });
@@ -91,8 +99,13 @@ const KI_DRAFT_SUMMARY_FIELD = 'DRAFTSummary__c';
 const KI_DRAFT_REPRO_FIELD = 'DRAFTRepro__c';
 const KI_DRAFT_WORKAROUND_FIELD = 'DRAFTWorkaround__c';
 
+function kiRichText(markdown) {
+  const text = redactPii(markdown || '', KI_PII_OPTS).trim();
+  return text ? markdownToHtml(text, { headingBase: 3 }) : '';
+}
+
 export function kiUrl(lightningHost, id) {
-  return `https://${lightningHost || 'known-issues-prd1.lightning.force.com'}/lightning/r/Known_Issue__c/${id}/view`;
+  return `${lightningHost ? `https://${lightningHost}` : KI_BASE}/lightning/r/Known_Issue__c/${id}/view`;
 }
 
 export async function fetchKnownIssueDetail(id, session) {
@@ -102,7 +115,7 @@ export async function fetchKnownIssueDetail(id, session) {
   try { safeId = sanitizeId(id); } catch (e) { return { success: false, error: e.message }; }
 
   try {
-    const soql = `SELECT Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Workaround__c, ${KI_REPRO_FIELD} FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`;
+    const soql = `SELECT Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Workaround__c, ${KI_REPRO_FIELD}, ${KI_DRAFT_SUBJECT_FIELD}, ${KI_DRAFT_SUMMARY_FIELD}, ${KI_DRAFT_REPRO_FIELD}, ${KI_DRAFT_WORKAROUND_FIELD} FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (!records.length) return { success: false, error: 'Known Issue not found.' };
     const r = records[0];
@@ -116,7 +129,13 @@ export async function fetchKnownIssueDetail(id, session) {
         status: r.Status__c || '',
         cloud: r.Cloud__c || '',
         workaround: stripHtmlKeepLinks(r.Workaround__c || '', session.apiBase),
-        repro: stripHtmlKeepLinks(r[KI_REPRO_FIELD] || '', session.apiBase)
+        repro: stripHtmlKeepLinks(r[KI_REPRO_FIELD] || '', session.apiBase),
+        draft: {
+          subject: r[KI_DRAFT_SUBJECT_FIELD] || '',
+          summary: stripHtmlKeepLinks(r[KI_DRAFT_SUMMARY_FIELD] || '', session.apiBase),
+          repro: stripHtmlKeepLinks(r[KI_DRAFT_REPRO_FIELD] || '', session.apiBase),
+          workaround: stripHtmlKeepLinks(r[KI_DRAFT_WORKAROUND_FIELD] || '', session.apiBase)
+        }
       }
     };
   } catch (e) {
@@ -124,7 +143,7 @@ export async function fetchKnownIssueDetail(id, session) {
   }
 }
 
-export async function generateKiRewrite(kiId) {
+export async function generateKiRewrite(kiId, { instructions = '', current = null } = {}) {
   const session = await detectKiSession();
   const detail = await fetchKnownIssueDetail(kiId, session);
   if (!detail.success) return detail;
@@ -133,17 +152,29 @@ export async function generateKiRewrite(kiId) {
   let chatterError;
   if (session.sid) {
     try {
-      const chatterMap = await fetchArticleChatterBatch([detail.ki.id], session);
+      const chatterMap = await fetchArticleChatterBatch([detail.ki.id], session, 'Known_Issue__Feed');
       chatterNotes = chatterMap.get(detail.ki.id) || '';
     } catch (e) {
       chatterError = e.message;
     }
   }
 
-  const draft = await rewriteKiAi(detail.ki, chatterNotes);
+  const pendingDraft = detail.ki.draft;
+  const basedOnDraft = !!(pendingDraft && (pendingDraft.subject || pendingDraft.summary || pendingDraft.repro || pendingDraft.workaround));
+  const rewriteBasis = current || (basedOnDraft
+    ? {
+      subject: pendingDraft.subject || detail.ki.subject,
+      summary: pendingDraft.summary || detail.ki.summary,
+      repro: pendingDraft.repro || detail.ki.repro,
+      workaround: pendingDraft.workaround || detail.ki.workaround
+    }
+    : detail.ki);
+
+  const draft = await rewriteKiAi(rewriteBasis, chatterNotes, instructions.trim().slice(0, 2000));
   if (!draft) return { success: false, error: 'Could not generate a rewrite for this KI.' };
   if (session.sid) logSignature('ki-rewrite-generated', session.apiBase, session.sid, detail.ki.id);
-  const result = { success: true, draft, original: detail.ki };
+  const result = { success: true, draft, original: rewriteBasis };
+  if (basedOnDraft && !current) result.basedOnDraft = true;
   if (chatterError) result.chatterError = chatterError;
   return result;
 }
@@ -154,16 +185,23 @@ export async function scoreKnownIssue(kiId) {
   if (!detail.success) return { success: false, error: detail.error };
 
   const ki = detail.ki;
+  const content = `Subject: ${redactPii(ki.subject || '', KI_PII_OPTS)}\nSummary: ${redactPii(ki.summary || '', KI_PII_OPTS)}\nRepro: ${redactPii(ki.repro || '', KI_PII_OPTS)}\nWorkaround: ${redactPii(ki.workaround || '', KI_PII_OPTS)}`;
   try {
-    const resp = await callClaude({
-      system: KI_SCORING_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: `Subject: ${ki.subject || ''}\nSummary: ${ki.summary || ''}\nRepro: ${ki.repro || ''}\nWorkaround: ${ki.workaround || ''}` }],
-      maxTokens: 1000,
-      temperature: 0.1,
-      model: SCORING_MODEL
-    });
-    const parsed = extractJson(extractText(resp));
-    if (!parsed) return { success: false, error: 'Could not parse score.' };
+    let parsed = null;
+    let truncated = false;
+    for (const maxTokens of [SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS]) {
+      const resp = await callClaude({
+        system: KI_SCORING_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content }],
+        maxTokens,
+        temperature: 0.1,
+        model: SCORING_MODEL
+      });
+      truncated = resp.stop_reason === 'max_tokens';
+      parsed = extractJson(extractText(resp));
+      if (parsed?.overall != null) break;
+    }
+    if (parsed?.overall == null) return { success: false, error: truncated ? 'Score response was cut off by the token limit even after retry.' : 'Could not parse score.' };
     if (session.sid) logSignature('ki-scored', session.apiBase, session.sid, kiId);
     return { success: true, score: parsed };
   } catch (e) {
@@ -174,12 +212,13 @@ export async function scoreKnownIssue(kiId) {
 const kiCategoryIdCache = new Map();
 
 async function resolveKiCategoryId(session, categoryName) {
-  if (kiCategoryIdCache.has(categoryName)) return kiCategoryIdCache.get(categoryName);
+  const cacheKey = `${session.apiBase}|${categoryName}`;
+  if (kiCategoryIdCache.has(cacheKey)) return kiCategoryIdCache.get(cacheKey);
   const escaped = escapeSoql(categoryName);
   const soql = `SELECT Category__c FROM Known_Issue__c WHERE Category__r.Name = '${escaped}' AND Category__c != null LIMIT 1`;
   const records = await sfQuery(session.apiBase, session.sid, soql);
   const id = records[0]?.Category__c || null;
-  if (id) kiCategoryIdCache.set(categoryName, id);
+  if (id) kiCategoryIdCache.set(cacheKey, id);
   return id;
 }
 
@@ -194,9 +233,9 @@ export async function createKnownIssue(payload) {
 
   const record = {
     [KI_DRAFT_SUBJECT_FIELD]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
-    [KI_DRAFT_SUMMARY_FIELD]: redactPii(payload.summary || '', KI_PII_OPTS),
-    [KI_DRAFT_REPRO_FIELD]: redactPii(payload.repro || '', KI_PII_OPTS),
-    [KI_DRAFT_WORKAROUND_FIELD]: redactPii(payload.workaround || '', KI_PII_OPTS),
+    [KI_DRAFT_SUMMARY_FIELD]: kiRichText(payload.summary),
+    [KI_DRAFT_REPRO_FIELD]: kiRichText(payload.repro),
+    [KI_DRAFT_WORKAROUND_FIELD]: kiRichText(payload.workaround),
     [KI_OUTSIDE_CORE_FIELD]: true,
     [KI_DISABLE_GUS_SYNC_FIELD]: false,
     Status__c: 'In Review',
@@ -223,9 +262,9 @@ export async function updateKnownIssue(payload) {
 
   const record = {
     [KI_DRAFT_SUBJECT_FIELD]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
-    [KI_DRAFT_SUMMARY_FIELD]: redactPii(payload.summary || '', KI_PII_OPTS),
-    [KI_DRAFT_REPRO_FIELD]: redactPii(payload.repro || '', KI_PII_OPTS),
-    [KI_DRAFT_WORKAROUND_FIELD]: redactPii(payload.workaround || '', KI_PII_OPTS)
+    [KI_DRAFT_SUMMARY_FIELD]: kiRichText(payload.summary),
+    [KI_DRAFT_REPRO_FIELD]: kiRichText(payload.repro),
+    [KI_DRAFT_WORKAROUND_FIELD]: kiRichText(payload.workaround)
   };
 
   try {
@@ -238,7 +277,7 @@ export async function updateKnownIssue(payload) {
   }
 }
 
-const KI_LIST_FIELDS = 'Id, Name, Subject__c, Status__c, Cloud__c, Category__r.Name, CreatedBy.Name, Approver__r.Name, Work_ID__c, Reporting_User_Count__c';
+const KI_LIST_FIELDS = 'Id, Name, Subject__c, Status__c, Cloud__c, Category__r.Name, CreatedBy.Name, Approver__r.Name, Work_ID__c, Reporting_User_Count__c, CreatedDate, LastModifiedDate';
 
 function mapKiListRecord(r, lightningHost) {
   return {
@@ -252,6 +291,8 @@ function mapKiListRecord(r, lightningHost) {
     approverName: r.Approver__r?.Name || '',
     workId: r.Work_ID__c || '',
     reportingCount: r.Reporting_User_Count__c || 0,
+    createdDate: r.CreatedDate || '',
+    lastModifiedDate: r.LastModifiedDate || '',
     url: kiUrl(lightningHost, r.Id)
   };
 }
