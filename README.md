@@ -128,7 +128,14 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.24.2 (current)
+### v2.25.0 (current)
+- Known Issues are now draft/published aware: the table subject and 👁 view show the published fields when `Published__c` is true and the DRAFT fields otherwise (unpublished KIs no longer show blank or stale content); search also matches draft subjects
+- Scoring uses the draft for unpublished KIs and for published KIs with unpublished edits (including after saving a rewrite), otherwise the published version; score details show which version was scored
+- New sortable Publication column: Published, Published · edits pending approval, Published · unsubmitted edits, Draft · not submitted / pending approval / rejected / approval recalled, Unpublished — approval state read from the standard approval process (`ProcessInstance`)
+- 👁 view adds a Published | Draft | Compare toggle (Published/Compare disabled if never published) plus the latest approval status, approver, date, and comment
+- Update KI now says it saved to the draft and was not submitted for approval
+
+### v2.24.2
 - Fixed Known Issue creation failing with `INVALID_FIELD_FOR_INSERT_UPDATE` on `Cloud__c`: the Cloud selector is removed from the KI create dialog and `Cloud__c` is no longer written (it is not writable in the KI org)
 - Case analysis "no action" now distinguishes "existing articles cover this" from "not KB material yet" (defect pending a fix, customer-specific, no documentable resolution); the latter shows "No KB Action Recommended" with "Related Articles" instead of "Existing Coverage is Adequate" / "Covering Articles"
 

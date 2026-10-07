@@ -25,7 +25,7 @@ let _kiWork = {};
 const _kiJobs = new Map();
 const _kiJobListeners = new Map();
 const _kiSorter = createSorter(null);
-const KI_WORK_FIELDS = ['basis', 'basedOnDraft', 'chatterNotes', 'chatterError', 'live', 'rewriteScore', 'gateDismissed'];
+const KI_WORK_FIELDS = ['basis', 'basedOnDraft', 'version', 'published', 'chatterNotes', 'chatterError', 'rewriteScore', 'gateDismissed'];
 
 const _kiStateReady = localGet([STORAGE_KEYS.KI_WORK]).then(data => {
   const stored = data[STORAGE_KEYS.KI_WORK] || {};
@@ -337,7 +337,7 @@ function getFilteredKis() {
   if (_kiFilterCategories.length) filtered = filtered.filter(ki => _kiFilterCategories.includes(ki.category));
   if (_kiFilterText) {
     const term = _kiFilterText.toLowerCase();
-    filtered = filtered.filter(ki => `${ki.name || ''} ${ki.subject || ''}`.toLowerCase().includes(term));
+    filtered = filtered.filter(ki => `${ki.name || ''} ${ki.publishedSubject || ''} ${ki.draftSubject || ''} ${ki.subject || ''}`.toLowerCase().includes(term));
   }
   if (_kiSorter.col) filtered = [...filtered].sort(compareKis);
   _filteredMemo = { items: _kiAllItems, signature, result: filtered };
@@ -397,17 +397,17 @@ async function scoreKiContent(item, sections) {
 
 async function loadKiContext(item) {
   const work = kiWork(item.id);
-  if (work.basis && work.live) return work;
+  if (work.basis && work.version) return work;
   const ctx = await chrome.runtime.sendMessage({ action: 'PREPARE_KI_REWRITE', kiId: item.id });
   if (!ctx?.success) throw new Error(ctx?.error || 'Failed to load the Known Issue.');
-  updateKiWork(item.id, { basis: ctx.basis, basedOnDraft: ctx.basedOnDraft, chatterNotes: ctx.chatterNotes || '', chatterError: ctx.chatterError || null, live: ctx.live });
+  updateKiWork(item.id, { basis: ctx.basis, basedOnDraft: ctx.basedOnDraft, version: ctx.version, published: ctx.published, chatterNotes: ctx.chatterNotes || '', chatterError: ctx.chatterError || null });
   return kiWork(item.id);
 }
 
 function scoreKiJob(item) {
   return runKiJob(item.id, 'score', async () => {
     const work = await loadKiContext(item);
-    const score = await scoreKiContent(item, work.live);
+    const score = { ...(await scoreKiContent(item, work.basis)), version: work.version };
     setKiScore(item.id, score);
     return score;
   });
@@ -488,7 +488,9 @@ function startRewrite(item) {
     const busy = !!job;
 
     const notes = [];
-    if (work.basedOnDraft) notes.push('Based on the pending draft for this Known Issue, not the published version.');
+    if (work.basedOnDraft) notes.push(work.published
+      ? 'This Known Issue has draft edits that are not published yet — scoring and rewriting use the draft.'
+      : 'This Known Issue is not published — scoring and rewriting use the draft fields.');
     if (work.chatterError) notes.push(`Chatter notes could not be loaded (${work.chatterError}), so this rewrite does not use them.`);
     noteEl.textContent = notes.join(' ');
     noteEl.style.display = notes.length ? '' : 'none';
@@ -557,7 +559,7 @@ function startRewrite(item) {
   };
 
   regenBtn.addEventListener('click', startGenerate);
-  compareBtn.addEventListener('click', () => showDetail('compare', () => kiComparisonBody(kiWork(item.id).basis, parseRewriteSections(_kiDraftCache[item.id] || '', KI_FIELD_NAMES))));
+  compareBtn.addEventListener('click', () => showDetail('compare', () => kiComparisonBody(kiWork(item.id).basis, parseRewriteSections(_kiDraftCache[item.id] || '', KI_FIELD_NAMES), `Current (${kiWork(item.id).version || 'Published'})`, 'Rewritten')));
   updateBtn.addEventListener('click', async () => {
     updateBtn.disabled = true;
     const saved = await saveKnownIssue(item);
@@ -606,7 +608,7 @@ async function autoRewriteKi(item) {
   await rewriteKiJob(item, '');
 }
 
-function kiComparisonBody(original, rewritten) {
+function kiComparisonBody(original, rewritten, leftTitle = 'Original', rightTitle = 'Rewritten') {
   const column = (title, sections, accent) => h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
     h('div', { style: { fontSize: '11px', fontWeight: '700', color: accent, textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: `2px solid ${accent}` } }, title),
     ...KI_FIELDS.map(f => h('div', { style: { marginBottom: '12px' } },
@@ -615,8 +617,8 @@ function kiComparisonBody(original, rewritten) {
     ))
   );
   return h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '50vh', overflow: 'auto' } },
-    column('Original', original, 'var(--text-muted)'),
-    column('Rewritten', rewritten, 'var(--primary)')
+    column(leftTitle, original, 'var(--text-muted)'),
+    column(rightTitle, rewritten, 'var(--primary)')
   );
 }
 
@@ -627,9 +629,13 @@ async function saveKnownIssue(item) {
     const resp = await chrome.runtime.sendMessage({ action: 'UPDATE_KNOWN_ISSUE', payload });
     if (!resp?.success) { toast(resp?.error || 'Something went wrong.', 'error'); return null; }
     swapButtonWithLink('ki-save-btn', { url: resp.url, label: 'Open in Known Issues org ↗' });
-    toast('Known Issue updated.', 'success');
+    toast('Saved to the Known Issue draft — not submitted for approval. Submit it in the Known Issues org to publish.', 'success');
     setKiDraft(item.id, null);
-    updateKiWork(item.id, { basis: sections, basedOnDraft: true, live: sections, rewriteScore: null });
+    const published = kiWork(item.id).published;
+    updateKiWork(item.id, { basis: sections, basedOnDraft: true, version: published ? 'Draft (unpublished edits)' : 'Draft', rewriteScore: null });
+    if (published) { item.publication = 'Published · unsubmitted edits'; item.publicationTone = 'warning'; }
+    item.draftSubject = sections.subject;
+    if (!published) item.subject = sections.subject;
     clearKiScore(item.id);
     render();
     return sections;
@@ -647,6 +653,29 @@ function workItemCell(item) {
   }, item.workId);
 }
 
+function kiVersionView(sections) {
+  return h('div', null, ...KI_FIELDS.map(f => h('div', { style: { marginBottom: '12px' } },
+    fieldLabel(f.label, { marginBottom: '4px' }),
+    richHtmlBox(sections?.[f.field] ? markdownToHtml(sections[f.field]) : '')
+  )));
+}
+
+function kiApprovalLine(ki) {
+  const a = ki.approval;
+  const parts = [h('span', { class: `pill pill--${ki.publication.tone}`, style: { fontSize: '10px' } }, ki.publication.label)];
+  if (a) {
+    const when = formatKiDate(a.completedDate || a.submittedDate);
+    parts.push(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } },
+      `Approval ${a.status.toLowerCase()}${a.actorName ? ` · ${a.actorName}` : ''}${when ? ` · ${when}` : ''}`));
+  } else if (!ki.published) {
+    parts.push(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Never submitted for approval'));
+  }
+  return h('div', { style: { marginBottom: '12px' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, ...parts),
+    a?.comment ? h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px', fontStyle: 'italic' } }, `Approver comment: ${a.comment}`) : null
+  );
+}
+
 function viewKi(item) {
   asyncModal(
     `${item.name || item.id}${item.subject ? ' — ' + item.subject : ''}`,
@@ -655,15 +684,30 @@ function viewKi(item) {
       return resp.ki;
     }),
     (ki) => {
-      const field = (label, value) => h('div', { style: { marginBottom: '12px' } },
-        fieldLabel(label, { marginBottom: '4px' }),
-        richHtmlBox(value ? markdownToHtml(value) : '')
-      );
+      const host = h('div', null);
+      const tabs = [
+        { id: 'published', label: 'Published', disabled: !ki.hasPublishedContent, render: () => kiVersionView(ki.publishedVersion) },
+        { id: 'draft', label: ki.draftDiffers ? 'Draft •' : 'Draft', render: () => kiVersionView(ki.draftVersion) },
+        { id: 'compare', label: 'Compare', disabled: !ki.hasPublishedContent, render: () => kiComparisonBody(ki.publishedVersion, ki.draftVersion, 'Published', 'Draft') }
+      ];
+      const buttons = new Map();
+      const show = (id) => {
+        for (const [tabId, btn] of buttons) btn.className = `btn btn--sm ${tabId === id ? 'btn--primary' : 'btn--ghost'}`;
+        host.textContent = '';
+        if (id === 'compare' && !ki.draftDiffers) host.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' } }, 'Draft and published content are identical.'));
+        host.appendChild(tabs.find(t => t.id === id).render());
+      };
+      const tabBar = h('div', { style: { display: 'flex', gap: '4px', marginBottom: '12px' } }, ...tabs.map(t => {
+        const btn = h('button', { class: 'btn btn--ghost btn--sm', disabled: t.disabled, title: t.disabled ? 'This Known Issue has never been published' : '', onClick: () => show(t.id) }, t.label);
+        buttons.set(t.id, btn);
+        return btn;
+      }));
+      show(ki.published && ki.hasPublishedContent ? 'published' : 'draft');
       return h('div', null,
+        kiApprovalLine(ki),
         item.workId ? h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px' } }, 'Work Item: ', workItemCell(item)) : null,
-        field('Summary', ki.summary),
-        field('Repro Steps', ki.repro),
-        field('Workaround', ki.workaround)
+        tabBar,
+        host
       );
     },
     { wide: true }
@@ -697,7 +741,8 @@ function kiScoreDetailBody(s) {
   return h('div', null,
     h('div', { style: { textAlign: 'center', marginBottom: '12px' } },
       h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Overall Score'),
-      h('div', { style: { fontSize: '28px', fontWeight: '700' } }, String(s.overall))
+      h('div', { style: { fontSize: '28px', fontWeight: '700' } }, String(s.overall)),
+      s.version ? h('div', { style: { fontSize: '11px', color: 'var(--text-muted)' } }, `Scored version: ${s.version}`) : null
     ),
     h('table', { class: 'data-table' },
       h('thead', null, h('tr', null, h('th', null, 'Criterion'), h('th', { style: { width: '80px' } }, 'Score'), h('th', null, 'Passed'), h('th', null, 'Issues'))),
@@ -753,11 +798,12 @@ function renderResultsTable(pageItems) {
     h('thead', null, h('tr', null,
       sortTh('name', 'Name', '8%'),
       sortTh('subject', 'Subject', '13%'),
-      sortTh('cloud', 'Cloud', '8%'),
-      sortTh('category', 'Category', '11%'),
+      sortTh('cloud', 'Cloud', '6%'),
+      sortTh('category', 'Category', '9%'),
+      sortTh('publication', 'Publication', '10%'),
       sortTh('status', 'Status', '8%'),
-      sortTh('createdByName', 'Created By', '9%'),
-      sortTh('approverName', 'Approver', '9%'),
+      sortTh('createdByName', 'Created By', '7%'),
+      sortTh('approverName', 'Approver', '7%'),
       sortTh('createdDate', 'Created', '7%'),
       sortTh('lastModifiedDate', 'Modified', '7%'),
       sortTh('reportingCount', 'Impacted', '6%'),
@@ -767,11 +813,12 @@ function renderResultsTable(pageItems) {
     h('tbody', null, ...pageItems.map(item => h('tr', null,
       h('td', { style: { fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, h('a', { href: item.url, target: '_blank', rel: 'noopener' }, item.name || item.id)),
       h('td', { style: { fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: item.subject || '' }, item.subject || ''),
-      truncatedCell(item.cloud, 8),
-      truncatedCell(item.category, 11),
+      truncatedCell(item.cloud, 6),
+      truncatedCell(item.category, 9),
+      h('td', { style: { overflow: 'hidden', whiteSpace: 'nowrap' }, title: item.publication || '' }, item.publication ? h('span', { class: `pill pill--${item.publicationTone || 'neutral'}`, style: { fontSize: '10px', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' } }, item.publication) : null),
       truncatedCell(item.status, 8),
-      truncatedCell(item.createdByName, 9),
-      truncatedCell(item.approverName, 9),
+      truncatedCell(item.createdByName, 7),
+      truncatedCell(item.approverName, 7),
       truncatedCell(formatKiDate(item.createdDate), 7),
       truncatedCell(formatKiDate(item.lastModifiedDate), 7),
       h('td', { style: { fontSize: '11px', color: 'var(--text-secondary)', textAlign: 'right' } }, String(item.reportingCount || 0)),
