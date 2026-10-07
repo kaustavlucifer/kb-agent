@@ -161,6 +161,8 @@ A burst of 25 concurrent tiny calls on a 100-RPM key all succeeded — **verifie
 1. **Throttle client-side** to about 90% of `rpm_limit` (read from `/key/info`), shared across every caller using the same key. KB Agent's `shared/rate-limiter.js` shares one budget between the popup and the service worker and falls back to 48/min if the limit can't be read.
 2. **Retry transient errors** (408, 429, 500, 502, 503, 504, 529) up to 3 times. Wait for `Retry-After` if present, else the body's "Limit resets at" time, else exponential backoff (~1s, 2s, 4s + jitter), capped at 30s per wait. Each retry re-acquires a rate-limit slot, and abort signals cancel the wait (`postMessages()` in `shared/gateway.js`).
 3. **Never retry 4xx validation errors** (400, 401, 403, 404) — fix the request instead.
+4. **Bound every request.** Each attempt has a 90s limit until response headers arrive (non-streaming bodies get another 90s to download), and streams abort after 30s without data. A timeout throws a `TimeoutError`, distinct from a user abort. Mid-stream SSE `error` events (e.g. `overloaded_error`) fail the call instead of returning partial text.
+5. **Validate a key for free** with `GET /key/info` rather than a `/v1/messages` ping.
 
 ## 9. Quick checklist for a new integration
 

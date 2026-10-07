@@ -11,6 +11,10 @@ export function escapeSoql(str) {
   return String(str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+export function escapeSoqlLike(str) {
+  return escapeSoql(str).replace(/[%_]/g, '\\$&');
+}
+
 export function escapeSosl(str) {
   return String(str || '').replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, '\\$&');
 }
@@ -56,14 +60,17 @@ export async function sfPatch(url, sid, body, signal) {
   return resp.json();
 }
 
-export async function sfQuery(apiBase, sid, soql, signal) {
+export async function sfQuery(apiBase, sid, soql, signal, onProgress) {
   const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
   const result = await sfGet(url, sid, signal);
   const records = [...(result.records || [])];
+  const total = result.totalSize || records.length;
+  if (onProgress) onProgress(records.length, total);
   let next = result.nextRecordsUrl;
   while (next) {
     const page = await sfGet(`${apiBase}${next}`, sid, signal);
     records.push(...(page.records || []));
+    if (onProgress) onProgress(records.length, total);
     next = page.nextRecordsUrl;
   }
   return records;
@@ -75,31 +82,16 @@ export async function sfSearch(apiBase, sid, sosl, signal) {
   return result.searchRecords || [];
 }
 
-export async function sfQueryAll(apiBase, sid, soql, onProgress, signal) {
-  const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-  const result = await sfGet(url, sid, signal);
-  const records = [...(result.records || [])];
-  if (onProgress) onProgress(records.length, result.totalSize || records.length);
-  let next = result.nextRecordsUrl;
-  while (next) {
-    const page = await sfGet(`${apiBase}${next}`, sid, signal);
-    records.push(...(page.records || []));
-    if (onProgress) onProgress(records.length, result.totalSize || records.length);
-    next = page.nextRecordsUrl;
-  }
-  return records;
-}
-
 export function soqlIdList(ids) {
   if (!Array.isArray(ids) || !ids.length) throw new Error('soqlIdList: non-empty array required');
   return ids.map(id => `'${sanitizeId(id)}'`).join(',');
 }
 
-export async function mapWithConcurrency(items, concurrency, fn) {
+export async function mapWithConcurrency(items, concurrency, fn, signal) {
   const results = new Array(items.length);
   let idx = 0;
   async function worker() {
-    while (idx < items.length) {
+    while (idx < items.length && !signal?.aborted) {
       const i = idx++;
       try { results[i] = await fn(items[i], i); }
       catch (e) { results[i] = { __error: e?.message || String(e) }; }
@@ -246,7 +238,7 @@ export async function buildPromptContent(text, session, signal, maxImages) {
 }
 
 export function hasCodeBlocks(html) {
-  return /<pre[^>]*class="[^"]*ckeditor_codeblock[^"]*"/i.test(html || '');
+  return /<pre[\s>]/i.test(html || '');
 }
 
 export function hasHeaders(html) {

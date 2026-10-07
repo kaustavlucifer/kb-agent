@@ -2,10 +2,9 @@ import { h, spinner, toast, modal, swapButtonWithLink, sectionsEditor, emptyStat
 import { streamClaude, extractJson } from '../shared/gateway.js';
 import { SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, SCORE_GOOD_ENOUGH_THRESHOLD, STORAGE_KEYS } from '../shared/config.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { KI_REWRITE_SYSTEM_PROMPT, KI_SCORING_SYSTEM_PROMPT, buildKiRewriteUserPrompt, buildKiScoreUserPrompt } from '../shared/ki-prompts.js';
+import { KI_REWRITE_SYSTEM_PROMPT, KI_SCORING_SYSTEM_PROMPT, KI_SECTION_KEYS, buildKiRewriteUserPrompt, buildKiScoreUserPrompt } from '../shared/ki-prompts.js';
 import { parseRewriteSections, serializeRewriteSections, markdownToHtml } from '../shared/markdown.js';
 import { KI_CATEGORIES } from '../data/ki_mapping.js';
-
 
 let _container = null;
 let _kiAllItems = [];
@@ -22,14 +21,21 @@ let _kiScoresVersion = 0;
 let _kiScores = {};
 let _kiDraftCache = {};
 let _kiWork = {};
+let _kiTouched = {};
 const _kiJobs = new Map();
 const _kiJobListeners = new Map();
 const _kiSorter = createSorter(null);
-const KI_WORK_FIELDS = ['basis', 'basedOnDraft', 'version', 'published', 'chatterNotes', 'chatterError', 'rewriteScore', 'gateDismissed'];
+const KI_WORK_FIELDS = ['basis', 'basedOnDraft', 'version', 'published', 'lastModifiedDate', 'chatterNotes', 'chatterError', 'rewriteScore', 'gateDismissed'];
+const KI_WORK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const GUS_WORK_LOCATOR_URL = 'https://gus.my.salesforce.com/apex/ADM_WorkLocator?BugOrWorknumber=';
 
 const _kiStateReady = localGet([STORAGE_KEYS.KI_WORK]).then(data => {
   const stored = data[STORAGE_KEYS.KI_WORK] || {};
+  const now = Date.now();
   for (const [id, entry] of Object.entries(stored)) {
+    const updatedAt = entry.updatedAt || now;
+    if (now - updatedAt > KI_WORK_RETENTION_MS) continue;
+    _kiTouched[id] = updatedAt;
     if (entry.score) _kiScores[id] = entry.score;
     if (entry.draft) _kiDraftCache[id] = entry.draft;
     _kiWork[id] = Object.fromEntries(KI_WORK_FIELDS.filter(k => entry[k] !== undefined).map(k => [k, entry[k]]));
@@ -38,31 +44,32 @@ const _kiStateReady = localGet([STORAGE_KEYS.KI_WORK]).then(data => {
 }).catch(() => {});
 
 let _kiPersistTimer = null;
-function persistKiState() {
+function persistKiState(id) {
+  if (id) _kiTouched[id] = Date.now();
   clearTimeout(_kiPersistTimer);
   _kiPersistTimer = setTimeout(() => {
     const ids = new Set([...Object.keys(_kiScores), ...Object.keys(_kiWork), ...Object.keys(_kiDraftCache).filter(k => !k.startsWith('ext-'))]);
     const out = {};
-    for (const id of ids) {
-      const entry = { ...(_kiWork[id] || {}) };
-      if (_kiScores[id]) entry.score = _kiScores[id];
-      if (_kiDraftCache[id]) entry.draft = _kiDraftCache[id];
-      out[id] = entry;
+    for (const kiId of ids) {
+      const entry = { ...(_kiWork[kiId] || {}), updatedAt: _kiTouched[kiId] || Date.now() };
+      if (_kiScores[kiId]) entry.score = _kiScores[kiId];
+      if (_kiDraftCache[kiId]) entry.draft = _kiDraftCache[kiId];
+      out[kiId] = entry;
     }
     localSet({ [STORAGE_KEYS.KI_WORK]: out }).catch(() => {});
-  }, 300);
+  }, 1000);
 }
 
 function setKiScore(id, score) {
   _kiScores[id] = score;
   _kiScoresVersion++;
-  persistKiState();
+  persistKiState(id);
 }
 
 function clearKiScore(id) {
   delete _kiScores[id];
   _kiScoresVersion++;
-  persistKiState();
+  persistKiState(id);
 }
 
 function kiWork(id) {
@@ -71,13 +78,13 @@ function kiWork(id) {
 
 function updateKiWork(id, patch) {
   Object.assign(kiWork(id), patch);
-  persistKiState();
+  persistKiState(id);
 }
 
 function setKiDraft(id, text) {
   if (text) _kiDraftCache[id] = text;
   else delete _kiDraftCache[id];
-  persistKiState();
+  persistKiState(id);
 }
 
 function notifyKiJob(id) {
@@ -118,11 +125,10 @@ const KI_FIELDS = [
   { field: 'repro', label: 'Repro Steps', rows: 8 },
   { field: 'workaround', label: 'Workaround', rows: 8 }
 ];
-const KI_FIELD_NAMES = KI_FIELDS.map(f => f.field);
 
 const kiEditor = sectionsEditor({
   getCachedText: (key) => _kiDraftCache[key] || '',
-  setCachedText: (key, text) => { _kiDraftCache[key] = text; if (!String(key).startsWith('ext-')) persistKiState(); },
+  setCachedText: (key, text) => { _kiDraftCache[key] = text; if (!String(key).startsWith('ext-')) persistKiState(key); },
   fields: KI_FIELDS
 });
 
@@ -140,7 +146,7 @@ export function unmount() {
 
 export function openKiDraftModal({ draft, caseNumber, workId, onCreated }) {
   const key = `ext-${Date.now()}`;
-  _kiDraftCache[key] = serializeRewriteSections(draft, KI_FIELD_NAMES);
+  _kiDraftCache[key] = serializeRewriteSections(draft, KI_SECTION_KEYS);
 
   const categorySelect = h('select', { class: 'input', style: { maxWidth: '200px' } },
     ...KI_CATEGORIES.map(c => h('option', { value: c }, c))
@@ -191,7 +197,7 @@ function gusWorkLookup(initial) {
     showResults([]);
     renderSelected();
   };
-  const workLink = (name) => h('a', { href: `https://gus.my.salesforce.com/apex/ADM_WorkLocator?BugOrWorknumber=${encodeURIComponent(name)}`, target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: 'var(--primary)' } }, name);
+  const workLink = (name) => h('a', { href: gusWorkUrl(name), target: '_blank', rel: 'noopener', style: { fontSize: '12px', color: 'var(--primary)' } }, name);
   const renderSelected = () => {
     selectedEl.textContent = '';
     if (selected) {
@@ -251,7 +257,7 @@ function gusWorkLookup(initial) {
 }
 
 async function createKnownIssue(key, category, workId, onCreated) {
-  const sections = parseRewriteSections(_kiDraftCache[key] || '', KI_FIELD_NAMES);
+  const sections = parseRewriteSections(_kiDraftCache[key] || '', KI_SECTION_KEYS);
   const payload = { subject: sections.subject, summary: sections.summary, repro: sections.repro, workaround: sections.workaround, category, workId };
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'CREATE_KNOWN_ISSUE', payload });
@@ -274,7 +280,10 @@ async function runCrossSearch(query) {
     const resp = await chrome.runtime.sendMessage({ action: 'SEARCH_KI_UNSCOPED', query: query.trim() });
     if (!_crossSearchToken.isCurrent(token)) return;
     if (resp?.error) { toast(resp.error, 'error'); _kiCrossResults = []; }
-    else { _kiCrossResults = resp?.items || []; }
+    else {
+      _kiCrossResults = resp?.items || [];
+      if (resp?.warning) toast(resp.warning, 'warning');
+    }
   } catch (e) {
     if (!_crossSearchToken.isCurrent(token)) return;
     toast(e.message, 'error');
@@ -287,8 +296,18 @@ async function runCrossSearch(query) {
   }
 }
 
+function clearKiBases() {
+  for (const work of Object.values(_kiWork)) {
+    delete work.basis;
+    delete work.version;
+    delete work.lastModifiedDate;
+  }
+  persistKiState();
+}
+
 async function loadKnownIssues(forceLive = false) {
   _kiLoading = true;
+  if (forceLive) clearKiBases();
   render();
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'LOAD_ALL_KNOWN_ISSUES', forceLive });
@@ -296,6 +315,7 @@ async function loadKnownIssues(forceLive = false) {
     else {
       _kiAllItems = resp?.items || [];
       toast(`Loaded ${_kiAllItems.length} Known Issues${resp?.fromCache ? ' (cached)' : ''}.`, 'success');
+      if (resp?.warning) toast(resp.warning, 'warning');
     }
   } catch (e) {
     toast(e.message, 'error');
@@ -345,12 +365,7 @@ function getFilteredKis() {
 }
 
 function kiSectionsMarkdown(sections) {
-  return [
-    sections.subject ? `## Subject\n${sections.subject}` : '',
-    sections.summary ? `## Summary\n${sections.summary}` : '',
-    sections.repro ? `## Repro Steps\n${sections.repro}` : '',
-    sections.workaround ? `## Workaround\n${sections.workaround}` : ''
-  ].filter(Boolean).join('\n\n');
+  return KI_FIELDS.filter(f => sections[f.field]).map(f => `## ${f.label}\n${sections[f.field]}`).join('\n\n');
 }
 
 function partialJsonField(text, field) {
@@ -395,12 +410,30 @@ async function scoreKiContent(item, sections) {
   return parsed;
 }
 
+function kiWorkIsFresh(work, item) {
+  return !!(work.basis && work.version && work.lastModifiedDate && (!item.lastModifiedDate || work.lastModifiedDate >= item.lastModifiedDate));
+}
+
+function sectionsDiffer(a, b) {
+  return KI_SECTION_KEYS.some(k => String(a?.[k] || '').trim() !== String(b?.[k] || '').trim());
+}
+
+function applyKiPublication(item, publication) {
+  if (!publication) return;
+  item.publication = publication.label;
+  item.publicationTone = publication.tone;
+}
+
 async function loadKiContext(item) {
   const work = kiWork(item.id);
-  if (work.basis && work.version) return work;
+  if (kiWorkIsFresh(work, item)) return work;
   const ctx = await chrome.runtime.sendMessage({ action: 'PREPARE_KI_REWRITE', kiId: item.id });
   if (!ctx?.success) throw new Error(ctx?.error || 'Failed to load the Known Issue.');
-  updateKiWork(item.id, { basis: ctx.basis, basedOnDraft: ctx.basedOnDraft, version: ctx.version, published: ctx.published, chatterNotes: ctx.chatterNotes || '', chatterError: ctx.chatterError || null });
+  if (work.basis && sectionsDiffer(work.basis, ctx.basis)) clearKiScore(item.id);
+  updateKiWork(item.id, { basis: ctx.basis, basedOnDraft: ctx.basedOnDraft, version: ctx.version, published: ctx.published, lastModifiedDate: ctx.lastModifiedDate || '', chatterNotes: ctx.chatterNotes || '', chatterError: ctx.chatterError || null });
+  item.published = ctx.published;
+  item.lastModifiedDate = ctx.lastModifiedDate || item.lastModifiedDate;
+  applyKiPublication(item, ctx.publication);
   return kiWork(item.id);
 }
 
@@ -416,7 +449,7 @@ function scoreKiJob(item) {
 function rewriteKiJob(item, instructions) {
   return runKiJob(item.id, 'rewrite', async (job) => {
     const work = await loadKiContext(item);
-    const current = _kiDraftCache[item.id] ? parseRewriteSections(_kiDraftCache[item.id], KI_FIELD_NAMES) : null;
+    const current = _kiDraftCache[item.id] ? parseRewriteSections(_kiDraftCache[item.id], KI_SECTION_KEYS) : null;
     const { parsed, truncated } = await streamKiJson({
       system: KI_REWRITE_SYSTEM_PROMPT,
       user: buildKiRewriteUserPrompt(current || work.basis, work.chatterNotes, instructions),
@@ -425,7 +458,7 @@ function rewriteKiJob(item, instructions) {
       onPartial: (text) => { job.partial = text; notifyKiJob(item.id); }
     });
     if (!parsed) throw new Error(truncated ? 'Rewrite was cut off by the token limit even after retry.' : 'Could not parse the rewrite.');
-    setKiDraft(item.id, serializeRewriteSections(parsed, KI_FIELD_NAMES));
+    setKiDraft(item.id, serializeRewriteSections(parsed, KI_SECTION_KEYS));
     updateKiWork(item.id, { rewriteScore: null });
     chrome.runtime.sendMessage({ action: 'LOG_KI_SIGNATURE', kind: 'ki-rewrite-generated', kiId: item.id }).catch(() => {});
     job.kind = 'rescore';
@@ -559,7 +592,7 @@ function startRewrite(item) {
   };
 
   regenBtn.addEventListener('click', startGenerate);
-  compareBtn.addEventListener('click', () => showDetail('compare', () => kiComparisonBody(kiWork(item.id).basis, parseRewriteSections(_kiDraftCache[item.id] || '', KI_FIELD_NAMES), `Current (${kiWork(item.id).version || 'Published'})`, 'Rewritten')));
+  compareBtn.addEventListener('click', () => showDetail('compare', () => kiComparisonBody(kiWork(item.id).basis, parseRewriteSections(_kiDraftCache[item.id] || '', KI_SECTION_KEYS), `Current (${kiWork(item.id).version || 'Published'})`, 'Rewritten')));
   updateBtn.addEventListener('click', async () => {
     updateBtn.disabled = true;
     const saved = await saveKnownIssue(item);
@@ -611,10 +644,7 @@ async function autoRewriteKi(item) {
 function kiComparisonBody(original, rewritten, leftTitle = 'Original', rightTitle = 'Rewritten') {
   const column = (title, sections, accent) => h('div', { style: { minWidth: '0', overflowWrap: 'break-word' } },
     h('div', { style: { fontSize: '11px', fontWeight: '700', color: accent, textTransform: 'uppercase', marginBottom: '10px', paddingBottom: '6px', borderBottom: `2px solid ${accent}` } }, title),
-    ...KI_FIELDS.map(f => h('div', { style: { marginBottom: '12px' } },
-      fieldLabel(f.label, { marginBottom: '4px' }),
-      richHtmlBox(sections?.[f.field] ? markdownToHtml(sections[f.field]) : '')
-    ))
+    kiVersionView(sections)
   );
   return h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', maxHeight: '50vh', overflow: 'auto' } },
     column(leftTitle, original, 'var(--text-muted)'),
@@ -623,7 +653,7 @@ function kiComparisonBody(original, rewritten, leftTitle = 'Original', rightTitl
 }
 
 async function saveKnownIssue(item) {
-  const sections = parseRewriteSections(_kiDraftCache[item.id] || '', KI_FIELD_NAMES);
+  const sections = parseRewriteSections(_kiDraftCache[item.id] || '', KI_SECTION_KEYS);
   const payload = { id: item.id, subject: sections.subject, summary: sections.summary, repro: sections.repro, workaround: sections.workaround };
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'UPDATE_KNOWN_ISSUE', payload });
@@ -631,9 +661,9 @@ async function saveKnownIssue(item) {
     swapButtonWithLink('ki-save-btn', { url: resp.url, label: 'Open in Known Issues org ↗' });
     toast('Saved to the Known Issue draft — not submitted for approval. Submit it in the Known Issues org to publish.', 'success');
     setKiDraft(item.id, null);
-    const published = kiWork(item.id).published;
-    updateKiWork(item.id, { basis: sections, basedOnDraft: true, version: published ? 'Draft (unpublished edits)' : 'Draft', rewriteScore: null });
-    if (published) { item.publication = 'Published · unsubmitted edits'; item.publicationTone = 'warning'; }
+    const published = kiWork(item.id).published ?? item.published;
+    updateKiWork(item.id, { basis: sections, basedOnDraft: true, version: published ? 'Draft (unpublished edits)' : 'Draft', lastModifiedDate: '', rewriteScore: null });
+    if (published) applyKiPublication(item, { label: 'Published · unsubmitted edits', tone: 'warning' });
     item.draftSubject = sections.subject;
     if (!published) item.subject = sections.subject;
     clearKiScore(item.id);
@@ -645,12 +675,13 @@ async function saveKnownIssue(item) {
   }
 }
 
+function gusWorkUrl(name) {
+  return `${GUS_WORK_LOCATOR_URL}${encodeURIComponent(name)}`;
+}
+
 function workItemCell(item) {
   if (!item.workId) return h('span', null, '');
-  return h('a', {
-    href: `https://gus.my.salesforce.com/apex/ADM_WorkLocator?BugOrWorknumber=${encodeURIComponent(item.workId)}`,
-    target: '_blank', rel: 'noopener', style: { fontSize: '11px' }
-  }, item.workId);
+  return h('a', { href: gusWorkUrl(item.workId), target: '_blank', rel: 'noopener', style: { fontSize: '11px' } }, item.workId);
 }
 
 function kiVersionView(sections) {
@@ -684,6 +715,10 @@ function viewKi(item) {
       return resp.ki;
     }),
     (ki) => {
+      if (item.publication !== ki.publication.label) {
+        applyKiPublication(item, ki.publication);
+        render();
+      }
       const host = h('div', null);
       const tabs = [
         { id: 'published', label: 'Published', disabled: !ki.hasPublishedContent, render: () => kiVersionView(ki.publishedVersion) },
@@ -815,7 +850,7 @@ function renderResultsTable(pageItems) {
       h('td', { style: { fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: item.subject || '' }, item.subject || ''),
       truncatedCell(item.cloud, 6),
       truncatedCell(item.category, 9),
-      h('td', { style: { overflow: 'hidden', whiteSpace: 'nowrap' }, title: item.publication || '' }, item.publication ? h('span', { class: `pill pill--${item.publicationTone || 'neutral'}`, style: { fontSize: '10px', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' } }, item.publication) : null),
+      h('td', { style: { overflow: 'hidden', whiteSpace: 'nowrap' }, title: item.published ? `${item.publication} — the list compares Subject only; open the preview to check every field.` : (item.publication || '') }, item.publication ? h('span', { class: `pill pill--${item.publicationTone || 'neutral'}`, style: { fontSize: '10px', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block' } }, item.publication) : null),
       truncatedCell(item.status, 8),
       truncatedCell(item.createdByName, 7),
       truncatedCell(item.approverName, 7),

@@ -1,7 +1,6 @@
-import { sfSearch, sfQuery, soqlIdList } from '../shared/api.js';
-import { classifySignature } from '../shared/signature.js';
+import { sfSearch, sfQuery, soqlIdList, mapWithConcurrency } from '../shared/api.js';
+import { classifySignature, SIGNATURE_PHRASE } from '../shared/signature.js';
 
-const SEARCH_PHRASE = 'Do not remove this line for KB Agent tracking';
 const WINDOW_DAYS = 14;
 const PAGE_LIMIT = 1000;
 const MAX_CONCURRENT = 6;
@@ -23,7 +22,7 @@ function buildSlices(monthsBack) {
 }
 
 function buildFeedSosl(from, to) {
-  return `FIND {"${SEARCH_PHRASE}"} IN ALL FIELDS RETURNING FeedItem(Id, ParentId, CreatedBy.Name, CreatedDate, Body WHERE Type = 'TextPost' AND Visibility = 'InternalUsers' AND CreatedDate > ${from.toISOString()} AND CreatedDate <= ${to.toISOString()} ORDER BY CreatedDate DESC LIMIT ${PAGE_LIMIT})`;
+  return `FIND {"${SIGNATURE_PHRASE}"} IN ALL FIELDS RETURNING FeedItem(Id, ParentId, CreatedBy.Name, CreatedDate, Body WHERE Type = 'TextPost' AND Visibility = 'InternalUsers' AND CreatedDate > ${from.toISOString()} AND CreatedDate <= ${to.toISOString()} ORDER BY CreatedDate DESC LIMIT ${PAGE_LIMIT})`;
 }
 
 async function drainWindow(apiBase, sid, from, to, signal, rowsOut, seenIds) {
@@ -45,24 +44,12 @@ async function drainWindow(apiBase, sid, from, to, signal, rowsOut, seenIds) {
   }
 }
 
-async function runPooled(items, concurrency, fn, signal) {
-  let idx = 0;
-  async function worker() {
-    while (idx < items.length) {
-      if (signal?.aborted) return;
-      const i = idx++;
-      await fn(items[i]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-}
-
 async function resolveNames(apiBase, sid, ids, soqlTemplate, mapFn, signal) {
   const map = new Map();
   if (!ids.length) return map;
   const batches = [];
   for (let i = 0; i < ids.length; i += RESOLVE_BATCH_SIZE) batches.push(ids.slice(i, i + RESOLVE_BATCH_SIZE));
-  await runPooled(batches, MAX_CONCURRENT, async (batch) => {
+  await mapWithConcurrency(batches, MAX_CONCURRENT, async (batch) => {
     try {
       const records = await sfQuery(apiBase, sid, soqlTemplate(batch), signal);
       for (const r of records) map.set(r.Id, mapFn(r));
@@ -91,7 +78,7 @@ export async function auditSignatures(apiBase, sid, { monthsBack = 3, onProgress
   let done = 0;
   let failedSlices = 0;
   let firstError = null;
-  await runPooled(slices, MAX_CONCURRENT, async (slice) => {
+  await mapWithConcurrency(slices, MAX_CONCURRENT, async (slice) => {
     try {
       await drainWindow(apiBase, sid, slice.from, slice.to, signal, rows, seenIds);
     } catch (e) {

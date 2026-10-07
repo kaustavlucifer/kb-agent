@@ -7,7 +7,7 @@ import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSI
 import { scoreArticle as sharedScoreArticle, draftToScorable, fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
-import { extractWorkItemNames, fetchGusWorkItems } from './gus-enrichment.js';
+import { extractWorkItemNames, fetchGusWorkItems, GUS_WORK_NAME_RE } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
 import { generateKiDraftContent, kiUrl } from './ki-publish.js';
 import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../../data/writing_guide_prompts.js';
@@ -33,10 +33,37 @@ function bindStopHandler(port, onStop) {
 }
 
 async function fetchCaseComments(apiBase, sid, caseId, signal) {
-  return sfQuery(apiBase, sid,
-    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate ASC LIMIT 50`,
+  const records = await sfQuery(apiBase, sid,
+    `SELECT Id, CommentBody, CreatedDate, CreatedBy.Name FROM CaseComment WHERE ParentId = '${caseId}' ORDER BY CreatedDate DESC LIMIT 50`,
     signal
   );
+  return records.reverse();
+}
+
+function commentWindow(comments, head, tail) {
+  if (comments.length <= head + tail) return comments;
+  return [...comments.slice(0, head), ...comments.slice(-tail)];
+}
+
+async function fetchGuardedCase(session, caseId, baseFields, signal) {
+  const [guardRailFields, settings] = await Promise.all([
+    verifyGuardRailFields(session.apiBase, session.sid),
+    chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS])
+  ]);
+  const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
+  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${baseFields}${getGuardRailExtraFields(guardRailFields)}`, session.sid, signal);
+  if (!caseRecord || !caseRecord.Id) return { error: 'Case not found.' };
+  if (bypassEnabled) return { caseRecord };
+  if (guardRailFields.describeFailed) {
+    return { error: 'Could not verify case guard-rail fields (Case describe failed). Analysis blocked for safety. Retry, or enable bypass in options if you have authorization.' };
+  }
+  if (guardRailFields.hasSupportLevel || guardRailFields.hasHyperforce) {
+    caseRecord.__supportLevel = guardRailFields.supportLevelName ? String(caseRecord[guardRailFields.supportLevelName] ?? '') : '';
+    caseRecord.__hyperforce = guardRailFields.hyperforceName ? String(caseRecord[guardRailFields.hyperforceName] ?? '') : '';
+    const guardCheck = isCaseAnalysisAllowed(caseRecord);
+    if (!guardCheck.allowed) return { error: guardCheck.reason };
+  }
+  return { caseRecord };
 }
 
 export async function handleAnalyze(port, msg) {
@@ -66,36 +93,16 @@ export async function handleAnalyze(port, msg) {
 
   send({ type: 'progress', step: 1, label: 'Fetching case + comments' });
 
-  const guardRailFields = await verifyGuardRailFields(session.apiBase, session.sid);
-  const extraFields = getGuardRailExtraFields(guardRailFields);
-  const caseFields = `Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c${extraFields}`;
-  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFields}`, session.sid, signal);
-  if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
-
-  const settings = await chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS]);
-  const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
-
-  if (!bypassEnabled && guardRailFields.describeFailed) {
-    send({ type: 'error', error: 'Could not verify case guard-rail fields (Case describe failed). Analysis blocked for safety. Retry, or enable bypass in options if you have authorization.' });
-    return;
-  }
-
-  if (!bypassEnabled && (guardRailFields.hasSupportLevel || guardRailFields.hasHyperforce)) {
-    const supportLevel = guardRailFields.supportLevelName ? (caseRecord[guardRailFields.supportLevelName] || '') : '';
-    const hyperforce = guardRailFields.hyperforceName ? (caseRecord[guardRailFields.hyperforceName] || '') : '';
-    caseRecord.__supportLevel = supportLevel;
-    caseRecord.__hyperforce = hyperforce;
-    const guardCheck = isCaseAnalysisAllowed(caseRecord);
-    if (!guardCheck.allowed) {
-      send({ type: 'error', error: guardCheck.reason });
-      return;
-    }
-  }
+  const commentsPromise = fetchCaseComments(session.apiBase, session.sid, caseId, signal);
+  commentsPromise.catch(() => {});
+  const guarded = await fetchGuardedCase(session, caseId, 'Id,CaseNumber,Subject,Description,Status,Severity_Level__c,SupportLevel__c,CreatedDate,cssf_Product_Topic_Name__c', signal);
+  if (guarded.error) { send({ type: 'error', error: guarded.error }); return; }
+  const { caseRecord } = guarded;
 
   send({ type: 'meta', caseRecord: { id: caseRecord.Id, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, status: caseRecord.Status, severity: caseRecord.Severity_Level__c, supportLevel: caseRecord.SupportLevel__c, createdDate: caseRecord.CreatedDate, description: (caseRecord.Description || '').slice(0, 500) } });
   send({ type: 'progress', step: 1, label: 'Fetching comments…', caseNumber: caseRecord.CaseNumber });
 
-  const comments = await fetchCaseComments(session.apiBase, session.sid, caseId, signal);
+  const comments = await commentsPromise;
   const aiCaseRecord = redactCaseRecord(caseRecord);
   const aiComments = redactComments(comments);
 
@@ -192,7 +199,7 @@ Be STRICT. Do not inflate scores. An article about the same PRODUCT but a DIFFER
 
 Return JSON: {"articles": [{"index": 0, "score": 85, "reason": "short reason", "notRelevant": false}, ...]}
 Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
-    messages: [{ role: 'user', content: `CASE:\nSubject: ${aiCaseRecord.Subject}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 1200)}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nComments: ${aiComments.slice(0, 5).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
+    messages: [{ role: 'user', content: `CASE:\nSubject: ${aiCaseRecord.Subject}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 1200)}\nSeverity: ${caseRecord.Severity_Level__c || ''}\nComments: ${commentWindow(aiComments, 2, 3).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n')}\n\nARTICLES:\n${articleDetailsForAI}` }],
     maxTokens: 1200,
     temperature: 0
   };
@@ -247,7 +254,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
   const kbScoredArticles = [...scoredArticles];
-  await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session);
+  const articleChatter = await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
@@ -303,7 +310,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       noCoverage: !!decision.noCoverage
     };
   } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    const suggestions = await generateFullRewrites(topArticles, candidateBodies, aiCaseRecord, aiComments, caseAbstract, send, signal, session);
+    const suggestions = await generateFullRewrites(topArticles, candidateBodies, articleChatter, aiCaseRecord, aiComments, caseAbstract, send, signal, session);
     structured = {
       action,
       confidence: decision.confidence,
@@ -356,25 +363,28 @@ export async function handleGenerateNew(port, msg) {
 
   bindStopHandler(port, () => abortController.abort());
 
-  const session = await detectSession();
-  if (!session.sid) { port.postMessage({ type: 'error', error: 'No Salesforce session.' }); return; }
-
   const send = (data) => { try { port.postMessage(data); } catch {} };
-  const caseId = sanitizeId(msg.caseId);
-
-  send({ type: 'progress', label: 'Generating new article…' });
 
   try {
-    const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c`, session.sid, signal);
-    if (!caseRecord || !caseRecord.Id) { send({ type: 'error', error: 'Case not found.' }); return; }
-    const comments = await fetchCaseComments(session.apiBase, session.sid, caseId, signal);
-    const aiCaseRecord = redactCaseRecord(caseRecord);
-    const aiComments = redactComments(comments);
+    const session = await detectSession();
+    if (!session.sid) { send({ type: 'error', error: 'No Salesforce session.' }); return; }
+    const caseId = sanitizeId(msg.caseId);
 
-    const [intentsResult, caseAbstract] = await Promise.all([
-      extractIntents(aiCaseRecord, aiComments, signal),
-      extractAbstract(aiCaseRecord, aiComments, signal)
-    ]);
+    send({ type: 'progress', label: 'Generating new article…' });
+
+    const commentsPromise = fetchCaseComments(session.apiBase, session.sid, caseId, signal);
+    commentsPromise.catch(() => {});
+    const guarded = await fetchGuardedCase(session, caseId, 'Id,CaseNumber,Subject,Description,Severity_Level__c,cssf_Product_Topic_Name__c', signal);
+    if (guarded.error) { send({ type: 'error', error: guarded.error }); return; }
+    const aiCaseRecord = redactCaseRecord(guarded.caseRecord);
+    const aiComments = redactComments(await commentsPromise);
+
+    const [intentsResult, caseAbstract] = msg.caseAbstract
+      ? [{ product: msg.caseAbstract.product || null }, msg.caseAbstract]
+      : await Promise.all([
+        extractIntents(aiCaseRecord, aiComments, signal),
+        extractAbstract(aiCaseRecord, aiComments, signal)
+      ]);
 
     send({ type: 'streaming-start' });
     const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, new Map(), send, signal, session);
@@ -402,7 +412,7 @@ export async function handleGenerateNew(port, msg) {
 
 async function extractIntents(caseRecord, comments, signal) {
   const fallback = { theme: caseRecord.Subject, product: null, intents: [{ intent: caseRecord.Subject, queries: [caseRecord.Subject] }] };
-  const commentsText = comments.slice(0, 10).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
+  const commentsText = commentWindow(comments, 3, 7).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   try {
     const resp = await callClaudeFast({
       system: `Extract search intents from this support case. Use Agentforce KB terminology for queries — be product-specific, use exact error text and feature names.
@@ -423,7 +433,7 @@ Return JSON: {"theme":"...","product":"...","intents":[{"intent":"...","queries"
 }
 
 async function extractAbstract(caseRecord, comments, signal) {
-  const commentsText = comments.slice(0, 8).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
+  const commentsText = commentWindow(comments, 2, 6).map((c, i) => `Comment ${i + 1}: ${c.CommentBody}`).join('\n');
   try {
     const resp = await callClaudeFast({
       system: `Extract a problem signature from this case. Also determine if this is a CUSTOMER-SPECIFIC issue (custom code, unique org configuration, bespoke integration design) that would NOT be useful as a public KB article vs. a GENERIC issue that many customers could encounter.
@@ -448,7 +458,7 @@ Return JSON: {"product":"...","symptomClass":"...","errorSignature":"...or null"
 async function fetchCaseLinkedWorkNames(session, caseId, signal) {
   try {
     const records = await sfQuery(session.apiBase, session.sid, `SELECT GUS_Work__r.Name FROM Case_Relationship__c WHERE Case__c = '${sanitizeId(caseId)}' ORDER BY CreatedDate ASC`, signal);
-    return records.map(r => r.GUS_Work__r?.Name).filter(n => /^W-\d{4,9}$/.test(n || ''));
+    return records.map(r => r.GUS_Work__r?.Name).filter(n => GUS_WORK_NAME_RE.test(n || ''));
   } catch (e) {
     if (signal?.aborted) throw e;
     return [];
@@ -456,7 +466,7 @@ async function fetchCaseLinkedWorkNames(session, caseId, signal) {
 }
 
 async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
-  const commentText = comments.slice(0, 6).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
+  const commentText = commentWindow(comments, 2, 4).map(c => c.CommentBody?.slice(0, 200)).filter(Boolean).join('\n');
   const gusContext = redactPii((gusData.items || []).slice(0, 3).map(g => `${g.name} [${g.recordType || 'Work'}]: ${g.subject || ''} (${g.status || ''})${(g.linkedBugs || []).length ? ` → follow-up ${g.linkedBugs.map(b => `${b.name} [${b.recordType}] (${b.status || ''})`).join(', ')}` : ''}`).join('\n'));
   const gusFeedText = redactPii((gusData.feed || []).slice(0, 3).map(f => f.body?.slice(0, 200)).filter(Boolean).join('\n'));
 
@@ -475,51 +485,50 @@ async function streamCaseSummary(caseRecord, comments, gusData, send, signal) {
 }
 
 
-async function soslPrimarySearch(apiBase, sid, queries, ptPatterns, signal) {
-  const seen = new Set();
-  const results = [];
-  const uniqueQueries = [...new Set(
-    queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= 10)
-  )].slice(0, MAX_SOSL_QUERIES);
+const BROAD_PT_FILTER = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
 
-  let ptFilter = "(Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')";
-  if (ptPatterns.length && ptPatterns.length <= 5) {
-    const ptClauses = ptPatterns.map(p => `Product_And_Topic__r.Name = '${escapeSoql(p)}'`);
-    ptFilter = `(${ptClauses.join(' OR ')})`;
-  }
+function normalizeSoslQueries(queries, limit, maxWords = Infinity) {
+  return [...new Set(
+    queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2 && q.split(' ').length <= maxWords)
+  )].slice(0, limit);
+}
+
+function articleSosl(q, ptFilter) {
+  return `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`;
+}
+
+async function soslPrimarySearch(apiBase, sid, queries, ptPatterns, signal) {
+  const byMaster = new Map();
+  const results = [];
+  const uniqueQueries = normalizeSoslQueries(queries, MAX_SOSL_QUERIES, 10);
+  const narrowPt = ptPatterns.length > 0 && ptPatterns.length <= 5;
+  const ptFilter = narrowPt
+    ? `(${ptPatterns.map(p => `Product_And_Topic__r.Name = '${escapeSoql(p)}'`).join(' OR ')})`
+    : BROAD_PT_FILTER;
 
   const addRecords = (records) => {
     for (const r of records) {
-      if (!seen.has(r.Id)) {
-        seen.add(r.Id);
-        results.push({ ...r, topicName: r.Product_And_Topic__r?.Name || '' });
+      const key = r.KnowledgeArticleId || r.Id;
+      const record = { ...r, topicName: r.Product_And_Topic__r?.Name || '' };
+      const idx = byMaster.get(key);
+      if (idx == null) {
+        byMaster.set(key, results.length);
+        results.push(record);
+      } else if (r.PublishStatus === 'Online' && results[idx].PublishStatus !== 'Online') {
+        results[idx] = record;
       }
     }
   };
 
-  await mapWithConcurrency(uniqueQueries, 3, async (q) => {
-    if (results.length >= 20) return;
+  const runQueries = (list, filter, cap) => mapWithConcurrency(list, 3, async (q) => {
+    if (results.length >= cap) return;
     try {
-      const records = await sfSearch(apiBase, sid,
-        `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND ${ptFilter}) LIMIT ${SOSL_PER_QUERY}`,
-        signal
-      );
-      addRecords(records);
+      addRecords(await sfSearch(apiBase, sid, articleSosl(q, filter), signal));
     } catch {}
   });
 
-  if (results.length < 5 && ptPatterns.length) {
-    await mapWithConcurrency(uniqueQueries.slice(0, 3), 3, async (q) => {
-      if (results.length >= 15) return;
-      try {
-        const records = await sfSearch(apiBase, sid,
-          `FIND {${q}} IN ALL FIELDS RETURNING Knowledge__kav(Id,KnowledgeArticleId,Title,Summary,ArticleNumber,UrlName,ValidationStatus,PublishStatus,Product_And_Topic__r.Name WHERE Language = 'en_US' AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%')) LIMIT ${SOSL_PER_QUERY}`,
-          signal
-        );
-        addRecords(records);
-      } catch {}
-    });
-  }
+  await runQueries(uniqueQueries, ptFilter, 20);
+  if (results.length < 5 && narrowPt) await runQueries(uniqueQueries.slice(0, 3), BROAD_PT_FILTER, 15);
 
   return results;
 }
@@ -591,6 +600,16 @@ Return JSON: {"hasGap": true/false, "assessment": "1-2 sentences", "recommendati
 
 const PROD_DOCS_CACHE_TTL = 24 * 60 * 60 * 1000;
 const PROD_DOCS_CACHE_PREFIX = 'prodDocs_';
+const PROD_DOCS_CACHE_MAX_ENTRIES = 8;
+
+function hashKey(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36) + text.length.toString(36);
+}
 
 const _docConfigKeyMap = Object.fromEntries(
   Object.keys(PRODUCT_DOCS_CONFIG).map(k => [k.toLowerCase(), k])
@@ -625,6 +644,16 @@ async function getCachedProductDocs(cacheKey) {
 async function setCachedProductDocs(cacheKey, articles) {
   try {
     await chrome.storage.local.set({ [cacheKey]: articles, [cacheKey + '_at']: Date.now() });
+    const entryKeys = (await chrome.storage.local.getKeys())
+      .filter(k => k.startsWith(PROD_DOCS_CACHE_PREFIX) && !k.endsWith('_at'));
+    const stamps = await chrome.storage.local.get(entryKeys.map(k => k + '_at'));
+    const now = Date.now();
+    const stale = entryKeys
+      .map(k => ({ k, at: stamps[k + '_at'] || 0 }))
+      .sort((a, b) => b.at - a.at)
+      .filter((e, i) => i >= PROD_DOCS_CACHE_MAX_ENTRIES || now - e.at >= PROD_DOCS_CACHE_TTL)
+      .flatMap(e => [e.k, e.k + '_at']);
+    if (stale.length) await chrome.storage.local.remove(stale);
   } catch {}
 }
 
@@ -651,9 +680,7 @@ async function searchProductDocs(apiBase, sid, queries, casePt, caseContext, sig
 }
 
 async function searchProductDocsSosl(apiBase, sid, queries, signal) {
-  const uniqueQueries = [...new Set(
-    queries.map(q => escapeSosl(q).replace(/\s+/g, ' ').trim()).filter(q => q.length > 2)
-  )].slice(0, 3);
+  const uniqueQueries = normalizeSoslQueries(queries, 3);
   const seen = new Set();
   const results = [];
 
@@ -681,8 +708,7 @@ async function searchProductDocsSosl(apiBase, sid, queries, signal) {
 const URL_PATTERN_BATCH_SIZE = 10;
 
 async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
-  const patternKey = urlPatterns.sort().join('|');
-  const cacheKey = PROD_DOCS_CACHE_PREFIX + patternKey.slice(0, 80);
+  const cacheKey = PROD_DOCS_CACHE_PREFIX + hashKey([...urlPatterns].sort().join('|'));
   const cached = await getCachedProductDocs(cacheKey);
   if (cached) return cached;
 
@@ -705,9 +731,10 @@ async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
 
     const seen = new Set();
     const articles = [];
+    const complete = results.every(batch => !batch?.__error);
     for (const batch of results) {
       if (batch?.__error) continue;
-      for (const r of (batch || [])) {
+      for (const r of batch) {
         if (seen.has(r.Id)) continue;
         seen.add(r.Id);
         articles.push({
@@ -717,7 +744,7 @@ async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
         });
       }
     }
-    await setCachedProductDocs(cacheKey, articles);
+    if (complete) await setCachedProductDocs(cacheKey, articles);
     return articles;
   } catch {
     return [];
@@ -767,10 +794,9 @@ Include ONLY articles scoring 40+. Max 15 results. Order by score descending.`,
 
 
 
-async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abstract, send, signal, session) {
+async function generateFullRewrites(articles, bodyMap, chatterMap, caseRecord, comments, abstract, send, signal, session) {
   const allSuggestions = [];
-  const commentSnippets = comments.filter(c => c.CommentBody?.length > 30).slice(0, 3).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
-  const chatterMapPromise = fetchArticleChatterBatch(articles.slice(0, 2).map(a => a.Id), session, 'Knowledge__Feed', signal).catch(() => new Map());
+  const commentSnippets = commentWindow(comments.filter(c => c.CommentBody?.length > 30), 1, 2).map(c => c.CommentBody.slice(0, 300)).join('\n---\n');
 
   const tasks = articles.slice(0, 2).map(article => async () => {
     const body = bodyMap.get(article.Id) || {};
@@ -778,7 +804,6 @@ async function generateFullRewrites(articles, bodyMap, caseRecord, comments, abs
     const resText = stripHtmlKeepLinks(body.resolution, session.apiBase).slice(0, MAX_BODY_CHARS);
     const stepsText = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
     const refLinksText = body.additionalResources ? stripHtmlKeepLinks(body.additionalResources, session.apiBase).slice(0, 500) : '';
-    const chatterMap = await chatterMapPromise;
     const chatterNotes = chatterMap.get(article.Id) || '';
 
     const userText = `EXISTING ARTICLE: #${article.ArticleNumber} "${article.Title}"\nSUMMARY: ${body.summary || ''}\nDESCRIPTION:\n${descText.slice(0, 2500)}\nRESOLUTION:\n${resText.slice(0, 2500)}${stepsText ? '\nSTEPS:\n' + stepsText : ''}${refLinksText ? '\nEXISTING REFERENCE LINKS:\n' + refLinksText : ''}${chatterNotes ? '\nRELATED CHATTER NOTES (internal context only — factual/technical input from SMEs on this article, if any; use only if genuinely relevant, ignore automated or irrelevant notes):\n' + chatterNotes : ''}\n\nCASE CONTEXT:\nSubject: ${caseRecord.Subject}\nSymptom: ${abstract?.symptomClass || ''}\nError: ${abstract?.errorSignature || ''}\nDescription: ${(caseRecord.Description || '').slice(0, 800)}\n${commentSnippets ? 'Comments:\n' + commentSnippets : ''}`;
@@ -841,7 +866,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
 }
 
 async function extractStructuredResolution(caseRecord, comments, signal) {
-  const commentText = comments.slice(0, 8).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n');
+  const commentText = commentWindow(comments, 2, 6).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n');
   try {
     const resp = await callClaudeFast({
       system: `You are a technical knowledge extraction engine. Extract structured resolution fields from this support case. Only include what is EXPLICITLY stated — do not infer or assume.
@@ -916,7 +941,7 @@ Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","noActi
 }
 
 async function generateNewArticleStreaming(caseRecord, comments, abstract, intents, candidateBodies, send, signal, session) {
-  const commentText = comments.slice(0, 5).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
+  const commentText = commentWindow(comments, 2, 4).map(c => c.CommentBody?.slice(0, 400)).filter(Boolean).join('\n---\n');
   const refLinks = [...(candidateBodies || new Map()).values()]
     .map(b => stripHtmlKeepLinks(b.additionalResources || '', session.apiBase).trim())
     .filter(r => r.length > 10)
@@ -1033,7 +1058,7 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
 }
 
 async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {
-  if (!scoredArticles.length) return;
+  if (!scoredArticles.length) return new Map();
   const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session, 'Knowledge__Feed', signal).catch(() => new Map());
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
     if (signal?.aborted) return;
@@ -1053,11 +1078,14 @@ async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbS
     };
     try {
       const result = await sharedScoreArticle(enriched);
-      if (result.overall != null) {
-        kbScoredArticles[idx] = { ...scoredArticles[idx], kbScore: result.overall, kbCriteria: result.criteria };
-      }
-    } catch {}
+      kbScoredArticles[idx] = result.overall != null
+        ? { ...scoredArticles[idx], kbScore: result.overall, kbCriteria: result.criteria }
+        : { ...scoredArticles[idx], kbScoreError: true };
+    } catch {
+      if (!signal?.aborted) kbScoredArticles[idx] = { ...scoredArticles[idx], kbScoreError: true };
+    }
   });
+  return chatterMap;
 }
 
 async function autoScoreGeneratedArticles(structured, send, signal) {

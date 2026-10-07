@@ -6,7 +6,7 @@ import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../s
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { SCORE_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS, MAX_BODY_CHARS, SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD, SCORE_GOOD_ENOUGH_THRESHOLD, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, articleUrl, CLOUDS, getCloudFromPt } from '../shared/config.js';
-import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, normalizeCriterion, fetchArticleBodies, fetchArticleChatterBatch, loadAllArticles, searchArticlesUnscoped, SCORING_SYSTEM_CHARS } from '../shared/scoring.js';
+import { SCORING_CRITERIA as CRITERIA, scoreArticle, buildScoringPrompt, parseScoreResponse, normalizeCriterion, enrichArticlesForScoring, draftToScorable, loadAllArticles, searchArticlesUnscoped, SCORING_SYSTEM_CHARS } from '../shared/scoring.js';
 import { estimateScoring, fmtUsd } from '../shared/cost.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { parseRewriteSections, markdownToHtml } from '../shared/markdown.js';
@@ -481,7 +481,7 @@ function render() {
   scrollSection.appendChild(h('div', { class: 'card', style: { padding: '16px' } }, table, paginationRow));
 }
 
-function showScoreDetail(article, scoreData) {
+function showScoreDetail(article, scoreData, { fromRewrite = false } = {}) {
   if (!scoreData?.criteria) return;
   let close;
 
@@ -493,7 +493,7 @@ function showScoreDetail(article, scoreData) {
       ),
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
         h('div', { style: { fontSize: '24px', fontWeight: '700', color: `var(--${scoreColor(scoreData.overall)})` } }, String(scoreData.overall)),
-        h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); scoreOne(article); } }, 'Rescore')
+        fromRewrite ? null : h('button', { class: 'btn btn--secondary btn--sm', onClick: () => { close(); scoreOne(article); } }, 'Rescore')
       )
     )
   );
@@ -515,7 +515,7 @@ function showScoreDetail(article, scoreData) {
   });
   body.appendChild(criteriaTable);
 
-  ({ close } = modal(`Score: ${article.articleNumber}`, body, { wide: true }));
+  ({ close } = modal(`Score: ${article.articleNumber}`, body, { wide: true, stack: fromRewrite }));
 }
 
 async function runCrossSearch(query) {
@@ -630,6 +630,20 @@ function getFilteredArticles() {
   return filtered;
 }
 
+const BODY_FETCH_ERROR = 'Could not load the article body from Salesforce. Try again.';
+const SCORE_PERSIST_THROTTLE_MS = 2000;
+
+function updateScoringIds(add = [], remove = []) {
+  const ids = new Set(getState('kb.scoringIds') || []);
+  add.forEach(id => ids.add(id));
+  remove.forEach(id => ids.delete(id));
+  setState('kb.scoringIds', [...ids]);
+}
+
+function persistScores() {
+  return localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: getState('kb.scores') || {} });
+}
+
 async function scoreAll() {
   const crossMode = _crossScope && _filterText.trim().length >= 2;
   const filtered = crossMode ? _crossResults : getFilteredArticles();
@@ -641,66 +655,70 @@ async function scoreAll() {
   if (!toScore.length) { toast('All articles on this page already scored.', 'info'); return; }
 
   setState('kb.scoring', { done: 0, total: toScore.length, phase: 'fetching' });
-  const session = await detectSession();
-  if (!session.sid) { toast('No SF session.', 'error'); setState('kb.scoring', null); return; }
-
-  const [bodyMap, chatterMap] = await Promise.all([
-    fetchArticleBodies(toScore.map(a => a.id), session),
-    fetchArticleChatterBatch(toScore.map(a => a.id), session)
-  ]);
-  setState('kb.scoring', { done: 0, total: toScore.length });
   const batchResults = {};
-  const inFlight = new Set();
-  const settled = () => toScore.filter(a => batchResults[a.id]?.overall != null).length;
-  const commit = (id, result) => {
-    batchResults[id] = result;
-    const cur = getState('kb.scores') || {};
-    setState('kb.scores', { ...cur, [id]: result });
-    if (result.overall != null) logSignature('article-scored', session.apiBase, session.sid, id);
+  let persistTimer = null;
+  const schedulePersist = () => {
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => { persistTimer = null; persistScores().catch(() => {}); }, SCORE_PERSIST_THROTTLE_MS);
   };
 
-  await mapWithConcurrency(toScore, SCORE_CONCURRENCY, async (article) => {
-    inFlight.add(article.id);
-    setState('kb.scoringIds', [...inFlight]);
-    const body = bodyMap.get(article.id) || {};
-    const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
-    let result;
-    try {
-      result = await scoreArticle(enriched);
-    } catch (e) {
-      result = { overall: null, criteria: [], error: e.message };
-    }
-    inFlight.delete(article.id);
-    commit(article.id, result);
-    setState('kb.scoringIds', [...inFlight]);
-    setState('kb.scoring', { done: settled(), total: toScore.length });
-  });
+  try {
+    const session = await detectSession();
+    if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-  const failed = toScore.filter(a => batchResults[a.id]?.overall == null);
-  if (failed.length) {
-    setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
-    await new Promise(r => setTimeout(r, 2000));
-    await mapWithConcurrency(failed, 2, async (article) => {
-      inFlight.add(article.id);
-      setState('kb.scoringIds', [...inFlight]);
-      const body = bodyMap.get(article.id) || {};
-      const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
+    const { enriched, failedIds } = await enrichArticlesForScoring(toScore, session);
+    const settled = () => toScore.filter(a => batchResults[a.id]?.overall != null).length;
+    const commit = (id, result) => {
+      batchResults[id] = result;
+      setState('kb.scores', { ...(getState('kb.scores') || {}), [id]: result });
+      if (result.overall != null) {
+        logSignature('article-scored', session.apiBase, session.sid, id);
+        schedulePersist();
+      }
+    };
+    toScore.filter(a => failedIds.has(a.id)).forEach(a => commit(a.id, { overall: null, criteria: [], error: BODY_FETCH_ERROR }));
+    const scorable = toScore.filter(a => enriched.has(a.id));
+
+    setState('kb.scoring', { done: 0, total: toScore.length });
+    await mapWithConcurrency(scorable, SCORE_CONCURRENCY, async (article) => {
+      updateScoringIds([article.id]);
+      let result;
       try {
-        const result = await scoreArticle(enriched, SCORING_RETRY_MAX_TOKENS);
-        commit(article.id, result);
-      } catch {}
-      inFlight.delete(article.id);
-      setState('kb.scoringIds', [...inFlight]);
-      setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
+        result = await scoreArticle(enriched.get(article.id));
+      } catch (e) {
+        result = { overall: null, criteria: [], error: e.message };
+      }
+      updateScoringIds([], [article.id]);
+      commit(article.id, result);
+      setState('kb.scoring', { done: settled(), total: toScore.length });
     });
-  }
 
-  await localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: getState('kb.scores') || {} });
-  setState('kb.scoring', null);
-  setState('kb.scoringIds', []);
-  const successCount = toScore.filter(a => batchResults[a.id]?.overall != null).length;
-  const stillFailed = toScore.length - successCount;
-  toast(`Scored ${successCount}/${toScore.length} articles.${stillFailed ? ` ${stillFailed} failed.` : ''}`, stillFailed ? 'warning' : 'success');
+    const failed = scorable.filter(a => batchResults[a.id]?.overall == null);
+    if (failed.length) {
+      setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
+      await new Promise(r => setTimeout(r, 2000));
+      await mapWithConcurrency(failed, 2, async (article) => {
+        updateScoringIds([article.id]);
+        try {
+          const result = await scoreArticle(enriched.get(article.id), SCORING_RETRY_MAX_TOKENS);
+          commit(article.id, result);
+        } catch {}
+        updateScoringIds([], [article.id]);
+        setState('kb.scoring', { done: settled(), total: toScore.length, retrying: failed.length });
+      });
+    }
+
+    const successCount = settled();
+    const stillFailed = toScore.length - successCount;
+    toast(`Scored ${successCount}/${toScore.length} articles.${stillFailed ? ` ${stillFailed} failed.` : ''}`, stillFailed ? 'warning' : 'success');
+  } catch (e) {
+    toast('Scoring failed: ' + e.message, 'error');
+  } finally {
+    if (persistTimer) clearTimeout(persistTimer);
+    await persistScores().catch(() => {});
+    setState('kb.scoring', null);
+    updateScoringIds([], toScore.map(a => a.id));
+  }
 }
 
 function renderCriterionRow(c, limit = 2) {
@@ -720,37 +738,51 @@ function renderCriterionRow(c, limit = 2) {
   );
 }
 
-function tryExtractCriteria(text) {
-  const criteriaMatch = text.match(/"criteria"\s*:\s*\[/);
-  if (!criteriaMatch) return [];
-  const startIdx = text.indexOf('[', criteriaMatch.index);
+function criteriaStreamParser() {
   const results = [];
+  let pos = -1;
   let depth = 0;
   let objStart = -1;
   let inString = false;
   let escaped = false;
-  for (let i = startIdx; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
+  return (text) => {
+    if (pos < 0) {
+      const criteriaMatch = text.match(/"criteria"\s*:\s*\[/);
+      if (!criteriaMatch) return results;
+      pos = text.indexOf('[', criteriaMatch.index);
     }
-    if (ch === '"') { inString = true; }
-    else if (ch === '{') { if (depth === 1) objStart = i; depth++; }
-    else if (ch === '}') {
-      depth--;
-      if (depth === 1 && objStart >= 0) {
-        try {
-          const obj = JSON.parse(text.slice(objStart, i + 1));
-          results.push(obj);
-        } catch {}
-        objStart = -1;
+    for (; pos < text.length; pos++) {
+      const ch = text[pos];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
       }
-    } else if (ch === '[' && depth === 0) { depth = 1; }
-  }
-  return results;
+      if (ch === '"') { inString = true; }
+      else if (ch === '{') { if (depth === 1) objStart = pos; depth++; }
+      else if (ch === '}') {
+        depth--;
+        if (depth === 1 && objStart >= 0) {
+          try {
+            results.push(JSON.parse(text.slice(objStart, pos + 1)));
+          } catch {}
+          objStart = -1;
+        }
+      } else if (ch === '[' && depth === 0) { depth = 1; }
+    }
+    return results;
+  };
+}
+
+function criteriaPlaceholderRows() {
+  return CRITERIA.map(c => h('tr', { id: `score-row-${c.id}` },
+    h('td', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, c.label),
+    h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '…')),
+    h('td', null, ''),
+    h('td', null, ''),
+    h('td', null, '')
+  ));
 }
 
 async function scoreOne(article) {
@@ -771,15 +803,7 @@ async function scoreOne(article) {
         h('th', null, 'Issues'),
         h('th', null, 'Suggestions')
       )),
-      h('tbody', { id: 'score-criteria-body' },
-        ...CRITERIA.map(c => h('tr', { id: `score-row-${c.id}` },
-          h('td', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, c.label),
-          h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '…')),
-          h('td', null, ''),
-          h('td', null, ''),
-          h('td', null, '')
-        ))
-      )
+      h('tbody', { id: 'score-criteria-body' }, ...criteriaPlaceholderRows())
     ),
     h('div', { id: 'score-overall', style: { marginTop: '12px', textAlign: 'center', display: 'none' } },
       h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Overall Score'),
@@ -794,20 +818,7 @@ async function scoreOne(article) {
     onClose: () => { closed = true; abort.abort(); }
   });
 
-  const markScoring = (on) => {
-    const ids = new Set(getState('kb.scoringIds') || []);
-    if (on) ids.add(article.id); else ids.delete(article.id);
-    setState('kb.scoringIds', [...ids]);
-  };
-  markScoring(true);
-
-  const [bodyMap, chatterMap] = await Promise.all([
-    fetchArticleBodies([article.id], session),
-    fetchArticleChatterBatch([article.id], session)
-  ]);
-  const body = bodyMap.get(article.id) || {};
-  const enriched = { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' };
-  const { system, user, maxes } = buildScoringPrompt(enriched);
+  updateScoringIds([article.id]);
 
   const setProgress = (text, mode) => {
     const progressEl = document.getElementById('score-progress');
@@ -826,17 +837,13 @@ async function scoreOne(article) {
     const ctbody = document.getElementById('score-criteria-body');
     if (!ctbody) return;
     ctbody.textContent = '';
-    CRITERIA.forEach(c => ctbody.appendChild(h('tr', { id: `score-row-${c.id}` },
-      h('td', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, c.label),
-      h('td', null, h('span', { style: { color: 'var(--text-muted)' } }, '…')),
-      h('td', null, ''),
-      h('td', null, ''),
-      h('td', null, '')
-    )));
+    criteriaPlaceholderRows().forEach(row => ctbody.appendChild(row));
   };
 
+  let system, user, maxes;
   const attempt = async (maxTokens) => {
     let renderedCount = 0;
+    const extractCriteria = criteriaStreamParser();
     resetCriteriaRows();
     const fullText = await streamClaude({
       system,
@@ -848,7 +855,7 @@ async function scoreOne(article) {
       signal: abort.signal,
       onDelta: (chunk, full) => {
         if (closed) return;
-        const parsed = tryExtractCriteria(full);
+        const parsed = extractCriteria(full);
         if (parsed.length > renderedCount) {
           for (let i = renderedCount; i < parsed.length; i++) {
             const raw = parsed[i];
@@ -876,6 +883,11 @@ async function scoreOne(article) {
   const budgets = [SCORING_MAX_TOKENS, SCORING_RETRY_MAX_TOKENS];
 
   try {
+    const { enriched, failedIds } = await enrichArticlesForScoring([article], session, abort.signal);
+    if (closed) return;
+    if (failedIds.has(article.id)) { setProgress(BODY_FETCH_ERROR, 'var(--error)'); return; }
+    ({ system, user, maxes } = buildScoringPrompt(enriched.get(article.id)));
+
     let result = null;
     for (let i = 0; i < budgets.length; i++) {
       if (i > 0) setProgress('Response was incomplete — retrying with a larger budget…', 'spin');
@@ -924,17 +936,21 @@ async function scoreOne(article) {
     if (closed || e.name === 'AbortError') return;
     setProgress('Error: ' + e.message, 'var(--error)');
   } finally {
-    markScoring(false);
+    updateScoringIds([], [article.id]);
   }
 }
 
 let _rewriteCache = {};
 let _rewriteAbort = null;
 let _rewriteRefineApplied = {};
+let _rewriteSource = {};
 
-async function enrichForScore(article, session) {
-  const bodyMap = await fetchArticleBodies([article.id], session);
-  return { ...article, ...(bodyMap.get(article.id) || {}) };
+async function loadRewriteSource(article, session, signal) {
+  if (_rewriteSource[article.id]) return _rewriteSource[article.id];
+  const { enriched, failedIds } = await enrichArticlesForScoring([article], session, signal);
+  if (failedIds.has(article.id)) throw new Error(BODY_FETCH_ERROR);
+  _rewriteSource[article.id] = enriched.get(article.id);
+  return _rewriteSource[article.id];
 }
 
 function showRefineInput() {
@@ -1033,7 +1049,7 @@ async function rewriteArticle(article) {
   if (score == null) {
     streamingStatus(streamEl, 'Scoring this article before rewrite…');
     try {
-      const result = await scoreArticle(await enrichForScore(article, session));
+      const result = await scoreArticle(await loadRewriteSource(article, session));
       if (closed) return;
       if (result.overall != null) {
         const scores = { ...(getState('kb.scores') || {}), [article.id]: result };
@@ -1088,14 +1104,16 @@ async function scoreRewrite(article, fullText) {
     scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Scoring…'));
   }
   const parsed = parseRewriteSections(fullText);
-  const headerHtml = (label, text) => text ? `<h2>${label}</h2>${text.split('\n').map(l => `<p>${l}</p>`).join('')}` : '';
   const enriched = {
     ...article,
-    title: parsed.title || article.title,
-    summary: parsed.summary,
-    description: headerHtml('Description', parsed.description),
-    resolution: headerHtml('Resolution', parsed.resolution),
-    steps: ''
+    ...draftToScorable({
+      title: parsed.title || article.title,
+      summary: parsed.summary,
+      description: parsed.description,
+      resolution: parsed.resolution,
+      topicName: article.topicName,
+      validationStatus: article.validationStatus
+    })
   };
   try {
     const result = await scoreArticle(enriched);
@@ -1123,7 +1141,7 @@ function renderRewriteScore(article, result) {
     class: `pill pill--${color}`,
     style: { cursor: 'pointer' },
     title: 'View score details',
-    onClick: () => showScoreDetail({ ...article, title: result.title || article.title }, result)
+    onClick: () => showScoreDetail({ ...article, title: result.title || article.title }, result, { fromRewrite: true })
   }, String(overall)));
 }
 
@@ -1167,11 +1185,23 @@ async function generateRewrite(article, session) {
   const priorRewrite = _rewriteCache[article.id] ? parseRewriteSections(_rewriteCache[article.id]) : null;
   const fromEdited = !!(priorRewrite && (priorRewrite.description || priorRewrite.resolution || priorRewrite.summary));
 
-  const [chatterMap, bodyMap] = await Promise.all([
-    fetchArticleChatterBatch([article.id], session),
-    fromEdited ? Promise.resolve(null) : fetchArticleBodies([article.id], session)
-  ]);
-  const chatterNotes = chatterMap.get(article.id) || '';
+  const isStale = () => _rewriteAbort !== abort || abort.signal.aborted;
+  const showError = (message) => {
+    const target = document.getElementById('rewrite-stream');
+    if (target) { target.textContent = ''; target.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + message)); }
+    if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+  };
+
+  let source;
+  try {
+    source = await loadRewriteSource(article, session, abort.signal);
+  } catch (e) {
+    if (_rewriteAbort === abort) _rewriteAbort = null;
+    if (!isStale() && e.name !== 'AbortError') showError(e.message);
+    return;
+  }
+  if (isStale()) return;
+  const chatterNotes = source.chatterNotes || '';
 
   let currentTitle, currentSummary, desc, res, steps;
   if (fromEdited) {
@@ -1181,12 +1211,11 @@ async function generateRewrite(article, session) {
     res = priorRewrite.resolution.slice(0, MAX_BODY_CHARS);
     steps = '';
   } else {
-    const body = bodyMap.get(article.id) || {};
     currentTitle = article.title;
     currentSummary = article.summary || '';
-    desc = stripHtmlKeepLinks(body.description || '', session.apiBase).slice(0, MAX_BODY_CHARS);
-    res = stripHtmlKeepLinks(body.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
-    steps = stripHtmlKeepLinks(body.steps || '', session.apiBase).slice(0, 1500);
+    desc = stripHtmlKeepLinks(source.description || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    res = stripHtmlKeepLinks(source.resolution || '', session.apiBase).slice(0, MAX_BODY_CHARS);
+    steps = stripHtmlKeepLinks(source.steps || '', session.apiBase).slice(0, 1500);
   }
 
   const system = `You are an expert technical writer rewriting Salesforce Knowledge Articles to maximize Agentforce (AGF) RAG retrieval and consumption quality.
@@ -1239,13 +1268,11 @@ CURRENT DESCRIPTION: ${desc || '(empty)'}
 CURRENT RESOLUTION: ${res || '(empty)'}
 ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
 
-  const isStale = () => _rewriteAbort !== abort || abort.signal.aborted;
-  const content = await buildPromptContent(user, session, abort.signal);
-  if (isStale()) return;
-
   let fullText = '';
   const renderThrottled = markdownStreamThrottle('rewrite-stream', STREAM_RENDER_THROTTLE_MS, isStale);
   try {
+    const content = await buildPromptContent(user, session, abort.signal);
+    if (isStale()) return;
     await streamClaude({
       system,
       messages: [{ role: 'user', content }],
@@ -1263,9 +1290,7 @@ ${steps ? `CURRENT STEPS: ${steps}` : ''}`;
     renderEditableRewrite(article);
   } catch (e) {
     if (isStale() || e.name === 'AbortError') return;
-    const el = document.getElementById('rewrite-stream');
-    if (el) { el.textContent = ''; el.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + e.message)); }
-    if (regenBtn) { regenBtn.disabled = false; regenBtn.textContent = 'Regenerate'; }
+    showError(e.message);
     return;
   } finally {
     if (_rewriteAbort === abort) _rewriteAbort = null;
@@ -1306,7 +1331,7 @@ async function showRewriteComparison(article) {
       )
     );
 
-    modal(`Compare: #${article.articleNumber || ''} — ${article.title}`, body, { wide: true });
+    modal(`Compare: #${article.articleNumber || ''} — ${article.title}`, body, { wide: true, stack: true });
   } catch (e) {
     toast('Comparison failed: ' + e.message, 'error');
   }
@@ -1339,7 +1364,8 @@ async function publishRewriteToOrgcs(article) {
       delete _rewriteCache[article.id];
       delete _rewriteScoreCache[article.id];
       delete _rewriteRefineApplied[article.id];
-      await chrome.storage.local.remove(STORAGE_KEYS.ALL_ARTICLES_AT);
+      delete _rewriteSource[article.id];
+      await localSet({ [STORAGE_KEYS.ALL_ARTICLES_AT]: 0 });
       const session = await detectSession();
       if (session.sid) logSignature('rewrite-published', session.apiBase, session.sid, article.id);
     } else {

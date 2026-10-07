@@ -1,4 +1,4 @@
-import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField, stickyScrollLayout } from '../shared/ui.js';
+import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, renderMarkdown, editableRichField, stickyScrollLayout, scoreColor } from '../shared/ui.js';
 import { openKiDraftModal } from './ki-manager.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
@@ -11,11 +11,8 @@ let _container = null;
 let _port = null;
 let _unsubs = [];
 let _collapsedSections = {};
-let _streamTextThrottle = null;
-let _streamTextPending = false;
-let _suggestionThrottle = null;
-let _suggestionPending = false;
 let _editingSections = new Set();
+let _updatingArticles = new Map();
 let _pendingBackgroundRender = false;
 let _sidebarOnly = false;
 let _renderRaf = null;
@@ -39,25 +36,75 @@ function deferredRenderByView() {
   renderByView();
 }
 
-function extractStreamingField(cleaned, fieldName) {
-  const completeRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-  const cm = cleaned.match(completeRe);
-  if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-  const partialRe = new RegExp(`"${fieldName}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-  const pm = cleaned.match(partialRe);
-  if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
+function extractStreamingString(cleaned, prefix) {
+  const unescape = (v) => v.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  const cm = cleaned.match(new RegExp(`${prefix}"((?:[^"\\\\]|\\\\.)*)"`));
+  if (cm) return { value: unescape(cm[1]), complete: true };
+  const pm = cleaned.match(new RegExp(`${prefix}"((?:[^"\\\\]|\\\\.)*)$`));
+  if (pm) return { value: unescape(pm[1]), complete: false };
   return null;
+}
+
+function extractStreamingField(cleaned, fieldName) {
+  return extractStreamingString(cleaned, `"${fieldName}"\\s*:\\s*`);
 }
 
 function extractStreamingSectionBody(cleaned, heading) {
   const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const completeRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, '');
-  const cm = cleaned.match(completeRe);
-  if (cm) return { value: cm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: true };
-  const partialRe = new RegExp(`"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)$`, '');
-  const pm = cleaned.match(partialRe);
-  if (pm) return { value: pm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'), complete: false };
-  return null;
+  return extractStreamingString(cleaned, `"heading"\\s*:\\s*"${esc}"\\s*,\\s*"body"\\s*:\\s*`);
+}
+
+function makeRenderThrottle(fn) {
+  let timer = null;
+  let pending = false;
+  const call = () => {
+    if (timer) { pending = true; return; }
+    fn();
+    timer = setTimeout(() => {
+      timer = null;
+      if (pending) { pending = false; fn(); }
+    }, STREAM_RENDER_THROTTLE_MS);
+  };
+  call.cancel = () => { clearTimeout(timer); timer = null; pending = false; };
+  return call;
+}
+
+const throttledStreamRender = makeRenderThrottle(() => {
+  if (_container && getState('case.view') === 'streaming') renderStreaming();
+});
+
+const throttledSummaryRender = makeRenderThrottle(() => {
+  if (!_container) return;
+  const v = getState('case.view');
+  if (v === 'progressive') updateProgressiveSummary();
+  else if (v === 'streaming') updateStreamingSummary();
+});
+
+function partialResult(summary) {
+  const caseRecord = getState('case.caseRecord');
+  return {
+    structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary, suggestions: getState('case.suggestions') || [] },
+    caseNumber: caseRecord?.caseNumber || getState('case.progress')?.caseNumber || '',
+    subject: caseRecord?.subject || ''
+  };
+}
+
+function toMarkdownBody(text) {
+  return /```/.test(text || '') ? text : htmlBodyToMarkdown(text);
+}
+
+function normalizeArticleDraft(obj) {
+  if (!obj) return obj;
+  if (obj.summary) obj.summary = toMarkdownBody(obj.summary).replace(/^#+\s*/gm, '').trim();
+  for (const sec of (obj.sections || [])) sec.body = toMarkdownBody(sec.body || '');
+  return obj;
+}
+
+function normalizeStructured(structured) {
+  if (!structured) return structured;
+  (structured.suggestions || []).forEach(normalizeArticleDraft);
+  normalizeArticleDraft(structured.newArticleDraft);
+  return structured;
 }
 
 export function mount(container) {
@@ -67,13 +114,12 @@ export function mount(container) {
   if (!getState('case.view')) setState('case.view', 'idle');
 
   const view = getState('case.view');
-  if ((view === 'analyzing' || view === 'streaming') && !_port) {
-    const suggestions = getState('case.suggestions') || [];
-    if (suggestions.length || getState('case.result')) {
-      setState('case.view', 'result');
-    } else {
-      setState('case.view', 'idle');
-    }
+  const inFlight = view === 'analyzing' || view === 'progressive' || view === 'streaming';
+  if (inFlight && !_port) {
+    if (!getState('case.result') && (getState('case.suggestions') || []).length) setState('case.result', partialResult('Connection lost. Showing partial results.'));
+    setState('case.view', getState('case.result') ? 'result' : 'idle');
+  } else if (view === 'result' && !getState('case.result')) {
+    setState('case.view', 'idle');
   }
 
   loadRecentCases();
@@ -81,44 +127,22 @@ export function mount(container) {
   _unsubs.push(subscribe('case.view', () => { if (_container) renderByView(); }));
   _unsubs.push(subscribe('case.progress', () => { if (_container) { const v = getState('case.view'); if (v === 'analyzing') renderByView(); else if (v === 'progressive') scheduleRender(); } }));
   _unsubs.push(subscribe('case.result', () => { if (_container && getState('case.view') === 'result') renderByView(); }));
-  _unsubs.push(subscribe('case.streamText', () => {
-    if (!_container || getState('case.view') !== 'streaming') return;
-    if (_streamTextThrottle) { _streamTextPending = true; return; }
-    renderStreaming();
-    _streamTextThrottle = setTimeout(() => {
-      _streamTextThrottle = null;
-      if (_streamTextPending) { _streamTextPending = false; if (_container && getState('case.view') === 'streaming') renderStreaming(); }
-    }, STREAM_RENDER_THROTTLE_MS);
-  }));
+  _unsubs.push(subscribe('case.streamText', throttledStreamRender));
   _unsubs.push(subscribe('case.caseRecord', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
-  _unsubs.push(subscribe('case.caseSummary', () => {
-    if (!_container) return;
-    const v = getState('case.view');
-    if (v === 'progressive') updateProgressiveSummary();
-    else if (v === 'streaming') updateStreamingSummary();
-  }));
+  _unsubs.push(subscribe('case.caseSummary', throttledSummaryRender));
   _unsubs.push(subscribe('case.caseCompleteness', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
   _unsubs.push(subscribe('case.detectedPts', () => { if (_container && getState('case.view') === 'progressive') scheduleRender(); }));
   _unsubs.push(subscribe('case.prodDocGap', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'result') deferredRenderByView(); } }));
-  _unsubs.push(subscribe('case.knownIssues', () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'streaming' || v === 'result') deferredRenderByView(); } }));
+  for (const key of ['case.knownIssues', 'case.kiError']) {
+    _unsubs.push(subscribe(key, () => { if (_container) { const v = getState('case.view'); if (v === 'progressive') scheduleRender(); else if (v === 'streaming' || v === 'result') deferredRenderByView(); } }));
+  }
   _unsubs.push(subscribe('case.topArticles', () => {
     if (!_container) return;
     const view = getState('case.view');
     if (view === 'streaming') renderStreaming();
     else if (view === 'result' || view === 'progressive') deferredRenderByView();
   }));
-  _unsubs.push(subscribe('case.suggestionDeltas', () => {
-    if (!_container || getState('case.view') !== 'streaming') return;
-    if (_suggestionThrottle) { _suggestionPending = true; return; }
-    renderStreaming();
-    _suggestionThrottle = setTimeout(() => {
-      _suggestionThrottle = null;
-      if (_suggestionPending) {
-        _suggestionPending = false;
-        if (_container && getState('case.view') === 'streaming') renderStreaming();
-      }
-    }, STREAM_RENDER_THROTTLE_MS);
-  }));
+  _unsubs.push(subscribe('case.suggestionDeltas', throttledStreamRender));
 
   const pending = getState('case.pendingUrl');
   if (pending) {
@@ -131,9 +155,8 @@ export function mount(container) {
 export function unmount() {
   _unsubs.forEach(u => u());
   _unsubs = [];
-  if (_port) { try { _port.disconnect(); } catch {} _port = null; }
-  if (_streamTextThrottle) { clearTimeout(_streamTextThrottle); _streamTextThrottle = null; }
-  if (_suggestionThrottle) { clearTimeout(_suggestionThrottle); _suggestionThrottle = null; }
+  throttledStreamRender.cancel();
+  throttledSummaryRender.cancel();
   if (_typeaheadTimer) { clearTimeout(_typeaheadTimer); _typeaheadTimer = null; }
   if (_renderRaf) { cancelAnimationFrame(_renderRaf); _renderRaf = null; }
   _container = null;
@@ -143,8 +166,8 @@ export function unmount() {
 }
 
 async function loadRecentCases() {
-  const data = await localGet(['recentCases', 'sidebarWidth']);
-  if (data.recentCases) setState('case.recent', data.recentCases);
+  const data = await localGet([STORAGE_KEYS.RECENT_CASES, 'sidebarWidth']);
+  if (data[STORAGE_KEYS.RECENT_CASES]) setState('case.recent', data[STORAGE_KEYS.RECENT_CASES]);
   if (data.sidebarWidth) _sidebarWidth = Math.max(220, Math.min(500, data.sidebarWidth));
 }
 
@@ -191,25 +214,26 @@ function buildStopButton() {
   );
 }
 
-async function submitInlineSearch() {
-  const input = document.getElementById('case-inline-search');
-  const val = (input?.value || '').trim().replace(/^#/, '');
-  if (!val) return;
-
-  let caseId = extractCaseId(val);
-  if (!caseId) {
-    if (/^[a-zA-Z0-9]{15,18}$/.test(val)) {
-      caseId = val;
-    } else if (/^\d{3,15}$/.test(val)) {
-      const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: val });
-      if (resp?.success) caseId = resp.caseId;
-      else { toast(resp?.error || 'Case not found', 'error'); return; }
-    } else {
-      toast('Invalid input. Use a case number, ID, or URL.', 'error');
-      return;
-    }
+async function resolveCaseInput(raw) {
+  const value = (raw || '').trim().replace(/^#/, '');
+  if (!value) { toast('Enter a Case number or ID.', 'error'); return null; }
+  const fromUrl = extractCaseId(value);
+  if (fromUrl) return fromUrl;
+  if (/^[a-zA-Z0-9]{15,18}$/.test(value)) return value;
+  if (/^\d{3,15}$/.test(value)) {
+    toast('Resolving case number…', 'info');
+    const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: value });
+    if (resp?.success) return resp.caseId;
+    toast(resp?.error || ('Case not found: ' + value), 'error');
+    return null;
   }
-  startAnalysis(caseId);
+  toast('Invalid input. Enter a case number (digits), Salesforce ID (15-18 chars), or case URL.', 'error');
+  return null;
+}
+
+async function submitInlineSearch() {
+  const caseId = await resolveCaseInput(document.getElementById('case-inline-search')?.value);
+  if (caseId) startAnalysis(caseId);
 }
 
 let _typeaheadTimer = null;
@@ -310,7 +334,6 @@ function renderProgressive() {
   const caseAbstract = getState('case.caseAbstract');
   const topArticles = getState('case.topArticles') || [];
   const prodDocGap = getState('case.prodDocGap');
-  const knownIssues = getState('case.knownIssues') || [];
   const progress = getState('case.progress') || { step: 0, label: 'Starting…' };
 
   const grid = buildResizableGrid();
@@ -319,7 +342,7 @@ function renderProgressive() {
 
   if (topArticles.length) sidebar.appendChild(renderSidebarArticles(topArticles));
   else sidebar.appendChild(h('div', { class: 'skeleton', style: { height: '60px', marginBottom: '12px' } }));
-  if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
+  appendSidebarExtras(sidebar);
 
   if (caseRecord) {
     main.appendChild(renderCaseDetailsCard(caseRecord, completeness, detectedPts, caseAbstract));
@@ -375,7 +398,7 @@ function updateStreamingSummary() {
 function afScorePill(key) {
   const ds = (getState('case.draftScores') || {})[key];
   const scoring = (getState('case.scoringInProgress') || []).includes(key);
-  if (ds) return h('span', { class: `pill pill--${ds.overall >= 75 ? 'success' : ds.overall >= 50 ? 'warning' : 'error'}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`);
+  if (ds) return h('span', { class: `pill pill--${scoreColor(ds.overall)}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`);
   if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, streamingDots(), 'AF: scoring');
   return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …');
 }
@@ -411,10 +434,7 @@ function fillStreamingSidebar(sidebar, topArticles) {
     sidebar.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0', fontSize: '12px', color: 'var(--primary)' } }, streamingDots(), h('span', null, 'Evaluating')));
   }
   sidebar.appendChild(renderSidebarArticles(topArticles));
-  const knownIssues = getState('case.knownIssues') || [];
-  if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
-  const productDocs = getState('case.productDocs') || [];
-  if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
+  appendSidebarExtras(sidebar);
 }
 
 function renderStreaming() {
@@ -468,28 +488,17 @@ function renderStreaming() {
     }
   }
 
-  if (suggestions.length) {
-    const grouped = groupByArticle(suggestions);
-    for (const [key, sugs] of Object.entries(grouped)) {
-      const existingCard = mainEl.querySelector(`.sug-card-done[data-group-key="${key}"]`);
-      const renderedCount = existingCard ? Number(existingCard.dataset.sugCount || 0) : 0;
-      if (existingCard && renderedCount === sugs.length) continue;
-
-      const inProgress = mainEl.querySelector(`#sug-progress-${key}`);
-      if (inProgress) inProgress.remove();
-      const card = (sugs[0]?.isFullRewrite) ? renderFullRewriteCard(sugs[0]) : renderArticleSuggestionCard(sugs);
-      card.classList.add('sug-card-done');
-      card.dataset.groupKey = key;
-      card.dataset.sugCount = String(sugs.length);
-      if (existingCard) {
-        existingCard.replaceWith(card);
-      } else {
-        card.style.animation = 'fadeIn 0.3s ease-in';
-        const loadingEl = mainEl.querySelector('#stream-loading');
-        if (loadingEl) mainEl.insertBefore(card, loadingEl);
-        else mainEl.appendChild(card);
-      }
-    }
+  for (const sug of suggestions) {
+    const key = sug.articleId;
+    if (mainEl.querySelector(`.sug-card-done[data-group-key="${key}"]`)) continue;
+    mainEl.querySelector(`#sug-progress-${key}`)?.remove();
+    const card = renderFullRewriteCard(sug);
+    card.classList.add('sug-card-done');
+    card.dataset.groupKey = key;
+    card.style.animation = 'fadeIn 0.3s ease-in';
+    const loadingEl = mainEl.querySelector('#stream-loading');
+    if (loadingEl) mainEl.insertBefore(card, loadingEl);
+    else mainEl.appendChild(card);
   }
 
   for (const [articleId, deltaText] of Object.entries(suggestionDeltas)) {
@@ -624,10 +633,7 @@ function renderResult() {
       const topArticles = getState('case.topArticles') || [];
       sidebar.appendChild(renderSidebarQuality(structured));
       sidebar.appendChild(renderSidebarArticles(topArticles));
-      const knownIssues = getState('case.knownIssues') || [];
-      if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
-      const productDocs = getState('case.productDocs') || [];
-      if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
+      appendSidebarExtras(sidebar);
     }
     return;
   }
@@ -672,10 +678,7 @@ function renderResult() {
 
   sidebar.appendChild(renderSidebarQuality(structured));
   sidebar.appendChild(renderSidebarArticles(topArticles));
-  const knownIssues = getState('case.knownIssues') || [];
-  if (knownIssues.length) sidebar.appendChild(renderSidebarKnownIssues(knownIssues));
-  const productDocs = getState('case.productDocs') || [];
-  if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
+  appendSidebarExtras(sidebar);
 
   const caseRecord = getState('case.caseRecord');
   const completeness = getState('case.caseCompleteness');
@@ -761,37 +764,28 @@ function renderResult() {
   const kiSuggestion = getState('case.kiSuggestion');
   if (kiSuggestion) main.appendChild(renderKiSuggestionCard(kiSuggestion, result));
 
-  if (structured.suggestions?.length) {
-    for (const sug of structured.suggestions) {
-      if (sug.isFullRewrite) {
-        main.appendChild(renderFullRewriteCard(sug));
-      } else {
-        const grouped = groupByArticle([sug]);
-        for (const [, sugs] of Object.entries(grouped)) {
-          main.appendChild(renderArticleSuggestionCard(sugs));
-        }
-      }
-    }
-  }
+  for (const sug of (structured.suggestions || [])) main.appendChild(renderFullRewriteCard(sug));
+  for (const article of _updatingArticles.values()) main.appendChild(renderUpdatingCard(article));
 
   if (structured.newArticleDraft) {
     const draft = structured.newArticleDraft;
     const draftCollapsed = _collapsedSections['new-draft'] || false;
     const draftCard = h('div', { class: 'card', style: { marginBottom: '12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
 
-    const draftHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--primary-soft)', borderBottom: draftCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!draftCollapsed) clearEditingForPrefix('draft-section-'); _collapsedSections['new-draft'] = !_collapsedSections['new-draft']; renderByView(); } },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-        h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, draftCollapsed ? '▶' : '▼'),
+    draftCard.appendChild(cardCollapseHeader({
+      key: 'new-draft',
+      editPrefix: 'draft-section-',
+      background: 'var(--primary-soft)',
+      left: [
         h('span', { class: 'pill pill--info', style: { fontSize: '10px' } }, 'NEW'),
         h('span', { style: { fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' } }, draft.title || 'New Article Draft')
-      ),
-      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
+      ],
+      actions: [
         afScorePill('new-draft'),
         h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(draft) }, 'Refine'),
         h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishArticle(draft, result) }, 'Create in ORGCS')
-      )
-    );
-    draftCard.appendChild(draftHeader);
+      ]
+    }));
 
     if (!draftCollapsed) {
       draftCard.appendChild(renderEditableArticleBody(draft, 'draft'));
@@ -801,7 +795,7 @@ function renderResult() {
 
   if (!structured.newArticleDraft && !isNoAction) {
     const createBtn = h('div', { style: { padding: '12px', textAlign: 'center', borderTop: '1px solid var(--border)', marginTop: '8px' } },
-      h('button', { class: 'btn btn--primary', onClick: () => { overrideDecision('CREATE_NEW'); toast('Re-analyze the case to generate a new article draft.', 'info'); } }, '+ Create New Article Instead')
+      h('button', { class: 'btn btn--primary', onClick: () => overrideDecision('CREATE_NEW') }, '+ Create New Article Instead')
     );
     main.appendChild(createBtn);
   }
@@ -1008,7 +1002,15 @@ function collapsibleSectionHeader(key, titleContent) {
   );
 }
 
-function renderSidebarKnownIssues(kiItems) {
+function appendSidebarExtras(sidebar) {
+  const knownIssues = getState('case.knownIssues') || [];
+  const kiError = getState('case.kiError');
+  if (knownIssues.length || kiError) sidebar.appendChild(renderSidebarKnownIssues(knownIssues, kiError));
+  const productDocs = getState('case.productDocs') || [];
+  if (productDocs.length) sidebar.appendChild(renderSidebarProductDocs(productDocs));
+}
+
+function renderSidebarKnownIssues(kiItems, kiError) {
   const isCollapsed = _collapsedSections['known-issues'] || false;
   const section = h('div', { style: { marginBottom: '16px' } });
   const header = collapsibleSectionHeader('known-issues', h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--warning)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, `Known Issues (${kiItems.length})`));
@@ -1016,8 +1018,9 @@ function renderSidebarKnownIssues(kiItems) {
 
   if (!isCollapsed) {
     const body = h('div', null);
+    if (kiError) body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--error)', padding: '4px 0' } }, `Known Issue search failed: ${kiError}`));
     kiItems.forEach(ki => {
-      const kiUrl = `${KI_BASE}/lightning/r/Known_Issue__c/${ki.id}/view`;
+      const kiUrl = ki.url || `${KI_BASE}/lightning/r/Known_Issue__c/${ki.id}/view`;
       const statusColor = ki.status === 'Fixed' ? 'success' : ki.status === 'Solution in Progress' ? 'warning' : 'info';
       body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
@@ -1059,7 +1062,8 @@ function renderSidebarArticles(articles) {
         link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
 
         const previewBtn = previewButton(a.id, { articleNumber: a.articleNumber, title: a.title }, { style: { flexShrink: '0' } });
-        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { flexShrink: '0' }, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, 'Update');
+        const updating = _updatingArticles.has(a.id);
+        const updateBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { flexShrink: '0' }, disabled: updating, onClick: (e) => { e.stopPropagation(); triggerUpdateForArticle(a); } }, updating ? 'Updating…' : 'Update');
 
         const relText = a.score != null ? `Rel: ${a.score}` : 'Rel: —';
         const relColor = a.score != null ? (a.score >= 70 ? 'var(--success)' : a.score >= 50 ? 'var(--primary)' : 'var(--warning)') : 'var(--text-muted)';
@@ -1067,7 +1071,7 @@ function renderSidebarArticles(articles) {
         if (a.reason) relevancePill.setAttribute('data-tooltip', a.reason);
 
         const kbScoreText = a.kbScore != null ? `KB: ${a.kbScore}` : a.kbScoreError ? 'KB: err' : 'KB: …';
-        const kbColor = a.kbScore != null ? (a.kbScore >= 80 ? 'var(--success)' : a.kbScore >= 60 ? 'var(--warning)' : 'var(--error)') : 'var(--text-muted)';
+        const kbColor = a.kbScore != null ? `var(--${scoreColor(a.kbScore)})` : 'var(--text-muted)';
         const kbPill = h('span', { style: { fontSize: '10px', color: kbColor, cursor: 'pointer' } }, kbScoreText);
         kbPill.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1155,12 +1159,13 @@ function renderSidebarQuality(structured) {
       ? Math.round((avgKbScore * 0.4) + (confidenceScore * 0.3) + (actionScore * 0.3))
       : Math.round((confidenceScore * 0.5) + (actionScore * 0.5));
   }
-  const scoreColor = readinessScore >= 75 ? 'var(--success)' : readinessScore >= 50 ? 'var(--warning)' : 'var(--error)';
-  const scoreLabel = readinessScore >= 75 ? 'AGF Ready' : readinessScore >= 50 ? 'Needs Work' : 'Not Ready';
+  const readinessVariant = scoreColor(readinessScore);
+  const readinessColor = `var(--${readinessVariant})`;
+  const scoreLabel = { success: 'AGF Ready', warning: 'Needs Work', error: 'Not Ready' }[readinessVariant];
 
   const header = collapsibleSectionHeader('quality', h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
     h('span', { style: { fontSize: '11px', fontWeight: '600', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px' } }, 'AF Readiness'),
-    h('span', { style: { fontSize: '14px', fontWeight: '700', color: scoreColor } }, `${readinessScore}`)
+    h('span', { style: { fontSize: '14px', fontWeight: '700', color: readinessColor } }, `${readinessScore}`)
   ));
   section.appendChild(header);
 
@@ -1168,10 +1173,10 @@ function renderSidebarQuality(structured) {
     const body = h('div', { style: { fontSize: '11px' } });
 
     const barOuter = h('div', { style: { width: '100%', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' } });
-    barOuter.appendChild(h('div', { style: { width: `${readinessScore}%`, height: '100%', background: scoreColor, borderRadius: '3px', transition: 'width 0.3s' } }));
+    barOuter.appendChild(h('div', { style: { width: `${readinessScore}%`, height: '100%', background: readinessColor, borderRadius: '3px', transition: 'width 0.3s' } }));
     body.appendChild(barOuter);
     body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '8px' } },
-      h('span', { style: { color: scoreColor, fontWeight: '600' } }, scoreLabel),
+      h('span', { style: { color: readinessColor, fontWeight: '600' } }, scoreLabel),
       h('span', { style: { color: 'var(--text-muted)' } }, `${readinessScore}/100`)
     ));
 
@@ -1240,12 +1245,12 @@ function renderSidebarProductDocs(docs) {
       const link = h('a', { href: d.url, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', lineHeight: '1.3', textDecoration: 'none' } }, d.title || 'Untitled');
       link.addEventListener('mouseenter', () => { link.style.textDecoration = 'underline'; });
       link.addEventListener('mouseleave', () => { link.style.textDecoration = 'none'; });
-      const scoreColor = d._relevanceScore >= 70 ? 'var(--success)' : d._relevanceScore >= 50 ? 'var(--warning)' : 'var(--text-muted)';
+      const relColor = d._relevanceScore >= 70 ? 'var(--success)' : d._relevanceScore >= 50 ? 'var(--warning)' : 'var(--text-muted)';
       body.appendChild(h('div', { style: { padding: '5px 0', borderBottom: '1px solid var(--border)' } },
         link,
         d.summary ? h('div', { style: { fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px', lineHeight: '1.3' } }, d.summary.slice(0, 120)) : null,
         h('div', { style: { display: 'flex', gap: '4px', alignItems: 'center', marginTop: '3px' } },
-          d._relevanceScore ? h('span', { style: { fontSize: '9px', fontWeight: '600', color: scoreColor } }, `${d._relevanceScore}%`) : null,
+          d._relevanceScore ? h('span', { style: { fontSize: '9px', fontWeight: '600', color: relColor } }, `${d._relevanceScore}%`) : null,
           h('span', { class: 'pill pill--info', style: { fontSize: '9px' } }, 'Product Doc')
         )
       ));
@@ -1256,67 +1261,29 @@ function renderSidebarProductDocs(docs) {
 }
 
 
-function renderArticleSuggestionCard(sugs) {
-  const articleNumber = sugs[0].articleNumber;
-  const articleTitle = sugs[0].articleTitle;
-  const articleId = sugs[0].articleId;
-  const artLink = articleUrl(articleId);
-  const collapseKey = `sug-${articleId}`;
-  const isCollapsed = _collapsedSections[collapseKey] || false;
-
-  const card = h('div', { class: 'card', style: { marginBottom: '16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
-
-  const collapseIcon = h('span', { style: { fontSize: '10px', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 4px' } }, isCollapsed ? '▶' : '▼');
-  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!isCollapsed) clearEditingForPrefix(`${collapseKey}-`); _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
+function cardCollapseHeader({ key, editPrefix, background, left, actions }) {
+  const isCollapsed = _collapsedSections[key] || false;
+  const toggle = () => {
+    if (!isCollapsed) clearEditingForPrefix(editPrefix);
+    _collapsedSections[key] = !isCollapsed;
+    renderByView();
+  };
+  return h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background, borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: toggle },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-      collapseIcon,
-      h('a', { href: artLink, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${articleNumber}`),
-      h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, articleTitle || 'Untitled')
+      h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
+      ...left
     ),
-    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
-      h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, `${sugs.length} suggestion${sugs.length > 1 ? 's' : ''}`),
-      h('button', { class: 'btn btn--ghost btn--sm', onClick: () => copyAll(sugs) }, 'Copy All')
-    )
+    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() }, ...actions)
   );
-  card.appendChild(cardHeader);
+}
 
-  if (!isCollapsed) {
-    const cardBody = h('div', { style: { padding: '0' } });
-    sugs.forEach((sug, i) => {
-      const id = `sug-${sug.articleId}-${i}`;
-      const isLast = i === sugs.length - 1;
-
-      const sugContainer = h('div', { style: { padding: '14px 16px', borderBottom: isLast ? 'none' : '1px solid var(--border)' } });
-
-      const headerRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } },
-        h('span', { class: `pill pill--${impactColor(sug.impact)}`, style: { fontSize: '10px', padding: '2px 8px' } }, sug.impact || 'MEDIUM'),
-        h('span', { style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-primary)', flex: '1' } }, sug.title || `Suggestion ${i + 1}`)
-      );
-      sugContainer.appendChild(headerRow);
-
-      if (sug.location) {
-        sugContainer.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px' } },
-          h('span', { style: { fontWeight: '500' } }, 'Section:'),
-          h('span', null, sug.location)
-        ));
-      }
-
-      sugContainer.appendChild(editableRichField({
-        label: 'Suggested Content',
-        getValue: () => sug.content || '',
-        setValue: (v) => { sug.content = v; },
-        rows: 8,
-        onRefine: () => runRefineFlow(() => sug.content || '', (v) => { sug.content = v; }, sug.title || sug.location || 'Suggestion'),
-        editing: _editingSections.has(id),
-        onEditingChange: (isEditing) => { if (isEditing) startEditing(id); else stopEditing(id); }
-      }));
-
-      cardBody.appendChild(sugContainer);
-    });
-    card.appendChild(cardBody);
-  }
-
-  return card;
+function renderUpdatingCard(article) {
+  return h('div', { class: 'card', style: { marginBottom: '16px', padding: '12px 16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: '8px' } },
+    streamingDots(),
+    h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, 'REWRITE'),
+    h('span', { style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontWeight: '600' } }, `#${article.articleNumber || ''}`),
+    h('span', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, `Generating rewrite for ${article.title || 'article'}…`)
+  );
 }
 
 function renderFullRewriteCard(rewrite) {
@@ -1326,21 +1293,22 @@ function renderFullRewriteCard(rewrite) {
 
   const card = h('div', { class: 'card', style: { marginBottom: '16px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } });
 
-  const cardHeader = h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: 'var(--surface-raised)', borderBottom: isCollapsed ? 'none' : '1px solid var(--border)', cursor: 'pointer' }, onClick: () => { if (!isCollapsed) clearEditingForPrefix(`${collapseKey}-section-`); _collapsedSections[collapseKey] = !_collapsedSections[collapseKey]; renderByView(); } },
-    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-      h('span', { style: { fontSize: '10px', color: 'var(--text-muted)' } }, isCollapsed ? '▶' : '▼'),
+  card.appendChild(cardCollapseHeader({
+    key: collapseKey,
+    editPrefix: `${collapseKey}-section-`,
+    background: 'var(--surface-raised)',
+    left: [
       h('span', { class: 'pill pill--warning', style: { fontSize: '10px' } }, 'REWRITE'),
       h('a', { href: rewriteLink, target: '_blank', rel: 'noopener', style: { fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)', textDecoration: 'none', fontWeight: '600' }, onClick: (e) => e.stopPropagation() }, `#${rewrite.articleNumber}`),
       h('span', { style: { fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' } }, rewrite.title || rewrite.articleTitle)
-    ),
-    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' }, onClick: (e) => e.stopPropagation() },
+    ],
+    actions: [
       afScorePill(`rewrite-${rewrite.articleId}`),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => refineRewrite(rewrite) }, 'Refine'),
       h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showComparisonModal(rewrite) }, 'Compare'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: () => publishUpdate(rewrite, getState('case.result')) }, 'Create New Version in ORGCS')
-    )
-  );
-  card.appendChild(cardHeader);
+    ]
+  }));
 
   if (!isCollapsed) {
     if (rewrite.changesSummary) {
@@ -1418,8 +1386,6 @@ function renderEditableSection({ heading, getValue, setValue, plain = false, sin
 }
 
 function renderEditableArticleBody(obj, prefix, { titleFallback } = {}) {
-  if (obj.summary) obj.summary = htmlBodyToMarkdown(obj.summary).replace(/^#+\s*/gm, '').trim();
-  for (const sec of (obj.sections || [])) sec.body = htmlBodyToMarkdown(sec.body || '');
   const container = h('div', { style: { padding: '14px 16px' } });
   container.appendChild(renderEditableSection({
     heading: 'Title',
@@ -1477,7 +1443,7 @@ function refineRewrite(rewrite) {
         focus
       });
       if (resp?.success && resp.refined) {
-        const lines = htmlBodyToMarkdown(resp.refined).split('\n');
+        const lines = toMarkdownBody(resp.refined).split('\n');
         let newTitle = rewrite.title;
         let newSummary = rewrite.summary;
         const newSections = [];
@@ -1523,11 +1489,10 @@ function showScoreInsights(draftScores) {
   const content = h('div', null);
   for (const [key, scoreData] of Object.entries(draftScores)) {
     const label = key === 'new-draft' ? 'New Article Draft' : `Rewrite ${key.replace('rewrite-', '#')}`;
-    const scoreColor = scoreData.overall >= 75 ? 'var(--success)' : scoreData.overall >= 50 ? 'var(--warning)' : 'var(--error)';
     const articleSection = h('div', { style: { marginBottom: '16px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
         h('span', { style: { fontWeight: '600', fontSize: '13px' } }, label),
-        h('span', { style: { fontWeight: '700', fontSize: '14px', color: scoreColor } }, `${scoreData.overall}/100`)
+        h('span', { style: { fontWeight: '700', fontSize: '14px', color: `var(--${scoreColor(scoreData.overall)})` } }, `${scoreData.overall}/100`)
       )
     );
     if (scoreData.criteria?.length) {
@@ -1577,7 +1542,7 @@ function runRefineFlow(getValue, setValue, title) {
         focus
       });
       if (resp?.success && resp.refined) {
-        setValue(htmlBodyToMarkdown(resp.refined));
+        setValue(toMarkdownBody(resp.refined));
         renderByView();
         toast('Section refined.', 'success');
       } else {
@@ -1592,17 +1557,16 @@ function runRefineFlow(getValue, setValue, title) {
 async function triggerUpdateForArticle(article) {
   const result = getState('case.result');
   if (!result) { toast('No analysis result available.', 'error'); return; }
-
-  const existingSuggestions = result.structured?.suggestions || [];
-  const alreadyHasRewrite = existingSuggestions.some(s => s.articleId === article.id);
-  if (alreadyHasRewrite) {
+  if (_updatingArticles.has(article.id)) return;
+  if ((result.structured?.suggestions || []).some(s => s.articleId === article.id)) {
     toast('A rewrite for this article already exists below.', 'info');
     return;
   }
 
-  toast('Generating rewrite (streaming)…', 'info');
-  setState('case.view', 'streaming');
-  setState('case.suggestionDeltas', { [article.id]: '' });
+  const gen = _analysisGen;
+  _updatingArticles.set(article.id, article);
+  deferredRenderByView();
+  toast('Generating rewrite…', 'info');
 
   try {
     const resp = await chrome.runtime.sendMessage({
@@ -1614,29 +1578,28 @@ async function triggerUpdateForArticle(article) {
       caseSubject: result.subject,
       caseAbstract: result.caseAbstract
     });
+    if (gen !== _analysisGen) return;
     if (resp?.success && resp.rewrite) {
-      const newSuggestion = {
+      const newSuggestion = normalizeArticleDraft({
         ...resp.rewrite,
         articleId: article.id,
         articleNumber: article.articleNumber,
         articleTitle: article.title,
         isFullRewrite: true,
         changesSummary: 'Manual update triggered from sidebar'
-      };
-      const newStructured = {
-        ...(result.structured || {}),
-        suggestions: [...(result.structured?.suggestions || []), newSuggestion]
-      };
-      setState('case.result', { ...result, structured: newStructured });
+      });
+      const latest = getState('case.result');
+      _updatingArticles.delete(article.id);
+      setState('case.result', { ...latest, structured: { ...(latest.structured || {}), suggestions: [...(latest.structured?.suggestions || []), newSuggestion] } });
       toast('Rewrite generated.', 'success');
     } else {
       toast(resp?.error || 'Generation failed.', 'error');
     }
   } catch (e) {
-    toast('Failed: ' + e.message, 'error');
+    if (gen === _analysisGen) toast('Failed: ' + e.message, 'error');
+  } finally {
+    if (gen === _analysisGen && _updatingArticles.delete(article.id)) deferredRenderByView();
   }
-  setState('case.suggestionDeltas', {});
-  setState('case.view', 'result');
 }
 
 function overrideDecision(newAction) {
@@ -1651,19 +1614,19 @@ function overrideDecision(newAction) {
     return;
   }
 
-  const newStructured = {
-    ...(result.structured || {}),
-    action: newAction,
-    summary: `User override: Suggesting updates.`
-  };
-  setState('case.result', { ...result, structured: newStructured });
-  renderByView();
+  const structured = result.structured || {};
+  const candidates = (structured.coveringArticles?.length ? structured.coveringArticles : getState('case.topArticles') || []).slice(0, 2);
+  if (!candidates.length) { toast('No existing articles to update.', 'error'); return; }
+  setState('case.result', { ...result, structured: { ...structured, action: 'UPDATE_EXISTING', summary: 'User override: generating updates for the closest existing articles.' } });
+  candidates.forEach(triggerUpdateForArticle);
 }
 
 function triggerNewArticleGeneration(caseId) {
   if (_port) { try { _port.disconnect(); } catch {} _port = null; }
 
   const gen = ++_analysisGen;
+  _updatingArticles.clear();
+  const caseAbstract = getState('case.result')?.caseAbstract || getState('case.caseAbstract') || null;
   setState('case.view', 'streaming');
   setState('case.streamText', '');
   setState('case.suggestions', []);
@@ -1671,27 +1634,20 @@ function triggerNewArticleGeneration(caseId) {
   setState('case.progress', { step: 0, label: 'Generating new article…' });
 
   _port = chrome.runtime.connect({ name: 'kba-analyze' });
-  _port.postMessage({ action: 'GENERATE_NEW_ARTICLE', caseId });
+  _port.postMessage({ action: 'GENERATE_NEW_ARTICLE', caseId, caseAbstract });
   _port.onMessage.addListener((msg) => {
     if (gen !== _analysisGen) return;
-    if (msg.type === 'delta') {
-      setState('case.streamText', (getState('case.streamText') || '') + msg.chunk);
-    } else if (msg.type === 'streaming-start') {
+    if (msg.type === 'streaming-start') {
       setState('case.streamText', '');
     } else if (msg.type === 'result') {
       const existingResult = getState('case.result') || {};
-      setState('case.result', { ...existingResult, structured: msg.structured });
+      setState('case.result', { ...existingResult, structured: normalizeStructured(msg.structured) });
       setState('case.view', 'result');
-    } else if (msg.type === 'meta') {
-      if (msg.draftScore) {
-        const scores = getState('case.draftScores') || {};
-        scores[msg.draftScore.key] = msg.draftScore.score;
-        setState('case.draftScores', { ...scores });
-      }
-      if (msg.scoringInProgress) setState('case.scoringInProgress', msg.scoringInProgress);
     } else if (msg.type === 'error') {
       toast(msg.error, 'error');
       setState('case.view', 'result');
+    } else {
+      onPortMessage(msg);
     }
   });
   _port.onDisconnect.addListener(() => {
@@ -1703,34 +1659,6 @@ function triggerNewArticleGeneration(caseId) {
     }
   });
 }
-
-
-
-function groupByArticle(suggestions) {
-  const groups = {};
-  for (const sug of suggestions) {
-    const key = sug.articleId || 'unknown';
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(sug);
-  }
-  return groups;
-}
-
-
-function impactColor(impact) {
-  switch ((impact || '').toUpperCase()) {
-    case 'HIGH': case 'CRITICAL': return 'error';
-    case 'MEDIUM': return 'warning';
-    case 'LOW': return 'info';
-    default: return 'neutral';
-  }
-}
-
-function copyAll(suggestions) {
-  const text = suggestions.map(s => `## ${s.title}\nLocation: ${s.location || 'N/A'}\n\n${s.content || ''}`).join('\n\n---\n\n');
-  navigator.clipboard.writeText(text).then(() => toast('Copied.', 'success'));
-}
-
 
 function hideTypeahead() {
   const dropdown = document.getElementById('case-typeahead');
@@ -1764,21 +1692,8 @@ async function searchCases(query) {
 
 async function onAnalyzeClick() {
   hideTypeahead();
-  const input = document.getElementById('case-input');
-  const value = (input?.value || '').trim().replace(/^#/, '');
-  if (!value) { toast('Enter a Case number or ID.', 'error'); return; }
-
-  let caseId = extractCaseId(value);
-  if (!caseId) {
-    if (/^[a-zA-Z0-9]{15,18}$/.test(value)) caseId = value;
-    else if (/^\d{3,15}$/.test(value)) {
-      toast('Resolving case number…', 'info');
-      const resp = await chrome.runtime.sendMessage({ action: 'RESOLVE_CASE_NUMBER', caseNumber: value });
-      if (resp?.success) caseId = resp.caseId;
-      else { toast(resp?.error || ('Case not found: ' + value), 'error'); return; }
-    } else { toast('Invalid input. Enter a case number (digits), Salesforce ID (15-18 chars), or case URL.', 'error'); return; }
-  }
-  startAnalysis(caseId);
+  const caseId = await resolveCaseInput(document.getElementById('case-input')?.value);
+  if (caseId) startAnalysis(caseId);
 }
 
 let _analysisGen = 0;
@@ -1794,6 +1709,7 @@ function startAnalysis(caseId, isRetry = false) {
     _pendingBackgroundRender = false;
   }
   const gen = ++_analysisGen;
+  _updatingArticles.clear();
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: isRetry ? 'Reconnecting…' : 'Connecting…' });
   setState('case.result', null);
@@ -1810,6 +1726,7 @@ function startAnalysis(caseId, isRetry = false) {
   setState('case.detectedPts', null);
   setState('case.caseAbstract', null);
   setState('case.knownIssues', null);
+  setState('case.kiError', null);
   setState('case.kiSuggestion', null);
   setState('case.publishedUrl', null);
   setState('case.draftScores', null);
@@ -1832,8 +1749,7 @@ function startAnalysis(caseId, isRetry = false) {
       const isEarlyDisconnect = !getState('case.streamText') && !getState('case.caseSummary');
 
       if (suggestions.length) {
-        const caseRecord = getState('case.caseRecord');
-        setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Connection lost. Showing partial results.', suggestions }, caseNumber: caseRecord?.caseNumber || getState('case.progress')?.caseNumber, subject: caseRecord?.subject || '' });
+        setState('case.result', partialResult('Connection lost. Showing partial results.'));
         setState('case.view', 'result');
       } else if (isEarlyDisconnect && _retryCount < MAX_AUTO_RETRIES) {
         _retryCount++;
@@ -1859,9 +1775,7 @@ function onPortMessage(msg) {
       const hasSuggestions = (getState('case.suggestions') || []).length > 0;
       const hasResult = !!getState('case.result');
       if (hasSuggestions || hasResult) {
-        if (!hasResult) {
-          setState('case.result', { structured: { action: 'UPDATE_EXISTING', confidence: 'LOW', summary: 'Stopped early. Showing partial results.', suggestions: getState('case.suggestions') || [] }, caseNumber: getState('case.caseRecord')?.caseNumber || '', subject: getState('case.caseRecord')?.subject || '' });
-        }
+        if (!hasResult) setState('case.result', partialResult('Stopped early. Showing partial results.'));
         setState('case.view', 'result');
         toast('Processing stopped. Showing partial results.', 'info');
       } else {
@@ -1885,6 +1799,7 @@ function onPortMessage(msg) {
       if (msg.customizationWarning) setState('case.customizationWarning', msg.customizationWarning);
       if (msg.ptWarning) setState('case.ptWarning', msg.ptWarning);
       if (msg.knownIssues) setState('case.knownIssues', msg.knownIssues);
+      if ('kiError' in msg) setState('case.kiError', msg.kiError || null);
       if (msg.kiSuggestion) setState('case.kiSuggestion', msg.kiSuggestion);
       if (msg.scoringInProgress) {
         setState('case.scoringInProgress', msg.scoringInProgress);
@@ -1901,19 +1816,13 @@ function onPortMessage(msg) {
         const currentView = getState('case.view');
         if (currentView === 'analyzing' || currentView === 'progressive') setState('case.view', 'streaming');
         setState('case.topArticles', msg.topArticles);
-        const kbScores = getState('kb.scores') || {};
-        const updated = { ...kbScores };
-        let hasNewScores = false;
-        msg.topArticles.forEach(a => {
-          if (a.kbScore != null) {
-            updated[a.id] = { overall: a.kbScore, criteria: a.kbCriteria || [], error: null, source: 'case-analysis' };
-            hasNewScores = true;
-          } else if (a.score != null && !updated[a.id]) {
-            updated[a.id] = { overall: a.score, criteria: [], error: null, source: 'case-analysis-relevance' };
-          }
-        });
-        setState('kb.scores', updated);
-        if (hasNewScores) localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: updated });
+        const scored = msg.topArticles.filter(a => a.kbScore != null);
+        if (scored.length) {
+          const updated = { ...(getState('kb.scores') || {}) };
+          for (const a of scored) updated[a.id] = { overall: a.kbScore, criteria: a.kbCriteria || [], error: null, source: 'case-analysis' };
+          setState('kb.scores', updated);
+          localSet({ [STORAGE_KEYS.ARTICLE_SCORES]: updated });
+        }
       }
       break;
     }
@@ -1926,7 +1835,7 @@ function onPortMessage(msg) {
     }
     case 'suggestion-ready': {
       const existing = getState('case.suggestions') || [];
-      setState('case.suggestions', [...existing, ...msg.suggestions]);
+      setState('case.suggestions', [...existing, ...msg.suggestions.map(normalizeArticleDraft)]);
       const { [msg.articleId]: _ready, ...restReady } = getState('case.suggestionDeltas') || {};
       setState('case.suggestionDeltas', restReady);
       if (getState('case.view') === 'streaming') renderStreaming();
@@ -1949,6 +1858,7 @@ function onPortMessage(msg) {
         toast(msg.error || 'Analysis failed.', 'error');
         setState('case.view', 'idle');
       } else {
+        normalizeStructured(msg.structured || msg);
         setState('case.result', msg);
         setState('case.view', 'result');
         saveRecentCase(msg);
@@ -1962,10 +1872,10 @@ function onPortMessage(msg) {
 }
 
 async function saveRecentCase(result) {
-  const data = await localGet(['recentCases']);
-  const recent = (data.recentCases || []).filter(c => c.id !== result.caseId);
+  const data = await localGet([STORAGE_KEYS.RECENT_CASES]);
+  const recent = (data[STORAGE_KEYS.RECENT_CASES] || []).filter(c => c.id !== result.caseId);
   recent.unshift({ id: result.caseId, number: result.caseNumber, subject: result.subject, ts: Date.now() });
   const trimmed = recent.slice(0, 10);
-  await localSet({ recentCases: trimmed });
+  await localSet({ [STORAGE_KEYS.RECENT_CASES]: trimmed });
   setState('case.recent', trimmed);
 }

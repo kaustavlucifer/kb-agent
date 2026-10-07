@@ -1,7 +1,8 @@
 import { detectGusSession, pingGusSession } from '../../shared/auth.js';
-import { sfQuery, soqlIdList, escapeSoql, mapWithConcurrency } from '../../shared/api.js';
+import { sfQuery, soqlIdList, escapeSoql, escapeSoqlLike, mapWithConcurrency } from '../../shared/api.js';
 
-const GUS_WORK_ITEM_RE = /\bW-\d{4,8}\b/g;
+export const GUS_WORK_NAME_RE = /^W-\d{4,9}$/;
+const GUS_WORK_ITEM_RE = new RegExp(`\\b${GUS_WORK_NAME_RE.source.slice(1, -1)}\\b`, 'g');
 const WORK_OBJECT = 'ADM_Work__c';
 
 const GUS_FIELDS = [
@@ -64,7 +65,7 @@ export async function fetchGusWorkItems(workNames, signal) {
     const workIds = items.map(i => i.id);
     const loadFeed = async () => {
       try {
-        const feedSoql = `SELECT Id, ParentId, Type, Body, CreatedDate, CreatedBy.Name FROM ADM_Work__Feed WHERE ParentId IN (${soqlIdList(workIds)}) AND Type IN ('TextPost','ContentPost','LinkPost') ORDER BY CreatedDate ASC LIMIT 50`;
+        const feedSoql = `SELECT Id, ParentId, Type, Body, CreatedDate, CreatedBy.Name FROM ADM_Work__Feed WHERE ParentId IN (${soqlIdList(workIds)}) AND Type IN ('TextPost','ContentPost','LinkPost') ORDER BY CreatedDate DESC LIMIT 50`;
         const feedRecords = await sfQuery(apiBase, sid, feedSoql, signal);
         feed = feedRecords.map(r => ({
           workId: r.ParentId,
@@ -106,10 +107,9 @@ export async function searchGusWorkItems(query) {
   if (term.length < 3) return { items: [] };
   const gusSession = await detectGusSession();
   if (!gusSession.sid) return { items: [], error: 'No GUS session. Log into GUS in the browser.' };
-  const workName = term.match(/^W-\d{4,9}$/i);
-  const where = workName
+  const where = GUS_WORK_NAME_RE.test(term.toUpperCase())
     ? `Name = '${escapeSoql(term.toUpperCase())}'`
-    : `RecordType.Name IN ('Bug','Investigation') AND Subject__c LIKE '%${escapeSoql(term).replace(/[%_]/g, '\\$&')}%'`;
+    : `RecordType.Name IN ('Bug','Investigation') AND Subject__c LIKE '%${escapeSoqlLike(term)}%'`;
   try {
     const records = await sfQuery(gusSession.apiBase, gusSession.sid, `SELECT ${GUS_SEARCH_FIELDS.join(', ')} FROM ${WORK_OBJECT} WHERE ${where} ORDER BY LastModifiedDate DESC LIMIT 15`);
     return {

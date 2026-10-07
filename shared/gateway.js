@@ -1,15 +1,11 @@
-import { GATEWAY_BASE, ANTHROPIC_VERSION, ANTHROPIC_CACHE_BETA, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS } from './config.js';
-import { localGet } from './storage.js';
-import { acquireSlot } from './rate-limiter.js';
+import { GATEWAY_BASE, ANTHROPIC_VERSION, ANTHROPIC_CACHE_BETA, DEFAULT_MODEL, FAST_MODEL, CLAUDE_TIMEOUT_MS, STORAGE_KEYS } from './config.js';
+import { localGet, localSet } from './storage.js';
+import { acquireSlot, sleep } from './rate-limiter.js';
 import { recordUsage, usageFromResponse } from './cost.js';
 
 async function getToken() {
-  const data = await localGet(['gatewayToken']);
-  return data.gatewayToken || null;
-}
-
-function getModel(preferFast = false) {
-  return preferFast ? FAST_MODEL : DEFAULT_MODEL;
+  const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN]);
+  return data[STORAGE_KEYS.GATEWAY_TOKEN] || null;
 }
 
 function buildHeaders(token, cache = false) {
@@ -56,14 +52,22 @@ async function fetchGatewayPricing(token) {
   }
 }
 
+async function fetchKeyInfo(token) {
+  const resp = await fetch(`${GATEWAY_BASE}/key/info`, { method: 'GET', headers: buildHeaders(token) });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    return { ok: false, error: `${resp.status}: ${text.slice(0, 100)}` };
+  }
+  const info = (await resp.json())?.info || {};
+  const num = (v) => (Number.isFinite(Number(v)) && v !== null ? Number(v) : null);
+  return { ok: true, limits: { rpmLimit: num(info.rpm_limit), tpmLimit: num(info.tpm_limit), maxParallel: num(info.max_parallel_requests), maxBudget: num(info.max_budget), spend: num(info.spend) } };
+}
+
 export async function fetchGatewayKeyLimits(token) {
   if (!token) return null;
   try {
-    const resp = await fetch(`${GATEWAY_BASE}/key/info`, { method: 'GET', headers: buildHeaders(token) });
-    if (!resp.ok) return null;
-    const info = (await resp.json())?.info || {};
-    const num = (v) => (Number.isFinite(Number(v)) && v !== null ? Number(v) : null);
-    return { rpmLimit: num(info.rpm_limit), tpmLimit: num(info.tpm_limit), maxParallel: num(info.max_parallel_requests), maxBudget: num(info.max_budget), spend: num(info.spend) };
+    const r = await fetchKeyInfo(token);
+    return r.ok ? r.limits : null;
   } catch {
     return null;
   }
@@ -92,22 +96,29 @@ export async function listGatewayModels(token) {
   }
 }
 
+const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export async function refreshModelCatalog({ force = false } = {}) {
+  const data = await localGet([STORAGE_KEYS.MODEL_CATALOG, STORAGE_KEYS.GATEWAY_TOKEN]);
+  const catalog = data[STORAGE_KEYS.MODEL_CATALOG] || null;
+  const fresh = catalog?.at && Date.now() - catalog.at < MODEL_CATALOG_MAX_AGE_MS;
+  if (!force && fresh) return { catalog, refreshed: false };
+  const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
+  if (!token) return { catalog, refreshed: false, error: 'No token configured' };
+  const [models, limits] = await Promise.all([listGatewayModels(token), fetchGatewayKeyLimits(token)]);
+  if (!models?.length) return { catalog, refreshed: false, error: 'Could not load models' };
+  const next = { models, limits, at: Date.now() };
+  await localSet({ [STORAGE_KEYS.MODEL_CATALOG]: next });
+  return { catalog: next, refreshed: true };
+}
+
 export async function pingGateway(token) {
   const t = token || await getToken();
   if (!t) return { connected: false, hasToken: false, error: 'No token configured' };
   try {
-    const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
-      method: 'POST',
-      headers: buildHeaders(t),
-      body: JSON.stringify({
-        model: FAST_MODEL,
-        max_tokens: 10,
-        messages: [{ role: 'user', content: 'ping' }]
-      })
-    });
-    if (resp.ok) return { connected: true, hasToken: true };
-    const text = await resp.text().catch(() => '');
-    return { connected: false, hasToken: true, error: `${resp.status}: ${text.slice(0, 100)}` };
+    const r = await fetchKeyInfo(t);
+    if (r.ok) return { connected: true, hasToken: true };
+    return { connected: false, hasToken: true, error: r.error };
   } catch (e) {
     return { connected: false, hasToken: true, error: e.message };
   }
@@ -138,24 +149,40 @@ function retryDelayMs(attempt, retryAfter, bodyText) {
   return Math.min(1000 * 2 ** attempt + Math.floor(Math.random() * 500), MAX_RETRY_DELAY_MS);
 }
 
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
-    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
-    const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
+function abortError() {
+  return new DOMException('Aborted', 'AbortError');
 }
 
-async function postMessages(token, cache, body, signal) {
+function timeoutError() {
+  return Object.assign(new Error('AI gateway request timed out'), { name: 'TimeoutError', timeout: true });
+}
+
+async function fetchWithTimeout(url, init, signal, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const onAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    signal?.removeEventListener('abort', onAbort);
+    if (timedOut) throw timeoutError();
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postMessages(token, cache, body, signal, timeoutMs) {
   for (let attempt = 0; ; attempt++) {
-    if (attempt > 0) await acquireSlot();
-    const resp = await fetch(`${GATEWAY_BASE}/v1/messages`, {
+    await acquireSlot(signal);
+    const resp = await fetchWithTimeout(`${GATEWAY_BASE}/v1/messages`, {
       method: 'POST',
       headers: buildHeaders(token, cache),
-      body: JSON.stringify(body),
-      signal
-    });
+      body: JSON.stringify(body)
+    }, signal, timeoutMs);
     if (resp.ok || !RETRYABLE_STATUSES.has(resp.status) || attempt >= MAX_GATEWAY_RETRIES) return resp;
     const retryAfter = resp.headers.get('retry-after');
     const bodyText = await resp.text().catch(() => '');
@@ -164,11 +191,10 @@ async function postMessages(token, cache, body, signal) {
 }
 
 export async function callClaude({ system, messages, maxTokens, model, token, temperature, thinking, cache, signal }) {
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  await acquireSlot();
+  if (signal?.aborted) throw abortError();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
-  const m = model || await getModel();
+  const m = model || DEFAULT_MODEL;
   const body = {
     model: m,
     max_tokens: maxTokens || 2048,
@@ -183,21 +209,24 @@ export async function callClaude({ system, messages, maxTokens, model, token, te
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  let readTimedOut = false;
   try {
-    const resp = await postMessages(t, cache, body, controller.signal);
+    const resp = await postMessages(t, cache, body, controller.signal, CLAUDE_TIMEOUT_MS);
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
       const retryAfter = resp.headers.get('retry-after');
       throw Object.assign(new Error(`Gateway ${resp.status}: ${text.slice(0, 200)}`), { status: resp.status, retryAfter });
     }
-    const data = await resp.json();
+    const readTimer = setTimeout(() => { readTimedOut = true; controller.abort(); }, CLAUDE_TIMEOUT_MS);
+    const data = await resp.json().finally(() => clearTimeout(readTimer));
     await recordUsage(data.model || m, usageFromResponse(data));
     return data;
+  } catch (e) {
+    if (readTimedOut) throw timeoutError();
+    throw e;
   } finally {
-    clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
@@ -209,11 +238,10 @@ export async function callClaudeFast(opts) {
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
 
 export async function streamClaude({ system, messages, maxTokens, model, token, temperature, cache, onDelta, onDone, onError, signal }) {
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  await acquireSlot();
+  if (signal?.aborted) throw abortError();
   const t = token || await getToken();
   if (!t) throw new Error('No AI gateway token configured');
-  const m = model || await getModel();
+  const m = model || DEFAULT_MODEL;
   const body = {
     model: m,
     max_tokens: maxTokens || 4096,
@@ -228,7 +256,7 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const onAbort = () => controller.abort();
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
-  const resp = await postMessages(t, cache, body, controller.signal).catch(err => {
+  const resp = await postMessages(t, cache, body, controller.signal, CLAUDE_TIMEOUT_MS).catch(err => {
     if (signal) signal.removeEventListener('abort', onAbort);
     if (onError) onError(err);
     throw err;
@@ -257,6 +285,31 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
   const streamUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   let idleTimer = setTimeout(() => { idleAborted = true; controller.abort(); }, STREAM_IDLE_TIMEOUT_MS);
 
+  const handleLine = (line) => {
+    if (!line.startsWith('data: ')) return;
+    const payload = line.slice(6).trim();
+    if (payload === '[DONE]') return;
+    let event;
+    try { event = JSON.parse(payload); } catch { return; }
+    if (event.type === 'content_block_delta' && event.delta?.text) {
+      fullText += event.delta.text;
+      if (onDelta) onDelta(event.delta.text, fullText);
+    } else if (event.type === 'message_start' && event.message) {
+      streamModel = event.message.model || streamModel;
+      const u = event.message.usage || {};
+      streamUsage.inputTokens = u.input_tokens || 0;
+      streamUsage.cacheReadTokens = u.cache_read_input_tokens || 0;
+      streamUsage.cacheCreationTokens = u.cache_creation_input_tokens || 0;
+    } else if (event.type === 'message_delta') {
+      if (event.usage) streamUsage.outputTokens = event.usage.output_tokens || streamUsage.outputTokens;
+      if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
+    } else if (event.type === 'error') {
+      const streamErr = new Error(`Gateway stream error: ${event.error?.type || 'error'}${event.error?.message ? ` — ${event.error.message}` : ''}`);
+      streamErr.partialText = fullText;
+      throw streamErr;
+    }
+  };
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -267,29 +320,10 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6).trim();
-        if (payload === '[DONE]') continue;
-        try {
-          const event = JSON.parse(payload);
-          if (event.type === 'content_block_delta' && event.delta?.text) {
-            fullText += event.delta.text;
-            if (onDelta) onDelta(event.delta.text, fullText);
-          } else if (event.type === 'message_start' && event.message) {
-            streamModel = event.message.model || streamModel;
-            const u = event.message.usage || {};
-            streamUsage.inputTokens = u.input_tokens || 0;
-            streamUsage.cacheReadTokens = u.cache_read_input_tokens || 0;
-            streamUsage.cacheCreationTokens = u.cache_creation_input_tokens || 0;
-          } else if (event.type === 'message_delta') {
-            if (event.usage) streamUsage.outputTokens = event.usage.output_tokens || streamUsage.outputTokens;
-            if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
-          }
-        } catch {}
-      }
+      for (const line of lines) handleLine(line);
     }
+    buffer += decoder.decode();
+    if (buffer) handleLine(buffer);
   } catch (err) {
     if (idleAborted) {
       const stallErr = new Error('Stream stalled (no data received within idle timeout)');
@@ -301,6 +335,8 @@ export async function streamClaude({ system, messages, maxTokens, model, token, 
       await recordUsage(streamModel, streamUsage);
       throw err;
     }
+    controller.abort();
+    await recordUsage(streamModel, streamUsage);
     if (onError) onError(err);
     throw err;
   } finally {

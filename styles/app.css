@@ -505,13 +505,6 @@ body {
   30% { opacity: 1; transform: scale(1.2); }
 }
 
-/* ─── Stats Bar ─── */
-
-
-
-
-
-
 /* ─── Empty State ─── */
 
 .empty-state {
@@ -633,9 +626,20 @@ body {
 /* ─── Multi-select ─── */
 
 .multi-select__dropdown {
-  margin-top: 4px;
-  left: 0;
+  position: absolute;
   top: 100%;
+  left: 0;
+  margin-top: 4px;
+  flex-direction: column;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: hidden;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  z-index: 500;
   animation: slideUp 0.15s ease-out;
 }
 
@@ -664,7 +668,7 @@ body {
 
 /* ─── Inline Code ─── */
 
-code, .code-inline {
+code {
   font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--surface-raised);
@@ -673,7 +677,7 @@ code, .code-inline {
   padding: 1px 5px;
 }
 
-pre, .code-block {
+pre {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   background: var(--surface-raised);
@@ -714,12 +718,6 @@ pre, .code-block {
 /* ─── Focus Visible ─── */
 
 :focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-
-input:focus-visible,
-.btn:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }

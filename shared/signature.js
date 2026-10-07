@@ -1,16 +1,7 @@
 import { sfPost, sfGet } from './api.js';
 import { SF_API_VERSION } from './config.js';
 
-const SIGNATURE_PHRASE = 'Do not remove this line for KB Agent tracking';
-
-export const CASE_SCAN_RX = /KB Agent case-scan marker\(Do not remove this line for KB Agent tracking\)/i;
-export const ARTICLE_SCORED_RX = /KB Agent article-score marker\(Do not remove this line for KB Agent tracking\)/i;
-export const REWRITE_GENERATED_RX = /KB Agent rewrite-generated marker\(Do not remove this line for KB Agent tracking\)/i;
-export const REWRITE_PUBLISHED_RX = /KB Agent rewrite-published marker\(Do not remove this line for KB Agent tracking\)/i;
-export const KI_CREATED_RX = /KB Agent ki-created marker\(Do not remove this line for KB Agent tracking\)/i;
-export const KI_UPDATED_RX = /KB Agent ki-updated marker\(Do not remove this line for KB Agent tracking\)/i;
-export const KI_REWRITE_GENERATED_RX = /KB Agent ki-rewrite-generated marker\(Do not remove this line for KB Agent tracking\)/i;
-export const KI_SCORED_RX = /KB Agent ki-scored marker\(Do not remove this line for KB Agent tracking\)/i;
+export const SIGNATURE_PHRASE = 'Do not remove this line for KB Agent tracking';
 
 const MARKER_SPECS = {
   'case-scan': { label: 'Case scanned', suffix: 'case-scan marker' },
@@ -31,17 +22,16 @@ function buildMarker(kind, who) {
   return `${spec.label} on ${ts} UTC by ${name}\n- KB Agent ${spec.suffix}(${SIGNATURE_PHRASE})`;
 }
 
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const MARKER_MATCHERS = Object.entries(MARKER_SPECS).map(([kind, spec]) => [
+  kind,
+  new RegExp(`KB Agent ${escapeRegex(spec.suffix)}\\(${escapeRegex(SIGNATURE_PHRASE)}\\)`, 'i')
+]);
+
 export function classifySignature(body) {
   if (!body) return null;
-  if (CASE_SCAN_RX.test(body)) return 'case-scan';
-  if (ARTICLE_SCORED_RX.test(body)) return 'article-scored';
-  if (REWRITE_GENERATED_RX.test(body)) return 'rewrite-generated';
-  if (REWRITE_PUBLISHED_RX.test(body)) return 'rewrite-published';
-  if (KI_CREATED_RX.test(body)) return 'ki-created';
-  if (KI_UPDATED_RX.test(body)) return 'ki-updated';
-  if (KI_REWRITE_GENERATED_RX.test(body)) return 'ki-rewrite-generated';
-  if (KI_SCORED_RX.test(body)) return 'ki-scored';
-  return null;
+  return MARKER_MATCHERS.find(([, rx]) => rx.test(body))?.[0] || null;
 }
 
 const _userNameCache = new Map();

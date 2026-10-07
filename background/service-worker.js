@@ -1,11 +1,10 @@
-import { detectSession, detectKiSession, pingKiSession, clearAuthCache } from '../shared/auth.js';
+import { detectSession, detectKiSession, pingKiSession, pingOrgcsSession, clearAuthCache } from '../shared/auth.js';
 import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { sfQuery, sfQueryAll, escapeSoql, sanitizeId, stripHtml, absolutizeSfUrls } from '../shared/api.js';
-import { STORAGE_KEYS, CACHE_TTL_MS, SF_API_VERSION, ARTICLE_META_FIELDS, applySettings } from '../shared/config.js';
+import { sfQuery, escapeSoql, escapeSoqlLike, sanitizeId, stripHtml, absolutizeSfUrls } from '../shared/api.js';
+import { STORAGE_KEYS, applySettings } from '../shared/config.js';
 import { redactPii } from '../shared/pii.js';
-import { mapArticleRecord } from '../shared/scoring.js';
 import { GUIDE_GENERATION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../data/writing_guide_prompts.js';
 
 import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
@@ -15,7 +14,7 @@ import { checkForUpdate, dismissUpdate } from './update-check.js';
 import { auditSignatures, mergeAuditReports } from './signature-audit.js';
 import { prepareKiRewrite, logKiSignature, createKnownIssue, updateKnownIssue, loadAllKnownIssues, searchKnownIssuesUnscoped, fetchKnownIssueDetail } from './handlers/ki-publish.js';
 
-let _settingsReady = (async () => {
+const _settingsReady = (async () => {
   try {
     const data = await localGet([STORAGE_KEYS.SETTINGS]);
     applySettings(data[STORAGE_KEYS.SETTINGS]);
@@ -25,7 +24,7 @@ let _settingsReady = (async () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes[STORAGE_KEYS.SETTINGS]) {
-    applySettings(changes[STORAGE_KEYS.SETTINGS].newValue);
+    applySettings(changes[STORAGE_KEYS.SETTINGS].newValue || {});
   }
   onCostStorageChange(changes);
 });
@@ -42,24 +41,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.onConnect.addListener((port) => {
-  _settingsReady.then(() => handlePort(port));
-});
+chrome.runtime.onConnect.addListener(handlePort);
 
 async function handleMessage(msg) {
   switch (msg.action) {
     case 'CHECK_CONNECTION': {
-      const session = await detectSession();
-      if (!session.sid) return { connected: false, orgKey: null, lightningHost: null };
-      try {
-        const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
-          headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
-        });
-        if (!r.ok) return { connected: false, orgKey: session.key || null, lightningHost: session.lightningHost, reason: 'session_expired' };
-      } catch {
-        return { connected: false, orgKey: session.key || null, lightningHost: session.lightningHost, reason: 'network_error' };
-      }
-      return { connected: true, orgKey: session.key || null, lightningHost: session.lightningHost };
+      const ping = await pingOrgcsSession();
+      if (ping.status === 'none') return { connected: false, orgKey: null, lightningHost: null };
+      const base = { orgKey: ping.key, lightningHost: ping.lightningHost };
+      if (ping.status === 'active') return { connected: true, ...base };
+      return { connected: false, ...base, reason: ping.status === 'expired' ? 'session_expired' : 'network_error' };
     }
     case 'VERIFY_AI_TOKEN': {
       const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN]);
@@ -107,11 +98,11 @@ async function generateArticleUpdate(msg) {
 
   let articleBody = '';
   try {
-    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
+    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c FROM Knowledge__kav WHERE Id = '${safeId}' LIMIT 1`;
     const records = await sfQuery(session.apiBase, session.sid, soql);
     if (records.length) {
       const r = records[0];
-      articleBody = `Title: ${r.Title || ''}\nSummary: ${r.Summary || ''}\nDescription: ${(r.Description__c || '').slice(0, 3000)}\nResolution: ${(r.Resolution__c || '').slice(0, 3000)}`;
+      articleBody = `Title: ${r.Title || ''}\nSummary: ${r.Summary || ''}\nDescription: ${stripHtml(r.Description__c).slice(0, 3000)}\nResolution: ${stripHtml(r.Resolution__c).slice(0, 3000)}`;
     }
   } catch {}
 
@@ -212,50 +203,44 @@ Return ONLY the improved text, no JSON wrapping or explanation.`,
   }
 }
 
-async function withSessionRetry(run, { onNoSession, onError }) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const session = await detectSession();
-    if (!session.sid) {
-      if (attempt === 0) { await new Promise(r => setTimeout(r, 500)); continue; }
-      return onNoSession();
-    }
-    try {
-      return await run(session);
-    } catch (e) {
-      if (attempt === 0 && /session|unauthorized|401/i.test(e?.message || '')) {
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      return onError(e);
-    }
+async function withSession(run, { onNoSession, onError }) {
+  const session = await detectSession();
+  if (!session.sid) return onNoSession();
+  try {
+    return await run(session);
+  } catch (e) {
+    return onError(e);
   }
 }
 
 async function searchCases(query) {
   if (!query || query.length < 3) return { cases: [] };
-  const escaped = escapeSoql(query);
 
-  return withSessionRetry(
+  return withSession(
     async (session) => {
       let soql;
       if (/^\d+$/.test(query)) {
-        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escaped}%' ORDER BY CreatedDate DESC LIMIT 8`;
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber LIKE '${escapeSoqlLike(query)}%' ORDER BY CreatedDate DESC LIMIT 8`;
       } else if (/^[a-zA-Z0-9]{15,18}$/.test(query)) {
-        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE Id = '${escaped}' LIMIT 1`;
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE Id = '${escapeSoql(query)}' LIMIT 1`;
       } else {
-        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE (Subject LIKE '%${escaped}%' OR CaseNumber LIKE '%${escaped}%') ORDER BY CreatedDate DESC LIMIT 8`;
+        const like = escapeSoqlLike(query);
+        soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE (Subject LIKE '%${like}%' OR CaseNumber LIKE '%${like}%') ORDER BY CreatedDate DESC LIMIT 8`;
       }
       const records = await sfQuery(session.apiBase, session.sid, soql);
       return { cases: records };
     },
-    { onNoSession: () => ({ cases: [] }), onError: () => ({ cases: [] }) }
+    {
+      onNoSession: () => ({ cases: [], error: 'No SF session — log into OrgCS first' }),
+      onError: (e) => ({ cases: [], error: `Search failed: ${e.message}` })
+    }
   );
 }
 
 async function resolveCase(caseNumber) {
   if (!/^\d{3,15}$/.test(caseNumber)) return { success: false, error: 'Invalid case number format' };
 
-  return withSessionRetry(
+  return withSession(
     async (session) => {
       const soql = `SELECT Id, CaseNumber, Subject FROM Case WHERE CaseNumber = '${escapeSoql(caseNumber)}' LIMIT 1`;
       const records = await sfQuery(session.apiBase, session.sid, soql);
@@ -281,7 +266,7 @@ function handlePort(port) {
   });
 
   const wrap = (fn) => (msg) => {
-    fn(guardedPort, msg)
+    _settingsReady.then(() => fn(guardedPort, msg))
       .catch(e => {
         if (!disconnected) { try { port.postMessage({ type: 'error', error: e.message }); } catch {} }
       })
@@ -347,32 +332,3 @@ async function handleAudit(port, msg) {
     clearInterval(keepalive);
   }
 }
-
-
-(async () => {
-  try {
-    const cached = await localGet([STORAGE_KEYS.ALL_ARTICLES_AT]);
-    const cachedAt = cached[STORAGE_KEYS.ALL_ARTICLES_AT] || 0;
-    if (Date.now() - cachedAt < CACHE_TTL_MS) {
-      return;
-    }
-
-    const session = await detectSession();
-    if (!session.sid) return;
-
-    const tier2Records = await sfQueryAll(session.apiBase, session.sid,
-      `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Product_And_Topic__r.Name LIKE 'Industry%' OR Product_And_Topic__r.Name LIKE 'Revenue%') ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`
-    );
-
-    const allMapped = tier2Records.map(mapArticleRecord);
-    const tier1 = allMapped.filter(a => a.publishStatus === 'Online' && a.validationStatus === 'Validated External');
-    const tier1Ids = new Set(tier1.map(a => a.id));
-    const tier2Only = allMapped.filter(a => !tier1Ids.has(a.id));
-    const allArticles = [...tier1, ...tier2Only];
-
-    await localSet({
-      [STORAGE_KEYS.ALL_ARTICLES]: allArticles,
-      [STORAGE_KEYS.ALL_ARTICLES_AT]: Date.now()
-    });
-  } catch {}
-})();

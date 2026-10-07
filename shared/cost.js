@@ -34,7 +34,7 @@ function pricingFor(model) {
   return FAMILY_PRICING.sonnet;
 }
 
-export function costUsd(model, inputTokens, outputTokens, cacheReadTokens = 0, cacheCreationTokens = 0) {
+function costUsd(model, inputTokens, outputTokens, cacheReadTokens = 0, cacheCreationTokens = 0) {
   const p = pricingFor(model);
   return (inputTokens / 1_000_000) * p.in
     + (cacheReadTokens / 1_000_000) * p.in * CACHE_READ_MULTIPLIER

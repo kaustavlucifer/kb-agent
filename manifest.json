@@ -1,19 +1,16 @@
 {
   "manifest_version": 3,
   "name": "KB Agent",
-  "version": "2.25.0",
+  "version": "2.26.0",
   "description": "AI-powered KB quality management for Industry & Revenue Cloud — case analysis, article generation, scoring, Known Issues integration, and Agentforce readiness.",
   "permissions": [
     "storage",
     "unlimitedStorage",
-    "cookies",
-    "tabs"
+    "cookies"
   ],
   "host_permissions": [
     "https://*.salesforce.com/*",
-    "https://*.my.salesforce.com/*",
     "https://*.force.com/*",
-    "https://*.lightning.force.com/*",
     "https://eng-ai-model-gateway.sfproxy.devx-preprod.aws-esvc1-useast2.aws.sfdc.cl/*",
     "https://drive.google.com/*"
   ],
@@ -36,11 +33,5 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["popup.html", "data/*"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

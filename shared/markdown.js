@@ -59,10 +59,13 @@ function indentOf(line) {
   return m ? m[1].length : 0;
 }
 
-function parseListLevel(lines, start, baseIndent) {
+const LIST_ITEM_RE = /^\s*(?:[-*]|\d+\.)\s+/;
+
+function parseListLevel(lines, from, baseIndent) {
   const items = [];
   let ordered = null;
-  let i = start;
+  let start = 1;
+  let i = from;
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) break;
@@ -78,21 +81,27 @@ function parseListLevel(lines, start, baseIndent) {
         i++;
       } else if (orderedMatch) {
         if (ordered === false) break;
+        if (ordered === null) start = Number(line.match(/^\s*(\d+)\./)[1]);
         ordered = true;
         items.push({ text: orderedMatch[1], children: null });
         i++;
       } else {
         break;
       }
-    } else if (items.length) {
+    } else if (!items.length || /^\s*```/.test(line)) {
+      break;
+    } else if (LIST_ITEM_RE.test(line)) {
       const { list, next } = parseListLevel(lines, i, ind);
-      items[items.length - 1].children = list;
+      const last = items[items.length - 1];
+      if (last.children && last.children.ordered === list.ordered) last.children.items.push(...list.items);
+      else last.children = list;
       i = next;
     } else {
-      break;
+      items[items.length - 1].text += '\n' + line.trim();
+      i++;
     }
   }
-  return { list: { type: 'list', ordered: !!ordered, items }, next: i };
+  return { list: { type: 'list', ordered: !!ordered, start, items }, next: i };
 }
 
 export function parseBlocks(md) {
@@ -140,7 +149,7 @@ export function parseBlocks(md) {
       continue;
     }
 
-    if (/^\s*[-*]\s+/.test(line) || /^\s*\d+\.\s+/.test(line)) {
+    if (LIST_ITEM_RE.test(line)) {
       const { list, next } = parseListLevel(lines, i, indentOf(line));
       blocks.push(list);
       i = next;
@@ -155,8 +164,7 @@ export function parseBlocks(md) {
       !/^\s*```/.test(lines[i]) &&
       !/^(#{1,6})\s+/.test(lines[i]) &&
       !/^\s*---+\s*$/.test(lines[i]) &&
-      !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i]) &&
+      !LIST_ITEM_RE.test(lines[i]) &&
       !lines[i].trim().startsWith('|')) {
       para.push(lines[i]);
       i++;
@@ -166,6 +174,8 @@ export function parseBlocks(md) {
 
   return blocks;
 }
+
+const BLOCK_TAG_RE = /^(h[1-6]|p|ul|ol|pre|hr|table|div|blockquote|section|article)$/;
 
 export function htmlToMarkdown(root) {
   const blocks = [];
@@ -218,10 +228,17 @@ export function htmlToMarkdown(root) {
   };
 
   const walk = (node) => {
+    let run = [];
+    const flushRun = () => {
+      const t = inlineOf({ childNodes: run }).trim();
+      if (t) blocks.push(t);
+      run = [];
+    };
     for (const n of node.childNodes) {
-      if (n.nodeType === 3) { const t = n.nodeValue.replace(/ /g, ' ').trim(); if (t) blocks.push(t); continue; }
+      const tag = n.nodeType === 1 ? n.tagName.toLowerCase() : '';
+      if (n.nodeType === 3 || (n.nodeType === 1 && !BLOCK_TAG_RE.test(tag))) { run.push(n); continue; }
       if (n.nodeType !== 1) continue;
-      const tag = n.tagName.toLowerCase();
+      flushRun();
       if (/^h[1-6]$/.test(tag)) {
         const level = Math.min(6, Number(tag[1]));
         const t = inlineOf(n).replace(/\s*\n\s*/g, ' ').trim();
@@ -239,14 +256,14 @@ export function htmlToMarkdown(root) {
       } else if (tag === 'table') {
         const t = tableToMarkdown(n);
         if (t) blocks.push(t);
-      } else if (tag === 'div') {
-        if (n.querySelector('p,div,ul,ol,pre,table,h1,h2,h3,h4,h5,h6')) walk(n);
-        else { const t = inlineOf(n).trim(); if (t) blocks.push(t); }
-      } else if (tag !== 'br') {
+      } else if (n.querySelector('p,div,ul,ol,pre,table,h1,h2,h3,h4,h5,h6')) {
+        walk(n);
+      } else {
         const t = inlineOf(n).trim();
         if (t) blocks.push(t);
       }
     }
+    flushRun();
   };
 
   walk(root);
@@ -263,16 +280,21 @@ export function htmlBodyToMarkdown(text) {
 const DEFAULT_REWRITE_FIELDS = ['title', 'summary', 'description', 'resolution'];
 
 export function parseRewriteSections(text, fields = DEFAULT_REWRITE_FIELDS) {
-  const marker = new RegExp(`^##\\s+(${fields.map(f => f.toUpperCase()).join('|')})\\s*$`, 'i');
+  const source = `^##\\s+(${fields.map(f => f.toUpperCase()).join('|')})\\s*$`;
+  const lines = String(text || '').split('\n');
+  const strict = new RegExp(source);
+  const marker = lines.some(l => strict.test(l)) ? strict : new RegExp(source, 'i');
   const out = {};
   const buffers = {};
   for (const f of fields) { out[f] = ''; buffers[f] = []; }
-  const lines = String(text || '').split('\n');
+  const seen = new Set();
   let current = null;
   for (const line of lines) {
     const m = line.match(marker);
-    if (m) {
-      current = m[1].toLowerCase();
+    const field = m && m[1].toLowerCase();
+    if (field && !seen.has(field)) {
+      seen.add(field);
+      current = field;
       continue;
     }
     if (current) buffers[current].push(line);
@@ -287,7 +309,8 @@ export function serializeRewriteSections(sections, fields = DEFAULT_REWRITE_FIEL
 
 function renderListBlockToHtml(b) {
   const tag = b.ordered ? 'ol' : 'ul';
-  return `<${tag}>${b.items.map(it => `<li>${inlineToHtml(it.text)}${it.children ? renderListBlockToHtml(it.children) : ''}</li>`).join('')}</${tag}>`;
+  const startAttr = b.ordered && b.start !== 1 ? ` start="${b.start}"` : '';
+  return `<${tag}${startAttr}>${b.items.map(it => `<li>${it.text.split('\n').map(inlineToHtml).join('<br>')}${it.children ? renderListBlockToHtml(it.children) : ''}</li>`).join('')}</${tag}>`;
 }
 
 export function markdownToHtml(md, { headingBase = 2 } = {}) {
@@ -307,7 +330,7 @@ export function markdownToHtml(md, { headingBase = 2 } = {}) {
         out.push(renderListBlockToHtml(b));
         break;
       case 'code':
-        out.push(`<pre><code>${escapeHtml(b.code)}</code></pre>`);
+        out.push(`<pre class="ckeditor_codeblock">${escapeHtml(b.code)}</pre>`);
         break;
       case 'table': {
         const head = `<thead><tr>${b.header.map(c => `<th>${inlineToHtml(c)}</th>`).join('')}</tr></thead>`;

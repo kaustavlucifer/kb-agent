@@ -36,14 +36,14 @@ export function statusPill(status, opts = {}) {
   return h('span', { class: `pill pill--${variant}`, style }, status);
 }
 
-const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'id', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
+const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
 
 const SAFE_URL_RE = /^(https?:|mailto:)/i;
 
 function sanitizeHtml(html) {
   const div = document.createElement('div');
   div.innerHTML = html;
-  div.querySelectorAll('script,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());
+  div.querySelectorAll('script,style,iframe,object,embed,form,input,link,meta,base').forEach(el => el.remove());
   div.querySelectorAll('*').forEach(el => {
     for (const attr of [...el.attributes]) {
       if (!SAFE_HTML_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
@@ -99,10 +99,14 @@ export function toast(message, type = 'info', duration = 3000) {
   }, duration);
 }
 
-let _activeModal = null;
+const _modalStack = [];
+
+function onModalKeydown(e) {
+  if (e.key === 'Escape' && _modalStack.length) _modalStack[_modalStack.length - 1].close();
+}
 
 export function modal(title, contentEl, opts = {}) {
-  if (_activeModal) _activeModal.close();
+  if (!opts.stack) while (_modalStack.length) _modalStack[_modalStack.length - 1].close();
 
   const backdrop = h('div', { class: 'modal-backdrop' });
   const box = h('div', { class: `modal ${opts.wide ? 'modal--wide' : ''}` },
@@ -119,15 +123,23 @@ export function modal(title, contentEl, opts = {}) {
     )
   );
   backdrop.appendChild(box);
-  backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+  let pressedOnBackdrop = false;
+  backdrop.addEventListener('mousedown', e => { pressedOnBackdrop = e.target === backdrop; });
+  backdrop.addEventListener('click', e => { if (pressedOnBackdrop && e.target === backdrop) close(); pressedOnBackdrop = false; });
   document.body.appendChild(backdrop);
 
   const instance = { close, backdrop, box };
-  _activeModal = instance;
+  if (!_modalStack.length) document.addEventListener('keydown', onModalKeydown);
+  _modalStack.push(instance);
 
+  let closed = false;
   function close() {
+    if (closed) return;
+    closed = true;
     backdrop.remove();
-    if (_activeModal === instance) _activeModal = null;
+    const idx = _modalStack.indexOf(instance);
+    if (idx !== -1) _modalStack.splice(idx, 1);
+    if (!_modalStack.length) document.removeEventListener('keydown', onModalKeydown);
     if (opts.onClose) opts.onClose();
   }
   return instance;
@@ -141,7 +153,7 @@ export function confirmModal(title, message, { confirmLabel = 'Confirm', cancelL
       h('button', { class: 'btn btn--secondary', onClick: () => { decided = true; resolve(false); ref.close(); } }, cancelLabel),
       h('button', { class: 'btn btn--primary', onClick: () => { decided = true; resolve(true); ref.close(); } }, confirmLabel)
     );
-    const ref = modal(title, content, { footer, onClose: () => { if (!decided) resolve(false); } });
+    const ref = modal(title, content, { footer, stack: true, onClose: () => { if (!decided) resolve(false); } });
   });
 }
 
@@ -306,8 +318,13 @@ const CODE_PRE_STYLE = { background: 'var(--surface-raised)', border: '1px solid
 
 function appendListItems(container, listBlock, depth) {
   listBlock.items.forEach((it, idx) => {
-    const marker = listBlock.ordered ? `${idx + 1}. ` : '• ';
-    container.appendChild(h('div', { style: { paddingLeft: `${12 + depth * 16}px` } }, marker, renderInlineFormatting(it.text)));
+    const marker = listBlock.ordered ? `${(listBlock.start || 1) + idx}. ` : '• ';
+    const row = h('div', { style: { paddingLeft: `${12 + depth * 16}px` } }, marker);
+    it.text.split('\n').forEach((ln, lnIdx) => {
+      if (lnIdx > 0) row.appendChild(h('br'));
+      row.appendChild(renderInlineFormatting(ln));
+    });
+    container.appendChild(row);
     if (it.children) appendListItems(container, it.children, depth + 1);
   });
 }
@@ -360,7 +377,7 @@ export function renderMarkdown(text) {
   return container;
 }
 
-export function editableRichField({ label, getValue, setValue, plain = false, singleLine = false, bold = false, rows = 8, onRefine = null, editing = false, onEditingChange = null }) {
+export function editableRichField({ label, getValue, setValue, plain = false, singleLine = false, rows = 8, onRefine = null, editing = false, onEditingChange = null }) {
   const wrap = h('div', { style: { marginBottom: '14px' } });
 
   const fieldHeader = (actions) => h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' } },
@@ -374,7 +391,7 @@ export function editableRichField({ label, getValue, setValue, plain = false, si
     const editBtn = h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px' }, onClick: () => swapToEdit() }, 'Edit');
     const refineBtn = onRefine ? h('button', { class: 'btn btn--ghost btn--sm', style: { padding: '2px 8px', fontSize: '11px', color: 'var(--primary)' }, onClick: () => onRefine() }, 'Refine') : null;
     const body = plain
-      ? h('div', { style: { fontSize: '13px', fontWeight: singleLine || bold ? '600' : '400', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, value || '(empty)')
+      ? h('div', { style: { fontSize: '13px', fontWeight: singleLine ? '600' : '400', lineHeight: '1.5', whiteSpace: 'pre-wrap' } }, value || '(empty)')
       : (value.trim() ? renderMarkdown(value) : h('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '(empty)'));
     wrap.textContent = '';
     wrap.appendChild(fieldHeader([refineBtn, editBtn].filter(Boolean)));
@@ -459,8 +476,10 @@ export function sectionsEditor({ getCachedText, setCachedText, fields, deriveDef
   function renderInto(containerEl, key) {
     for (const f of fields) containerEl.appendChild(renderSection(key, f.field, f.label, f));
   }
-  return { currentSections, commitSection, renderSection, renderInto };
+  return { renderInto };
 }
+
+let _openMultiSelect = null;
 
 export function multiSelect(id, label, options, selected, onChange) {
   const wrap = h('div', { class: 'multi-select', id });
@@ -479,7 +498,7 @@ export function multiSelect(id, label, options, selected, onChange) {
   trigger.addEventListener('click', toggleDropdown);
   wrap.appendChild(trigger);
 
-  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none', position: 'absolute', top: '100%', left: '0', marginTop: '4px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '0', maxHeight: '320px', overflowY: 'hidden', zIndex: '500', minWidth: '220px', boxShadow: 'var(--shadow-md)', flexDirection: 'column' } });
+  const dropdown = h('div', { class: 'multi-select__dropdown', style: { display: 'none' } });
 
   const searchInput = h('input', { type: 'text', placeholder: `Search ${label}…`, style: { width: '100%', padding: '6px 8px', fontSize: '11px', border: 'none', borderBottom: '1px solid var(--border)', outline: 'none', background: 'var(--surface)', boxSizing: 'border-box' } });
   let filterDebounce = null;
@@ -517,7 +536,7 @@ export function multiSelect(id, label, options, selected, onChange) {
       h('div', { style: { fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer' }, onClick: e => { e.stopPropagation(); pending = options.map(o => o.value); updateCheckboxes(); } }, 'All'),
       h('div', { style: { fontSize: '11px', color: 'var(--error)', cursor: 'pointer' }, onClick: e => { e.stopPropagation(); pending = []; updateCheckboxes(); } }, 'Clear')
     ),
-    h('div', { style: { fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', fontWeight: '600' }, onClick: e => { e.stopPropagation(); dropdown.style.display = 'none'; onChange(pending); } }, 'Apply')
+    h('div', { style: { fontSize: '11px', color: 'var(--primary)', cursor: 'pointer', fontWeight: '600' }, onClick: e => { e.stopPropagation(); closeDropdown(); } }, 'Apply')
   );
   dropdown.appendChild(actionsBar);
   wrap.appendChild(dropdown);
@@ -540,31 +559,29 @@ export function multiSelect(id, label, options, selected, onChange) {
     if (_dismiss) { document.removeEventListener('click', _dismiss); _dismiss = null; }
   }
 
-  function toggleDropdown(e) {
-    e.stopPropagation();
-    const visible = dropdown.style.display === 'flex';
-    if (visible) {
-      removeDismiss();
-      dropdown.style.display = 'none';
-      onChange(pending);
-    } else {
-      pending = [...selected];
-      updateCheckboxes();
-      searchInput.value = '';
-      filterOptions('');
-      dropdown.style.display = 'flex';
-      setTimeout(() => searchInput.focus(), 0);
-      removeDismiss();
-      _dismiss = ev => {
-        if (!wrap.isConnected) { removeDismiss(); return; }
-        if (!wrap.contains(ev.target)) {
-          dropdown.style.display = 'none';
-          removeDismiss();
-          onChange(pending);
-        }
-      };
-      setTimeout(() => document.addEventListener('click', _dismiss), 0);
-    }
+  function closeDropdown() {
+    removeDismiss();
+    dropdown.style.display = 'none';
+    if (_openMultiSelect === closeDropdown) _openMultiSelect = null;
+    const changed = pending.length !== selected.length || pending.some(v => !selected.includes(v));
+    if (changed) onChange(pending);
+  }
+
+  function toggleDropdown() {
+    if (dropdown.style.display === 'flex') { closeDropdown(); return; }
+    if (_openMultiSelect) _openMultiSelect();
+    pending = [...selected];
+    updateCheckboxes();
+    searchInput.value = '';
+    filterOptions('');
+    dropdown.style.display = 'flex';
+    _openMultiSelect = closeDropdown;
+    setTimeout(() => searchInput.focus(), 0);
+    _dismiss = ev => {
+      if (!wrap.isConnected) { removeDismiss(); if (_openMultiSelect === closeDropdown) _openMultiSelect = null; return; }
+      if (!wrap.contains(ev.target)) closeDropdown();
+    };
+    setTimeout(() => document.addEventListener('click', _dismiss), 0);
   }
 
   return wrap;

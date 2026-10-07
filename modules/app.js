@@ -3,9 +3,10 @@ import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { STORAGE_KEYS, applySettings, MODEL_PRICING, KI_BASE } from '../shared/config.js';
 import { getCostTotals, resetCostTotals, onCostStorageChange, fmtUsd } from '../shared/cost.js';
-import { listGatewayModels, fetchGatewayKeyLimits } from '../shared/gateway.js';
+import { refreshModelCatalog } from '../shared/gateway.js';
 
-const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const AUTH_CHECK_BASE_MS = 10000;
+const AUTH_CHECK_MAX_MS = 5 * 60 * 1000;
 
 const TABS = [
   { id: 'case-analysis', label: 'Case Analysis' },
@@ -15,6 +16,7 @@ const TABS = [
 ];
 
 let _activeModule = null;
+let _mountedTab = null;
 let _tabContent = null;
 let _tabGen = 0;
 let _subscribed = false;
@@ -27,7 +29,9 @@ async function init() {
 
   const hashTab = location.hash.replace('#', '');
   const validTab = TABS.find(t => t.id === hashTab);
-  setState('app.activeTab', validTab ? hashTab : 'case-analysis');
+  const caseUrl = new URLSearchParams(window.location.search).get('caseUrl');
+  if (caseUrl) setState('case.pendingUrl', caseUrl);
+  setState('app.activeTab', caseUrl ? 'case-analysis' : (validTab ? hashTab : 'case-analysis'));
   setState('app.connections', { sf: null, ai: null });
 
   const cached = await localGet([STORAGE_KEYS.AUTH_CACHE]);
@@ -37,38 +41,21 @@ async function init() {
 
   setState('app.cost', await getCostTotals());
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local') onCostStorageChange(changes);
+    if (area !== 'local') return;
+    onCostStorageChange(changes);
+    if (changes[STORAGE_KEYS.SETTINGS]) applySettings(changes[STORAGE_KEYS.SETTINGS].newValue || {});
   });
 
   render();
   checkConnections();
   checkUpdate();
-  refreshModelCatalogIfStale();
-
-  const params = new URLSearchParams(window.location.search);
-  const caseUrl = params.get('caseUrl');
-  if (caseUrl) {
-    setState('app.activeTab', 'case-analysis');
-    setState('case.pendingUrl', caseUrl);
-  }
+  refreshModelCatalog().catch(() => {});
 
   window.addEventListener('popstate', (event) => {
     if (event.state && event.state.tab) {
       setState('app.activeTab', event.state.tab);
     }
   });
-}
-
-async function refreshModelCatalogIfStale() {
-  const data = await localGet([STORAGE_KEYS.MODEL_CATALOG, STORAGE_KEYS.GATEWAY_TOKEN]);
-  const catalogAt = data[STORAGE_KEYS.MODEL_CATALOG]?.at || 0;
-  if (catalogAt && (Date.now() - catalogAt < MODEL_CATALOG_MAX_AGE_MS)) return;
-  const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
-  if (!token) return;
-  const [models, limits] = await Promise.all([listGatewayModels(token), fetchGatewayKeyLimits(token)]);
-  if (models && models.length) {
-    await localSet({ [STORAGE_KEYS.MODEL_CATALOG]: { models, limits, at: Date.now() } });
-  }
 }
 
 function render() {
@@ -184,6 +171,8 @@ function buildTabs() {
 }
 
 function activateTab(tabId) {
+  if (tabId === _mountedTab) return;
+  _mountedTab = tabId;
   document.querySelectorAll('#tab-nav .tab').forEach(btn => {
     btn.classList.toggle('tab--active', btn.dataset.tab === tabId);
   });
@@ -225,8 +214,10 @@ async function checkConnections() {
     chrome.runtime.sendMessage({ action: 'CHECK_KI_CONNECTION' }).catch(() => ({ connected: false }))
   ]);
   const connections = { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp };
-  setState('app.connections', connections);
-  localSet({ [STORAGE_KEYS.AUTH_CACHE]: connections });
+  if (JSON.stringify(connections) !== JSON.stringify(getState('app.connections'))) {
+    setState('app.connections', connections);
+    localSet({ [STORAGE_KEYS.AUTH_CACHE]: connections });
+  }
 
   const sfOk = sfResp?.connected;
   const gusOk = gusResp?.connected;
@@ -245,6 +236,8 @@ async function checkConnections() {
 }
 
 async function refreshConnections() {
+  _authCheckAttempt = 0;
+  if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
   const resp = await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => null);
   await checkConnections();
   if (resp) toast('Auth status refreshed.', 'info');
@@ -253,6 +246,8 @@ async function refreshConnections() {
 
 let _pendingUpdate = null;
 let _authCheckTimer = null;
+let _authCheckAttempt = 0;
+let _closeTokenPopover = null;
 const _authAutoOpened = { sf: false, gus: false, ki: false };
 
 async function checkUpdate(force = false) {
@@ -276,10 +271,12 @@ async function autoOpenAuthTab(kind, url) {
 function scheduleAuthCheckIfNeeded(allHealthy) {
   if (allHealthy) {
     if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
+    _authCheckAttempt = 0;
     return;
   }
   if (_authCheckTimer) return;
-  const delay = 10000 + Math.random() * 5000;
+  const delay = Math.min(AUTH_CHECK_BASE_MS * 2 ** _authCheckAttempt, AUTH_CHECK_MAX_MS) * (1 + Math.random() * 0.5);
+  _authCheckAttempt++;
   _authCheckTimer = setTimeout(() => {
     _authCheckTimer = null;
     checkConnections();
@@ -440,8 +437,7 @@ async function handleUpdateButtonClick() {
 }
 
 function openTokenPopover(e) {
-  const existing = document.getElementById('token-popover');
-  if (existing) { existing.remove(); return; }
+  if (_closeTokenPopover) { _closeTokenPopover(); return; }
 
   const rect = e.currentTarget.getBoundingClientRect();
   const popover = h('div', { class: 'popover', id: 'token-popover', style: { top: `${rect.bottom + 6}px`, right: `${window.innerWidth - rect.right}px` } },
@@ -449,7 +445,7 @@ function openTokenPopover(e) {
     h('div', { class: 'popover__sub' }, 'Paste your gateway token to enable AI features.'),
     h('input', { type: 'password', class: 'input', id: 'token-input', placeholder: 'Paste token…', autocomplete: 'off' }),
     h('div', { style: { display: 'flex', gap: '8px', marginTop: '12px', justifyContent: 'flex-end' } },
-      h('button', { class: 'btn btn--secondary btn--sm', onClick: () => document.getElementById('token-popover')?.remove() }, 'Cancel'),
+      h('button', { class: 'btn btn--secondary btn--sm', onClick: () => _closeTokenPopover?.() }, 'Cancel'),
       h('button', { class: 'btn btn--primary btn--sm', onClick: saveToken }, 'Save & Verify')
     )
   );
@@ -457,15 +453,15 @@ function openTokenPopover(e) {
   document.getElementById('token-input')?.focus();
 
   const triggerEl = e.currentTarget;
-  setTimeout(() => {
-    const dismiss = (ev) => {
-      if (!popover.contains(ev.target) && (!triggerEl || !triggerEl.contains(ev.target))) {
-        popover.remove();
-        document.removeEventListener('mousedown', dismiss, true);
-      }
-    };
-    document.addEventListener('mousedown', dismiss, true);
-  }, 0);
+  const dismiss = (ev) => {
+    if (!popover.contains(ev.target) && !triggerEl.contains(ev.target)) _closeTokenPopover();
+  };
+  _closeTokenPopover = () => {
+    popover.remove();
+    document.removeEventListener('mousedown', dismiss, true);
+    _closeTokenPopover = null;
+  };
+  document.addEventListener('mousedown', dismiss, true);
 }
 
 async function saveToken() {
@@ -479,7 +475,7 @@ async function saveToken() {
     } else {
       toast('Token saved but verification failed: ' + (resp?.error || ''), 'error');
     }
-    document.getElementById('token-popover')?.remove();
+    _closeTokenPopover?.();
     checkConnections();
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');

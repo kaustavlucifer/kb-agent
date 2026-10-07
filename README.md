@@ -128,7 +128,19 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.25.0 (current)
+### v2.26.0 (current)
+- Fixed a popup freeze when markdown had indented text or code under a list item (rewrite output with "expected outcome" lines could hang rendering and scoring)
+- Modals now stack: the draft-exists confirmation, Compare, and score detail open on top instead of closing the Rewrite/Merge modal; Escape closes the top modal; drag-selecting out of a modal no longer closes it
+- Case analysis keeps running when switching tabs; Stop works for "Create New Anyway"; sidebar Update shows inline progress and can't overwrite a newer analysis; "Suggest Updates Anyway" now generates rewrites; Known Issue search errors are shown; HTML→Markdown conversion runs once so code samples survive
+- Case analysis prompts include the latest comments (resolution) not just the first ones; comments fetched in parallel; search results deduped per master article; chatter fetched once; "Create New Anyway" reuses the case abstract; guard rails also apply to new-article generation; a failed guard-rail describe is no longer cached for 30 min; Hyperforce checkbox values handled
+- Gateway: connect timeout for streaming, Stop cancels rate-limit waits, mid-stream SSE errors surface, per-attempt timeouts with a distinct timeout error; rate limiter no longer overshoots under concurrency; token check uses the free /key/info instead of a paid call
+- Settings saved or reset in Options now apply immediately in open popups and the service worker; Reset restores defaults correctly
+- KB scoring skips articles whose body fetch failed (no more empty-article scores), saves progress incrementally, and scores rewrites from properly rendered HTML; Rewrite fetches article content once
+- Known Issues: rewrite/score basis refreshes when the KI changes in the org (and on Refresh); ID masking no longer breaks image/record URLs; approval-status failures show "approval unknown" and aren't cached; unscoped search uses one approval query; KI work cache pruned after 30 days
+- Dedup: merge/publish resolve articles by record id (leading-zero article numbers no longer break), self-pairs dropped, bodies fetched per batch, merge errors no longer leave the modal stuck
+- Removed web_accessible_resources and the tabs permission from the manifest; removed redundant host permissions, the service-worker article prefetch, dead UI/CSS/config, and duplicated helpers (sfQueryAll, runPooled, model-catalog refresh, KI/GUS mappers)
+
+### v2.25.0
 - Known Issues are now draft/published aware: the table subject and 👁 view show the published fields when `Published__c` is true and the DRAFT fields otherwise (unpublished KIs no longer show blank or stale content); search also matches draft subjects
 - Scoring uses the draft for unpublished KIs and for published KIs with unpublished edits (including after saving a rewrite), otherwise the published version; score details show which version was scored
 - New sortable Publication column: Published, Published · edits pending approval, Published · unsubmitted edits, Draft · not submitted / pending approval / rejected / approval recalled, Unpublished — approval state read from the standard approval process (`ProcessInstance`)

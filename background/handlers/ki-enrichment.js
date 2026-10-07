@@ -2,70 +2,48 @@ import { detectKiSession } from '../../shared/auth.js';
 import { sfSearch, escapeSoql, escapeSosl, mapWithConcurrency } from '../../shared/api.js';
 import { callClaudeFast, extractText, extractJson } from '../../shared/gateway.js';
 import { KI_CLOUD_MAPPING } from '../../data/ki_mapping.js';
+import { kiUrl } from './ki-publish.js';
 
 const KI_FIELDS = 'Id, Name, Subject__c, Summary__c, Status__c, Cloud__c, Category__r.Name, Workaround__c, Work_ID__c, Reporting_User_Count__c';
 const KI_ACTIVE_STATUSES = ['In Review', 'Solution in Progress', 'Solution Scheduled', 'Solution Deploying'];
+const KI_STATUS_FILTER = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
+const SOSL_TERM_MAX_WORDS = 8;
+const SOSL_TERM_MAX_CHARS = 100;
 
 export async function fetchRelatedKnownIssues(caseAbstract, ptPatterns, caseSubject, signal) {
   const kiSession = await detectKiSession();
   if (!kiSession.sid) return { items: [], error: 'No KI session. Log into the Known Issues org.' };
 
-  const { apiBase, sid } = kiSession;
-
+  const { apiBase, sid, lightningHost } = kiSession;
   const cloudValues = resolveCloudValues(ptPatterns);
   const searchTerms = buildSearchTerms(caseAbstract, caseSubject);
 
-  if (!searchTerms.length) return { items: [], lightningHost: kiSession.lightningHost, error: null };
+  if (!searchTerms.length) return { items: [], lightningHost, error: null };
 
-  let candidates = [];
+  const candidates = new Map();
   let firstError = null;
 
+  const searchPass = (terms, extraWhere) => mapWithConcurrency(terms, terms.length, async (term) => {
+    try {
+      const records = await sfSearch(apiBase, sid,
+        `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${KI_STATUS_FILTER})${extraWhere}) LIMIT 5`,
+        signal
+      );
+      for (const r of records) if (!candidates.has(r.Id)) candidates.set(r.Id, r);
+    } catch (e) {
+      firstError = firstError || e.message;
+    }
+  });
+
   if (cloudValues.length) {
-    const cloudFilter = cloudValues.map(c => `Cloud__c = '${escapeSoql(c)}'`).join(' OR ');
-    const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
-
-    await mapWithConcurrency(searchTerms.slice(0, 3), 3, async (term) => {
-      if (candidates.length >= 10) return;
-      try {
-        const records = await sfSearch(apiBase, sid,
-          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter}) AND (${cloudFilter})) LIMIT 5`,
-          signal
-        );
-        for (const r of records) {
-          if (!candidates.some(c => c.Id === r.Id)) {
-            candidates.push(r);
-          }
-        }
-      } catch (e) {
-        firstError = firstError || e.message;
-      }
-    });
+    await searchPass(searchTerms.slice(0, 3), ` AND (${cloudValues.map(c => `Cloud__c = '${escapeSoql(c)}'`).join(' OR ')})`);
   }
+  if (candidates.size < 3) await searchPass(searchTerms.slice(0, 2), '');
 
-  if (candidates.length < 3) {
-    const statusFilter = KI_ACTIVE_STATUSES.map(s => `'${s}'`).join(',');
-    await mapWithConcurrency(searchTerms.slice(0, 2), 2, async (term) => {
-      if (candidates.length >= 10) return;
-      try {
-        const records = await sfSearch(apiBase, sid,
-          `FIND {${escapeSosl(term)}} IN ALL FIELDS RETURNING Known_Issue__c(${KI_FIELDS} WHERE Published__c = true AND Status__c IN (${statusFilter})) LIMIT 5`,
-          signal
-        );
-        for (const r of records) {
-          if (!candidates.some(c => c.Id === r.Id)) {
-            candidates.push(r);
-          }
-        }
-      } catch (e) {
-        firstError = firstError || e.message;
-      }
-    });
-  }
+  if (!candidates.size || signal?.aborted) return { items: [], lightningHost, error: firstError };
 
-  if (!candidates.length) return { items: [], lightningHost: kiSession.lightningHost, error: firstError };
-
-  const ranked = await rankKiRelevance(candidates, caseAbstract, caseSubject, signal);
-  return { items: ranked, lightningHost: kiSession.lightningHost, error: firstError };
+  const ranked = await rankKiRelevance([...candidates.values()], caseAbstract, caseSubject, lightningHost, signal);
+  return { items: ranked, lightningHost, error: firstError };
 }
 
 function resolveCloudValues(ptPatterns) {
@@ -80,19 +58,47 @@ function resolveCloudValues(ptPatterns) {
   return [...clouds];
 }
 
-function buildSearchTerms(caseAbstract, caseSubject) {
-  const terms = [];
-  if (caseAbstract?.errorSignature) terms.push(caseAbstract.errorSignature);
-  if (caseAbstract?.symptomClass) terms.push(caseAbstract.symptomClass);
-  if (caseSubject) {
-    const cleaned = caseSubject.replace(/[^\w\s-]/g, ' ').trim();
-    if (cleaned.length > 5) terms.push(cleaned.split(' ').slice(0, 6).join(' '));
-  }
-  if (caseAbstract?.product) terms.push(caseAbstract.product);
-  return terms.filter(t => t && t.length > 3);
+function soslTerm(text) {
+  return String(text || '')
+    .replace(/\b(?:AND|OR|NOT)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .slice(0, SOSL_TERM_MAX_WORDS)
+    .join(' ')
+    .slice(0, SOSL_TERM_MAX_CHARS)
+    .trim();
 }
 
-async function rankKiRelevance(candidates, caseAbstract, caseSubject, signal) {
+function buildSearchTerms(caseAbstract, caseSubject) {
+  const terms = [caseAbstract?.errorSignature, caseAbstract?.symptomClass];
+  if (caseSubject) {
+    const cleaned = caseSubject.replace(/[^\w\s-]/g, ' ').trim();
+    if (cleaned.length > 5) terms.push(cleaned.split(/\s+/).slice(0, 6).join(' '));
+  }
+  terms.push(caseAbstract?.product);
+  return [...new Set(terms.map(soslTerm))].filter(t => t.length > 3);
+}
+
+function toKiItem(ki, lightningHost, relevanceScore, relevanceReason) {
+  return {
+    id: ki.Id,
+    name: ki.Name,
+    subject: ki.Subject__c || '',
+    summary: (ki.Summary__c || '').slice(0, 300),
+    status: ki.Status__c || '',
+    cloud: ki.Cloud__c || '',
+    category: ki.Category__r?.Name || '',
+    workaround: (ki.Workaround__c || '').slice(0, 500),
+    workId: ki.Work_ID__c || '',
+    reportingCount: ki.Reporting_User_Count__c || 0,
+    url: kiUrl(lightningHost, ki.Id),
+    relevanceScore,
+    relevanceReason
+  };
+}
+
+async function rankKiRelevance(candidates, caseAbstract, caseSubject, lightningHost, signal) {
   const kiList = candidates.slice(0, 10).map((r, i) => {
     return `[${i}] ${r.Name}: "${r.Subject__c || ''}"\nSummary: ${(r.Summary__c || '').slice(0, 200)}\nCloud: ${r.Cloud__c || ''}\nStatus: ${r.Status__c || ''}`;
   }).join('\n\n');
@@ -111,39 +117,9 @@ async function rankKiRelevance(candidates, caseAbstract, caseSubject, signal) {
         .filter(r => r.index >= 0 && r.index < candidates.length && r.score > 30)
         .sort((a, b) => b.score - a.score)
         .slice(0, 5)
-        .map(r => {
-          const ki = candidates[r.index];
-          return {
-            id: ki.Id,
-            name: ki.Name,
-            subject: ki.Subject__c || '',
-            summary: (ki.Summary__c || '').slice(0, 300),
-            status: ki.Status__c || '',
-            cloud: ki.Cloud__c || '',
-            category: ki.Category__r?.Name || '',
-            workaround: (ki.Workaround__c || '').slice(0, 500),
-            workId: ki.Work_ID__c || '',
-            reportingCount: ki.Reporting_User_Count__c || 0,
-            relevanceScore: r.score,
-            relevanceReason: r.reason || ''
-          };
-        });
+        .map(r => toKiItem(candidates[r.index], lightningHost, r.score, r.reason || ''));
     }
   } catch {}
 
-  return candidates.slice(0, 5).map(ki => ({
-    id: ki.Id,
-    name: ki.Name,
-    subject: ki.Subject__c || '',
-    summary: (ki.Summary__c || '').slice(0, 300),
-    status: ki.Status__c || '',
-    cloud: ki.Cloud__c || '',
-    category: ki.Category__r?.Name || '',
-    workaround: (ki.Workaround__c || '').slice(0, 500),
-    workId: ki.Work_ID__c || '',
-    reportingCount: ki.Reporting_User_Count__c || 0,
-    relevanceScore: null,
-    relevanceReason: ''
-  }));
+  return candidates.slice(0, 5).map(ki => toKiItem(ki, lightningHost, null, ''));
 }
-

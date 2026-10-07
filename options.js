@@ -1,6 +1,7 @@
 import { STORAGE_KEYS, SETTINGS_SCHEMA, MODEL_CHOICES, currentSettings, applySettings, articleUrl, ORGCS_BASE, KI_BASE } from './shared/config.js';
 import { h, modal, progressBar } from './shared/ui.js';
-import { listGatewayModels, fetchGatewayKeyLimits } from './shared/gateway.js';
+import { refreshModelCatalog } from './shared/gateway.js';
+import { localGet, localSet } from './shared/storage.js';
 
 const tokenEl = document.getElementById('token');
 const bypassEl = document.getElementById('bypass-guard-rails');
@@ -12,7 +13,6 @@ const modelItems = SETTINGS_SCHEMA.filter(s => s.kind === 'model');
 const numberItems = SETTINGS_SCHEMA.filter(s => s.kind === 'number');
 
 const controls = {};
-const MODEL_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let _modelCatalog = null;
 
 function readableModelLabel(id) {
@@ -36,6 +36,9 @@ function modelOptionsFor(item, currentValue) {
   });
   if (currentValue && !options.some(o => o.value === currentValue)) {
     options.push({ value: currentValue, label: `${currentValue} (saved — not in your gateway list)`, title: currentValue });
+  }
+  if (!options.some(o => o.value === item.default)) {
+    options.push({ value: item.default, label: `${readableModelLabel(item.default)} (default)`, title: item.default });
   }
   return options;
 }
@@ -114,37 +117,29 @@ function setStatus(text, color) {
 }
 
 async function load() {
-  const data = await chrome.storage.local.get([STORAGE_KEYS.GATEWAY_TOKEN, STORAGE_KEYS.BYPASS_GUARD_RAILS, STORAGE_KEYS.SETTINGS, STORAGE_KEYS.MODEL_CATALOG]);
+  const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN, STORAGE_KEYS.BYPASS_GUARD_RAILS, STORAGE_KEYS.SETTINGS, STORAGE_KEYS.MODEL_CATALOG]);
   if (data[STORAGE_KEYS.GATEWAY_TOKEN]) tokenEl.placeholder = '••••••••  (saved)';
   if (data[STORAGE_KEYS.BYPASS_GUARD_RAILS]) bypassEl.checked = true;
   applySettings(data[STORAGE_KEYS.SETTINGS]);
   _modelCatalog = data[STORAGE_KEYS.MODEL_CATALOG]?.models || null;
   renderForm();
-
-  const catalogAt = data[STORAGE_KEYS.MODEL_CATALOG]?.at || 0;
-  if (!catalogAt || (Date.now() - catalogAt > MODEL_CATALOG_MAX_AGE_MS)) {
-    fetchModelCatalog(data[STORAGE_KEYS.GATEWAY_TOKEN]);
-  }
+  fetchModelCatalog(false);
 }
 
-async function fetchModelCatalog(token) {
+async function fetchModelCatalog(force) {
   const statusEl2 = document.getElementById('model-refresh-status');
-  if (statusEl2) statusEl2.textContent = 'Loading…';
-  const [models, limits] = await Promise.all([listGatewayModels(token), fetchGatewayKeyLimits(token)]);
-  if (models && models.length) {
-    _modelCatalog = models;
-    await chrome.storage.local.set({ [STORAGE_KEYS.MODEL_CATALOG]: { models, limits, at: Date.now() } });
+  if (force && statusEl2) statusEl2.textContent = 'Loading…';
+  const { catalog, refreshed, error } = await refreshModelCatalog({ force }).catch(e => ({ error: e.message }));
+  if (refreshed) {
+    _modelCatalog = catalog.models;
     refreshModelDropdowns();
-    if (statusEl2) statusEl2.textContent = `${models.length} models`;
-  } else {
-    if (statusEl2) statusEl2.textContent = 'Failed';
+    if (statusEl2) statusEl2.textContent = `${catalog.models.length} models`;
+  } else if (force && statusEl2) {
+    statusEl2.textContent = `Failed${error ? `: ${error}` : ''}`;
   }
 }
 
-document.getElementById('refresh-models-btn').addEventListener('click', async () => {
-  const data = await chrome.storage.local.get([STORAGE_KEYS.GATEWAY_TOKEN]);
-  fetchModelCatalog(data[STORAGE_KEYS.GATEWAY_TOKEN]);
-});
+document.getElementById('refresh-models-btn').addEventListener('click', () => fetchModelCatalog(true));
 
 function collectSettings() {
   const out = {};
@@ -176,7 +171,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
     [STORAGE_KEYS.SETTINGS]: out
   };
   if (token) updates[STORAGE_KEYS.GATEWAY_TOKEN] = token;
-  await chrome.storage.local.set(updates);
+  await localSet(updates);
   applySettings(out);
   setStatus('Saved.', 'var(--success)');
 });
@@ -184,11 +179,8 @@ document.getElementById('save-btn').addEventListener('click', async () => {
 document.getElementById('reset-btn').addEventListener('click', async () => {
   await chrome.storage.local.remove(STORAGE_KEYS.SETTINGS);
   applySettings({});
-  for (const item of SETTINGS_SCHEMA) {
-    const ctrl = controls[item.key];
-    if (ctrl) document.getElementById(`opt-${item.key}`).value = item.default;
-  }
-  setStatus('Reset to defaults. Click Save to apply.', 'var(--text-secondary)');
+  renderForm();
+  setStatus('Reset to defaults and saved.', 'var(--success)');
 });
 
 document.getElementById('test-btn').addEventListener('click', async () => {
@@ -278,11 +270,18 @@ function runAnalytics() {
 
   const progressEl = h('div', { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, 'Starting…');
   const port = chrome.runtime.connect({ name: 'kba-audit' });
+  let finished = false;
+  const resetButton = () => { btn.disabled = false; btn.textContent = 'Run Analytics'; };
+  const showError = (message) => {
+    progressEl.textContent = '';
+    progressEl.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + message));
+    resetButton();
+  };
   const ref = modal('Usage Analytics', progressEl, {
     footer: h('div', { class: 'modal__footer' },
       h('button', { class: 'btn btn--secondary', onClick: () => { port.disconnect(); ref.close(); } }, 'Close')
     ),
-    onClose: () => { try { port.disconnect(); } catch {} btn.disabled = false; btn.textContent = 'Run Analytics'; }
+    onClose: () => { finished = true; try { port.disconnect(); } catch {} resetButton(); }
   });
 
   port.onMessage.addListener((msg) => {
@@ -290,15 +289,18 @@ function runAnalytics() {
       progressEl.textContent = '';
       progressEl.appendChild(progressBar(Math.round((msg.done / Math.max(1, msg.total)) * 100)));
     } else if (msg.type === 'done') {
+      finished = true;
       renderAnalyticsReport(ref, msg.report);
-      btn.disabled = false;
-      btn.textContent = 'Run Analytics';
+      resetButton();
     } else if (msg.type === 'error') {
-      progressEl.textContent = '';
-      progressEl.appendChild(h('span', { style: { color: 'var(--error)' } }, 'Error: ' + msg.error));
-      btn.disabled = false;
-      btn.textContent = 'Run Analytics';
+      finished = true;
+      showError(msg.error);
     }
+  });
+  port.onDisconnect.addListener(() => {
+    if (finished) return;
+    finished = true;
+    showError(chrome.runtime.lastError?.message || 'The background worker stopped before the analytics finished. Try again.');
   });
   port.postMessage({ action: 'RUN_AUDIT', monthsBack: 3 });
 }

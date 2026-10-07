@@ -157,24 +157,26 @@ export const SETTINGS_SCHEMA = [
   }
 ];
 
+function validSetting(item, v) {
+  if (item.kind === 'model') return typeof v === 'string' && (v.startsWith('claude-') || MODEL_CHOICES.some(m => m.value === v));
+  const n = Number(v);
+  return v !== null && v !== '' && Number.isFinite(n) && n >= item.min && n <= item.max;
+}
+
 export function applySettings(stored) {
-  if (!stored || typeof stored !== 'object') return;
+  const source = stored && typeof stored === 'object' ? stored : {};
   for (const item of SETTINGS_SCHEMA) {
-    if (!(item.key in stored)) continue;
-    const v = stored[item.key];
-    if (item.kind === 'model') {
-      if (typeof v !== 'string' || !(v.startsWith('claude-') || MODEL_CHOICES.some(m => m.value === v))) continue;
-      if (item.binding === 'DEFAULT_MODEL') DEFAULT_MODEL = v;
-      else if (item.binding === 'FAST_MODEL') FAST_MODEL = v;
-      else if (item.binding === 'SCORING_MODEL') SCORING_MODEL = v;
-    } else if (item.kind === 'number') {
-      const n = Number(v);
-      if (!Number.isFinite(n) || n < item.min || n > item.max) continue;
-      if (item.binding === 'SCORE_GOOD_ENOUGH_THRESHOLD') SCORE_GOOD_ENOUGH_THRESHOLD = n;
-      else if (item.binding === 'RELEVANCE_COVERAGE_THRESHOLD') RELEVANCE_COVERAGE_THRESHOLD = n;
-      else if (item.binding === 'SCORE_HIGH_THRESHOLD') SCORE_HIGH_THRESHOLD = n;
-      else if (item.binding === 'SCORE_MID_THRESHOLD') SCORE_MID_THRESHOLD = n;
-      else if (item.binding === 'SCORE_CONCURRENCY') SCORE_CONCURRENCY = n;
+    const raw = source[item.key];
+    const v = validSetting(item, raw) ? (item.kind === 'number' ? Number(raw) : raw) : item.default;
+    switch (item.binding) {
+      case 'DEFAULT_MODEL': DEFAULT_MODEL = v; break;
+      case 'FAST_MODEL': FAST_MODEL = v; break;
+      case 'SCORING_MODEL': SCORING_MODEL = v; break;
+      case 'SCORE_GOOD_ENOUGH_THRESHOLD': SCORE_GOOD_ENOUGH_THRESHOLD = v; break;
+      case 'RELEVANCE_COVERAGE_THRESHOLD': RELEVANCE_COVERAGE_THRESHOLD = v; break;
+      case 'SCORE_HIGH_THRESHOLD': SCORE_HIGH_THRESHOLD = v; break;
+      case 'SCORE_MID_THRESHOLD': SCORE_MID_THRESHOLD = v; break;
+      case 'SCORE_CONCURRENCY': SCORE_CONCURRENCY = v; break;
     }
   }
 }

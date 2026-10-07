@@ -1,4 +1,4 @@
-import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQueryAll, soqlIdList, mapWithConcurrency, ID_RE, escapeSoql } from './api.js';
+import { stripHtml, hasCodeBlocks, hasHeaders, hasTables, hasAltText, sfGet, sfQuery, soqlIdList, mapWithConcurrency, ID_RE, escapeSoqlLike } from './api.js';
 import { callClaudeFast, extractText, extractJson } from './gateway.js';
 import { SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, BODY_FETCH_CONCURRENCY, SCORING_MODEL, SCORING_MAX_TOKENS, ARTICLE_META_FIELDS, ARTICLE_LIST_WHERE, CACHE_TTL_MS, STORAGE_KEYS } from './config.js';
 import { SCORING_CRITERIA, computeDynamicMaxes } from '../data/scoring_criteria.js';
@@ -6,8 +6,9 @@ import { detectSession } from './auth.js';
 import { localGet, localSet } from './storage.js';
 import { classifySignature } from './signature.js';
 import { redactPii } from './pii.js';
+import { markdownToHtml } from './markdown.js';
 
-export { SCORING_CRITERIA, computeDynamicMaxes };
+export { SCORING_CRITERIA };
 
 export async function loadAllArticles({ forceLive = false, onProgress } = {}) {
   if (!forceLive) {
@@ -29,8 +30,9 @@ export async function loadAllArticles({ forceLive = false, onProgress } = {}) {
   const totalCount = countResp.totalSize || 0;
   if (onProgress) onProgress({ loaded: 0, total: totalCount });
 
-  const records = await sfQueryAll(session.apiBase, session.sid,
+  const records = await sfQuery(session.apiBase, session.sid,
     `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav ${ARTICLE_LIST_WHERE} ORDER BY Product_And_Topic__r.Name, LastPublishedDate DESC`,
+    undefined,
     (loaded, total) => onProgress && onProgress({ loaded, total: total || totalCount })
   );
 
@@ -41,7 +43,7 @@ export async function loadAllArticles({ forceLive = false, onProgress } = {}) {
 
 export async function searchArticlesUnscoped(query, session) {
   if (!query || query.length < 2) return [];
-  const escaped = escapeSoql(query);
+  const escaped = escapeSoqlLike(query);
   const soql = `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Title LIKE '%${escaped}%' OR ArticleNumber LIKE '%${escaped}%') ORDER BY LastModifiedDate DESC LIMIT 50`;
   const result = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, session.sid);
   return (result.records || []).map(mapArticleRecord);
@@ -212,23 +214,22 @@ export function parseScoreResponse(text, dynamicMaxes) {
   return { overall, criteria, error: null };
 }
 
+const MD_IMAGE_RE = /!\[[^\]]*\]\([^)\s]+[^)]*\)/;
+
 export function draftToScorable(draft) {
   const sections = draft.sections || [];
   const descSec = sections.find(s => /description/i.test(s.heading)) || sections[0];
   const resSec = sections.find(s => /resolution/i.test(s.heading)) || sections[1];
-  const toHtml = (heading, body) => {
-    if (!body) return '';
-    const paras = String(body).split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
-    return `<h2>${heading}</h2>` + paras.map(p => `<p>${p}</p>`).join('');
-  };
+  const description = String((sections.length ? descSec?.body : draft.description) || '');
+  const resolution = String((sections.length ? resSec?.body : draft.resolution) || '');
   return {
     title: draft.title || draft.articleTitle || '',
     summary: draft.summary || '',
-    description: toHtml('Description', descSec?.body || ''),
-    resolution: toHtml('Resolution', resSec?.body || ''),
+    description: description ? markdownToHtml(description) : '',
+    resolution: resolution ? markdownToHtml(resolution) : '',
     steps: '',
     topicName: draft.topicName || '',
-    containsImage: false,
+    containsImage: MD_IMAGE_RE.test(`${description}\n${resolution}`),
     containsVideo: false,
     validationStatus: draft.validationStatus || ''
   };
@@ -248,7 +249,7 @@ export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS) {
   return parseScoreResponse(text, maxes);
 }
 
-export async function fetchArticleBodies(articleIds, session) {
+export async function fetchArticleBodies(articleIds, session, signal) {
   const bodyMap = new Map();
   const failedIds = new Set();
   const validIds = articleIds.filter(id => ID_RE.test(id));
@@ -257,7 +258,7 @@ export async function fetchArticleBodies(articleIds, session) {
   const runBatch = async (batch) => {
     const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
     const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-    const result = await sfGet(url, session.sid);
+    const result = await sfGet(url, session.sid, signal);
     for (const r of (result.records || [])) {
       bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
     }
@@ -276,6 +277,22 @@ export async function fetchArticleBodies(articleIds, session) {
   await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, runBatchWithRetry);
   bodyMap.failedIds = failedIds;
   return bodyMap;
+}
+
+export async function enrichArticlesForScoring(articles, session, signal) {
+  const ids = articles.map(a => a.id);
+  const [bodyMap, chatterMap] = await Promise.all([
+    fetchArticleBodies(ids, session, signal),
+    fetchArticleChatterBatch(ids, session, 'Knowledge__Feed', signal)
+  ]);
+  const enriched = new Map();
+  const failedIds = new Set();
+  for (const article of articles) {
+    const body = bodyMap.get(article.id);
+    if (!body || bodyMap.failedIds.has(article.id)) { failedIds.add(article.id); continue; }
+    enriched.set(article.id, { ...article, ...body, chatterNotes: chatterMap.get(article.id) || '' });
+  }
+  return { enriched, failedIds };
 }
 
 async function resolveFeedParents(batch, session, feedObject, signal) {

@@ -31,11 +31,16 @@ export function buildDedupWorkQueue(articles) {
   return { workQueue, truncatedPts };
 }
 
+export function normalizeArticleNumber(n) {
+  return String(n ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+}
+
 export function dedupePairs(pairs) {
   const best = new Map();
   for (const p of pairs) {
-    const a = String(p.articleA);
-    const b = String(p.articleB);
+    const a = normalizeArticleNumber(p.articleA);
+    const b = normalizeArticleNumber(p.articleB);
+    if (a === b) continue;
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     const existing = best.get(key);
     if (!existing || (p.confidence || 0) > (existing.confidence || 0)) best.set(key, p);
@@ -86,7 +91,7 @@ export async function runDedupBatch(articles) {
     });
     const parsed = extractJson(extractText(resp));
     if (!parsed || !Array.isArray(parsed.pairs)) return { pairs: [], incomplete: true };
-    const pairs = parsed.pairs.filter(p => p.articleA && p.articleB && p.articleA !== p.articleB && p.confidence >= 0.85);
+    const pairs = parsed.pairs.filter(p => p.articleA && p.articleB && normalizeArticleNumber(p.articleA) !== normalizeArticleNumber(p.articleB) && p.confidence >= 0.85);
     return { pairs, incomplete: resp.stop_reason === 'max_tokens' };
   } catch {
     return { pairs: [], incomplete: true };

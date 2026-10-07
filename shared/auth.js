@@ -112,9 +112,10 @@ const PING_CACHE_TTL_MS = 5 * 60 * 1000;
 
 async function pingSession(detectFn, cacheRef) {
   const session = await detectFn();
-  if (!session.sid) return { status: 'none', apiBase: null };
+  if (!session.sid) return { status: 'none', apiBase: null, key: session.key || null, lightningHost: session.lightningHost || null };
+  const info = { apiBase: session.apiBase, key: session.key || null, lightningHost: session.lightningHost };
   if (cacheRef.value && cacheRef.value.sid === session.sid && Date.now() - cacheRef.value.ts < PING_CACHE_TTL_MS) {
-    return { status: cacheRef.value.status, apiBase: session.apiBase };
+    return { status: cacheRef.value.status, ...info };
   }
   try {
     const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
@@ -122,15 +123,20 @@ async function pingSession(detectFn, cacheRef) {
     });
     const status = r.ok ? 'active' : 'expired';
     cacheRef.value = { sid: session.sid, status, ts: Date.now() };
-    return { status, apiBase: session.apiBase };
+    return { status, ...info };
   } catch {
-    cacheRef.value = { sid: session.sid, status: 'error', ts: Date.now() };
-    return { status: 'error', apiBase: session.apiBase };
+    cacheRef.value = null;
+    return { status: 'error', ...info };
   }
 }
 
+const _orgcsPingCache = { value: null };
 const _gusPingCache = { value: null };
 const _kiPingCache = { value: null };
+
+export function pingOrgcsSession() {
+  return pingSession(detectSession, _orgcsPingCache);
+}
 
 export function pingGusSession() {
   return pingSession(detectGusSession, _gusPingCache);
@@ -141,13 +147,14 @@ export function pingKiSession() {
 }
 
 export function clearAuthCache() {
+  _orgcsPingCache.value = null;
   _gusPingCache.value = null;
   _kiPingCache.value = null;
 }
 
 export function isCaseAnalysisAllowed(caseRecord) {
-  const supportLevel = (caseRecord?.__supportLevel || '').trim();
-  const hyperforce = (caseRecord?.__hyperforce || '').trim();
+  const supportLevel = String(caseRecord?.__supportLevel ?? '').trim();
+  const hyperforce = String(caseRecord?.__hyperforce ?? '').trim().toLowerCase();
   for (const forbidden of CASE_GUARD_RAIL_EXCLUSIONS) {
     if (supportLevel && supportLevel.toLowerCase().includes(forbidden.toLowerCase())) {
       return {
@@ -156,51 +163,38 @@ export function isCaseAnalysisAllowed(caseRecord) {
       };
     }
   }
-  if (hyperforce === 'No') {
+  if (hyperforce === 'no' || hyperforce === 'false') {
     return { allowed: false, reason: 'Non-Hyperforce case. Cannot send to AI gateway.' };
   }
   return { allowed: true };
 }
 
-const _memoCache = new Map();
-const _MEMO_MAX_SIZE = 20;
+const _guardRailCache = new Map();
 
-function memoize(key, scope, ttl, fn) {
-  const fullKey = `${key}:${scope}`;
-  const cached = _memoCache.get(fullKey);
-  if (cached && Date.now() - cached.ts < ttl) return cached.value;
-  const promise = fn().then(v => {
-    _memoCache.set(fullKey, { value: Promise.resolve(v), ts: Date.now() });
-    if (_memoCache.size > _MEMO_MAX_SIZE) {
-      const oldest = _memoCache.keys().next().value;
-      _memoCache.delete(oldest);
-    }
-    return v;
-  }).catch(e => {
-    _memoCache.delete(fullKey);
-    throw e;
-  });
-  _memoCache.set(fullKey, { value: promise, ts: Date.now() });
-  return promise;
+async function describeGuardRailFields(apiBase, sid) {
+  const describe = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/describe`, sid);
+  const fields = describe.fields || [];
+  const SUPPORT_PATTERNS = [/^case_support_level__c$/i, /^support_level__c$/i, /^supportlevel__c$/i];
+  const HYPERFORCE_PATTERNS = [/^hyperforce__c$/i, /^is_?hyperforce__c$/i, /^on_?hyperforce__c$/i];
+  let supportLevelName = null, hyperforceName = null;
+  for (const f of fields) {
+    if (!f?.name) continue;
+    if (!supportLevelName && SUPPORT_PATTERNS.some(re => re.test(f.name))) supportLevelName = f.name;
+    if (!hyperforceName && HYPERFORCE_PATTERNS.some(re => re.test(f.name))) hyperforceName = f.name;
+    if (supportLevelName && hyperforceName) break;
+  }
+  return { hasSupportLevel: !!supportLevelName, hasHyperforce: !!hyperforceName, supportLevelName, hyperforceName, bothPresent: !!(supportLevelName && hyperforceName) };
 }
 
 export async function verifyGuardRailFields(apiBase, sid) {
-  return memoize('guardRail', apiBase, CACHE_TTL_MS, async () => {
-    try {
-      const describe = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/describe`, sid);
-      const fields = describe.fields || [];
-      const SUPPORT_PATTERNS = [/^case_support_level__c$/i, /^support_level__c$/i, /^supportlevel__c$/i];
-      const HYPERFORCE_PATTERNS = [/^hyperforce__c$/i, /^is_?hyperforce__c$/i, /^on_?hyperforce__c$/i];
-      let supportLevelName = null, hyperforceName = null;
-      for (const f of fields) {
-        if (!f?.name) continue;
-        if (!supportLevelName && SUPPORT_PATTERNS.some(re => re.test(f.name))) supportLevelName = f.name;
-        if (!hyperforceName && HYPERFORCE_PATTERNS.some(re => re.test(f.name))) hyperforceName = f.name;
-        if (supportLevelName && hyperforceName) break;
-      }
-      return { hasSupportLevel: !!supportLevelName, hasHyperforce: !!hyperforceName, supportLevelName, hyperforceName, bothPresent: !!(supportLevelName && hyperforceName) };
-    } catch (e) {
-      return { hasSupportLevel: false, hasHyperforce: false, bothPresent: false, describeFailed: true, error: e.message };
-    }
-  });
+  const cached = _guardRailCache.get(apiBase);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
+  const value = describeGuardRailFields(apiBase, sid);
+  _guardRailCache.set(apiBase, { value, ts: Date.now() });
+  try {
+    return await value;
+  } catch (e) {
+    _guardRailCache.delete(apiBase);
+    return { hasSupportLevel: false, hasHyperforce: false, bothPresent: false, describeFailed: true, error: e.message };
+  }
 }

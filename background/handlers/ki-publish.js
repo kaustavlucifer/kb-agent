@@ -1,9 +1,9 @@
-import { sfPost, sfPatch, sfQuery, sfQueryAll, soqlIdList, escapeSoql, sanitizeId, stripHtmlKeepLinks } from '../../shared/api.js';
+import { sfPost, sfPatch, sfQuery, soqlIdList, escapeSoql, escapeSoqlLike, sanitizeId, stripHtmlKeepLinks } from '../../shared/api.js';
 import { detectKiSession } from '../../shared/auth.js';
 import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL, KI_BASE } from '../../shared/config.js';
 import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { redactPii } from '../../shared/pii.js';
-import { KI_PII_OPTS, KI_SYSTEM_PROMPT } from '../../shared/ki-prompts.js';
+import { KI_PII_OPTS, KI_SYSTEM_PROMPT, KI_SECTION_KEYS } from '../../shared/ki-prompts.js';
 import { markdownToHtml } from '../../shared/markdown.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { logSignature } from '../../shared/signature.js';
@@ -40,13 +40,10 @@ ${redactPii(commentText.slice(0, 3000), KI_PII_OPTS)}${gusText ? `\nLinked engin
   }
 }
 
-const KI_REPRO_FIELD = 'Repro__c';
 const KI_OUTSIDE_CORE_FIELD = 'Outside_Core__c';
 const KI_DISABLE_GUS_SYNC_FIELD = 'Disable_GUS_Sync__c';
-const KI_DRAFT_SUBJECT_FIELD = 'DRAFTSubject__c';
-const KI_DRAFT_SUMMARY_FIELD = 'DRAFTSummary__c';
-const KI_DRAFT_REPRO_FIELD = 'DRAFTRepro__c';
-const KI_DRAFT_WORKAROUND_FIELD = 'DRAFTWorkaround__c';
+const KI_PUBLISHED_FIELDS = { subject: 'Subject__c', summary: 'Summary__c', repro: 'Repro__c', workaround: 'Workaround__c' };
+const KI_DRAFT_FIELDS = { subject: 'DRAFTSubject__c', summary: 'DRAFTSummary__c', repro: 'DRAFTRepro__c', workaround: 'DRAFTWorkaround__c' };
 
 function kiRichText(markdown) {
   const text = redactPii(markdown || '', KI_PII_OPTS).trim();
@@ -56,8 +53,6 @@ function kiRichText(markdown) {
 export function kiUrl(lightningHost, id) {
   return `${lightningHost ? `https://${lightningHost}` : KI_BASE}/lightning/r/Known_Issue__c/${id}/view`;
 }
-
-const KI_SECTION_KEYS = ['subject', 'summary', 'repro', 'workaround'];
 
 function normalizeKiText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -71,7 +66,7 @@ function hasKiContent(sections) {
   return KI_SECTION_KEYS.some(k => normalizeKiText(sections[k]));
 }
 
-export function kiPublicationState({ published, approvalStatus, draftDiffers }) {
+function kiPublicationState({ published, approvalStatus, draftDiffers }) {
   if (published) {
     if (approvalStatus === 'Pending') return { label: 'Published · edits pending approval', tone: 'warning' };
     if (draftDiffers) return { label: 'Published · unsubmitted edits', tone: 'warning' };
@@ -81,7 +76,12 @@ export function kiPublicationState({ published, approvalStatus, draftDiffers }) 
   if (approvalStatus === 'Rejected') return { label: 'Draft · rejected', tone: 'error' };
   if (approvalStatus === 'Removed') return { label: 'Draft · approval recalled', tone: 'neutral' };
   if (approvalStatus === 'Approved') return { label: 'Unpublished', tone: 'neutral' };
+  if (approvalStatus === 'Unknown') return { label: 'Draft · approval unknown', tone: 'neutral' };
   return { label: 'Draft · not submitted', tone: 'neutral' };
+}
+
+function kiVersionSections(record, fields, apiBase) {
+  return Object.fromEntries(KI_SECTION_KEYS.map(k => [k, k === 'subject' ? (record[fields[k]] || '') : stripHtmlKeepLinks(record[fields[k]] || '', apiBase)]));
 }
 
 async function fetchLatestApproval(session, kiId) {
@@ -106,25 +106,15 @@ export async function fetchKnownIssueDetail(id, session) {
   try { safeId = sanitizeId(id); } catch (e) { return { success: false, error: e.message }; }
 
   try {
-    const soql = `SELECT Id, Name, Published__c, Subject__c, Summary__c, Status__c, Cloud__c, Workaround__c, ${KI_REPRO_FIELD}, ${KI_DRAFT_SUBJECT_FIELD}, ${KI_DRAFT_SUMMARY_FIELD}, ${KI_DRAFT_REPRO_FIELD}, ${KI_DRAFT_WORKAROUND_FIELD} FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`;
+    const soql = `SELECT Id, Name, Published__c, Status__c, Cloud__c, LastModifiedDate, ${[...Object.values(KI_PUBLISHED_FIELDS), ...Object.values(KI_DRAFT_FIELDS)].join(', ')} FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`;
     const [records, approval] = await Promise.all([
       sfQuery(session.apiBase, session.sid, soql),
       fetchLatestApproval(session, safeId).catch(() => null)
     ]);
     if (!records.length) return { success: false, error: 'Known Issue not found.' };
     const r = records[0];
-    const publishedVersion = {
-      subject: r.Subject__c || '',
-      summary: stripHtmlKeepLinks(r.Summary__c || '', session.apiBase),
-      repro: stripHtmlKeepLinks(r[KI_REPRO_FIELD] || '', session.apiBase),
-      workaround: stripHtmlKeepLinks(r.Workaround__c || '', session.apiBase)
-    };
-    const draftVersion = {
-      subject: r[KI_DRAFT_SUBJECT_FIELD] || '',
-      summary: stripHtmlKeepLinks(r[KI_DRAFT_SUMMARY_FIELD] || '', session.apiBase),
-      repro: stripHtmlKeepLinks(r[KI_DRAFT_REPRO_FIELD] || '', session.apiBase),
-      workaround: stripHtmlKeepLinks(r[KI_DRAFT_WORKAROUND_FIELD] || '', session.apiBase)
-    };
+    const publishedVersion = kiVersionSections(r, KI_PUBLISHED_FIELDS, session.apiBase);
+    const draftVersion = kiVersionSections(r, KI_DRAFT_FIELDS, session.apiBase);
     const published = r.Published__c === true;
     const draftDiffers = hasKiContent(draftVersion) && kiVersionsDiffer(publishedVersion, draftVersion);
     return {
@@ -134,6 +124,7 @@ export async function fetchKnownIssueDetail(id, session) {
         name: r.Name,
         status: r.Status__c || '',
         cloud: r.Cloud__c || '',
+        lastModifiedDate: r.LastModifiedDate || '',
         published,
         hasPublishedContent: hasKiContent(publishedVersion),
         draftDiffers,
@@ -148,41 +139,33 @@ export async function fetchKnownIssueDetail(id, session) {
   }
 }
 
-export function kiWorkingVersion(ki) {
-  const useDraft = hasKiContent(ki.draftVersion) && (!ki.published || ki.draftDiffers);
-  const source = useDraft ? ki.draftVersion : ki.publishedVersion;
-  return {
-    sections: { subject: source.subject, summary: source.summary, repro: source.repro, workaround: source.workaround },
-    version: useDraft ? (ki.published ? 'Draft (unpublished edits)' : 'Draft') : 'Published',
-    basedOnDraft: useDraft
-  };
-}
-
-async function loadKiRewriteContext(kiId, session) {
+export async function prepareKiRewrite(kiId) {
+  const session = await detectKiSession();
   const detail = await fetchKnownIssueDetail(kiId, session);
   if (!detail.success) return detail;
+  const { ki } = detail;
 
   let chatterNotes = '';
   let chatterError;
-  if (session.sid) {
-    try {
-      const chatterMap = await fetchArticleChatterBatch([detail.ki.id], session, 'Known_Issue__Feed');
-      chatterNotes = chatterMap.get(detail.ki.id) || '';
-    } catch (e) {
-      chatterError = e.message;
-    }
+  try {
+    const chatterMap = await fetchArticleChatterBatch([ki.id], session, 'Known_Issue__Feed');
+    chatterNotes = chatterMap.get(ki.id) || '';
+  } catch (e) {
+    chatterError = e.message;
   }
 
-  const working = kiWorkingVersion(detail.ki);
-  return { success: true, ki: detail.ki, basis: working.sections, basedOnDraft: working.basedOnDraft, version: working.version, published: detail.ki.published, chatterNotes, chatterError };
-}
-
-export async function prepareKiRewrite(kiId) {
-  const session = await detectKiSession();
-  const ctx = await loadKiRewriteContext(kiId, session);
-  if (!ctx.success) return ctx;
-  const { ki, ...rest } = ctx;
-  return rest;
+  const useDraft = hasKiContent(ki.draftVersion) && (!ki.published || ki.draftDiffers);
+  return {
+    success: true,
+    basis: { ...(useDraft ? ki.draftVersion : ki.publishedVersion) },
+    basedOnDraft: useDraft,
+    version: useDraft ? (ki.published ? 'Draft (unpublished edits)' : 'Draft') : 'Published',
+    published: ki.published,
+    lastModifiedDate: ki.lastModifiedDate,
+    publication: ki.publication,
+    chatterNotes,
+    chatterError
+  };
 }
 
 export async function logKiSignature(kind, kiId) {
@@ -205,6 +188,15 @@ async function resolveKiCategoryId(session, categoryName) {
   return id;
 }
 
+function kiDraftRecord(payload) {
+  return {
+    [KI_DRAFT_FIELDS.subject]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
+    [KI_DRAFT_FIELDS.summary]: kiRichText(payload.summary),
+    [KI_DRAFT_FIELDS.repro]: kiRichText(payload.repro),
+    [KI_DRAFT_FIELDS.workaround]: kiRichText(payload.workaround)
+  };
+}
+
 export async function createKnownIssue(payload) {
   const session = await detectKiSession();
   if (!session.sid) return { success: false, error: 'No Known Issues org session. Log into the Known Issues org first.' };
@@ -215,10 +207,7 @@ export async function createKnownIssue(payload) {
   }
 
   const record = {
-    [KI_DRAFT_SUBJECT_FIELD]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
-    [KI_DRAFT_SUMMARY_FIELD]: kiRichText(payload.summary),
-    [KI_DRAFT_REPRO_FIELD]: kiRichText(payload.repro),
-    [KI_DRAFT_WORKAROUND_FIELD]: kiRichText(payload.workaround),
+    ...kiDraftRecord(payload),
     [KI_OUTSIDE_CORE_FIELD]: true,
     [KI_DISABLE_GUS_SYNC_FIELD]: false,
     Status__c: 'In Review',
@@ -242,12 +231,7 @@ export async function updateKnownIssue(payload) {
   let safeId;
   try { safeId = sanitizeId(payload.id); } catch (e) { return { success: false, error: e.message }; }
 
-  const record = {
-    [KI_DRAFT_SUBJECT_FIELD]: redactPii(payload.subject || '', KI_PII_OPTS).slice(0, 255),
-    [KI_DRAFT_SUMMARY_FIELD]: kiRichText(payload.summary),
-    [KI_DRAFT_REPRO_FIELD]: kiRichText(payload.repro),
-    [KI_DRAFT_WORKAROUND_FIELD]: kiRichText(payload.workaround)
-  };
+  const record = kiDraftRecord(payload);
 
   try {
     await sfPatch(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c/${safeId}`, session.sid, record);
@@ -259,12 +243,12 @@ export async function updateKnownIssue(payload) {
   }
 }
 
-const KI_LIST_FIELDS = 'Id, Name, Published__c, Subject__c, DRAFTSubject__c, Status__c, Cloud__c, Category__r.Name, CreatedBy.Name, Approver__r.Name, Work_ID__c, Reporting_User_Count__c, CreatedDate, LastModifiedDate';
+const KI_LIST_FIELDS = `Id, Name, Published__c, ${KI_PUBLISHED_FIELDS.subject}, ${KI_DRAFT_FIELDS.subject}, Status__c, Cloud__c, Category__r.Name, CreatedBy.Name, Approver__r.Name, Work_ID__c, Reporting_User_Count__c, CreatedDate, LastModifiedDate`;
 
 function mapKiListRecord(r, lightningHost, approvalStatus) {
   const published = r.Published__c === true;
-  const publishedSubject = r.Subject__c || '';
-  const draftSubject = r[KI_DRAFT_SUBJECT_FIELD] || '';
+  const publishedSubject = r[KI_PUBLISHED_FIELDS.subject] || '';
+  const draftSubject = r[KI_DRAFT_FIELDS.subject] || '';
   const subjectDiffers = !!draftSubject && normalizeKiText(draftSubject) !== normalizeKiText(publishedSubject);
   const publication = kiPublicationState({ published, approvalStatus, draftDiffers: subjectDiffers });
   return {
@@ -289,15 +273,30 @@ function mapKiListRecord(r, lightningHost, approvalStatus) {
   };
 }
 
-async function fetchApprovalStatuses(session, kiWhere) {
-  const [latest, pending] = await Promise.all([
-    sfQueryAll(session.apiBase, session.sid, `SELECT TargetObjectId, Status FROM ProcessInstance WHERE TargetObjectId IN (SELECT Id FROM Known_Issue__c WHERE ${kiWhere}) ORDER BY CreatedDate DESC`),
-    sfQueryAll(session.apiBase, session.sid, `SELECT TargetObjectId FROM ProcessInstance WHERE Status = 'Pending' AND TargetObject.Type = 'Known_Issue__c'`)
-  ]);
+const APPROVAL_UNAVAILABLE_WARNING = 'Approval statuses could not be loaded, so draft approval labels show as unknown.';
+
+function latestApprovalStatuses(records) {
   const statuses = new Map();
-  for (const r of latest) if (!statuses.has(r.TargetObjectId)) statuses.set(r.TargetObjectId, r.Status);
+  for (const r of records) if (!statuses.has(r.TargetObjectId)) statuses.set(r.TargetObjectId, r.Status);
+  return statuses;
+}
+
+async function fetchApprovalStatusesForIds(session, ids) {
+  return latestApprovalStatuses(await sfQuery(session.apiBase, session.sid, `SELECT TargetObjectId, Status FROM ProcessInstance WHERE TargetObjectId IN (${soqlIdList(ids)}) ORDER BY CreatedDate DESC`));
+}
+
+async function fetchListApprovalStatuses(session, kiWhere) {
+  const [latest, pending] = await Promise.all([
+    sfQuery(session.apiBase, session.sid, `SELECT TargetObjectId, Status FROM ProcessInstance WHERE TargetObjectId IN (SELECT Id FROM Known_Issue__c WHERE ${kiWhere}) ORDER BY CreatedDate DESC`),
+    sfQuery(session.apiBase, session.sid, `SELECT TargetObjectId FROM ProcessInstance WHERE Status = 'Pending' AND TargetObject.Type = 'Known_Issue__c'`)
+  ]);
+  const statuses = latestApprovalStatuses(latest);
   for (const r of pending) statuses.set(r.TargetObjectId, 'Pending');
   return statuses;
+}
+
+function mapKiList(records, lightningHost, approvals) {
+  return records.map(r => mapKiListRecord(r, lightningHost, approvals ? approvals.get(r.Id) : 'Unknown'));
 }
 
 export async function searchKnownIssuesUnscoped(query) {
@@ -305,12 +304,13 @@ export async function searchKnownIssuesUnscoped(query) {
   const session = await detectKiSession();
   if (!session.sid) return { items: [], error: 'No Known Issues org session.' };
 
-  const escaped = escapeSoql(query.trim());
-  const soql = `SELECT ${KI_LIST_FIELDS} FROM Known_Issue__c WHERE Subject__c LIKE '%${escaped}%' OR ${KI_DRAFT_SUBJECT_FIELD} LIKE '%${escaped}%' OR Name LIKE '%${escaped}%' ORDER BY LastModifiedDate DESC LIMIT 50`;
+  const escaped = escapeSoqlLike(query.trim());
+  const soql = `SELECT ${KI_LIST_FIELDS} FROM Known_Issue__c WHERE ${KI_PUBLISHED_FIELDS.subject} LIKE '%${escaped}%' OR ${KI_DRAFT_FIELDS.subject} LIKE '%${escaped}%' OR Name LIKE '%${escaped}%' ORDER BY LastModifiedDate DESC LIMIT 50`;
   try {
     const records = await sfQuery(session.apiBase, session.sid, soql);
-    const approvals = records.length ? await fetchApprovalStatuses(session, `Id IN (${soqlIdList(records.map(r => r.Id))})`).catch(() => new Map()) : new Map();
-    return { items: records.map(r => mapKiListRecord(r, session.lightningHost, approvals.get(r.Id))) };
+    if (!records.length) return { items: [] };
+    const approvals = await fetchApprovalStatusesForIds(session, records.map(r => r.Id)).catch(() => null);
+    return { items: mapKiList(records, session.lightningHost, approvals), warning: approvals ? undefined : APPROVAL_UNAVAILABLE_WARNING };
   } catch (e) {
     return { items: [], error: e.message };
   }
@@ -334,10 +334,11 @@ export async function loadAllKnownIssues({ forceLive = false } = {}) {
 
   try {
     const [records, approvals] = await Promise.all([
-      sfQueryAll(session.apiBase, session.sid, soql),
-      fetchApprovalStatuses(session, `Category__r.Name IN (${catList}) AND Published__c = false`).catch(() => new Map())
+      sfQuery(session.apiBase, session.sid, soql),
+      fetchListApprovalStatuses(session, `Category__r.Name IN (${catList}) AND Published__c = false`).catch(() => null)
     ]);
-    const items = records.map(r => mapKiListRecord(r, session.lightningHost, approvals.get(r.Id)));
+    const items = mapKiList(records, session.lightningHost, approvals);
+    if (!approvals) return { items, fromCache: false, warning: APPROVAL_UNAVAILABLE_WARNING };
     await localSet({ [STORAGE_KEYS.ALL_KNOWN_ISSUES]: items, [STORAGE_KEYS.ALL_KNOWN_ISSUES_AT]: Date.now() });
     return { items, fromCache: false };
   } catch (e) {
