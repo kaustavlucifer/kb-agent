@@ -6,6 +6,14 @@ export function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+export const SAFE_URL_RE = /^(https?:|mailto:)/i;
+
+const LINE_BREAK_RE = /\r\n?|[\u2028\u2029]/g;
+
+function splitLines(text) {
+  return String(text == null ? '' : text).replace(LINE_BREAK_RE, '\n').split('\n');
+}
+
 export function parseInline(text) {
   const src = String(text == null ? '' : text);
   const tokens = [];
@@ -42,7 +50,7 @@ function inlineToHtml(text) {
       case 'italic': return `<em>${escapeHtml(t.text)}</em>`;
       case 'code': return `<code>${escapeHtml(t.text)}</code>`;
       case 'link': {
-        const safeHref = /^(https?:|mailto:)/i.test(t.href) ? t.href : '#';
+        const safeHref = SAFE_URL_RE.test(t.href) ? t.href : '#';
         return `<a href="${escapeHtml(safeHref)}">${escapeHtml(t.text)}</a>`;
       }
       case 'image': {
@@ -77,13 +85,13 @@ function parseListLevel(lines, from, baseIndent) {
       if (bulletMatch) {
         if (ordered === true) break;
         ordered = false;
-        items.push({ text: bulletMatch[1], children: null });
+        items.push({ text: bulletMatch[1], children: [] });
         i++;
       } else if (orderedMatch) {
         if (ordered === false) break;
         if (ordered === null) start = Number(line.match(/^\s*(\d+)\./)[1]);
         ordered = true;
-        items.push({ text: orderedMatch[1], children: null });
+        items.push({ text: orderedMatch[1], children: [] });
         i++;
       } else {
         break;
@@ -93,8 +101,14 @@ function parseListLevel(lines, from, baseIndent) {
     } else if (LIST_ITEM_RE.test(line)) {
       const { list, next } = parseListLevel(lines, i, ind);
       const last = items[items.length - 1];
-      if (last.children && last.children.ordered === list.ordered) last.children.items.push(...list.items);
-      else last.children = list;
+      if (!list.items.length) {
+        last.text += '\n' + line.trim();
+        i++;
+        continue;
+      }
+      const prev = last.children[last.children.length - 1];
+      if (prev && prev.ordered === list.ordered) prev.items.push(...list.items);
+      else last.children.push(list);
       i = next;
     } else {
       items[items.length - 1].text += '\n' + line.trim();
@@ -105,7 +119,7 @@ function parseListLevel(lines, from, baseIndent) {
 }
 
 export function parseBlocks(md) {
-  const lines = String(md == null ? '' : md).split('\n');
+  const lines = splitLines(md);
   const blocks = [];
   let i = 0;
 
@@ -151,9 +165,11 @@ export function parseBlocks(md) {
 
     if (LIST_ITEM_RE.test(line)) {
       const { list, next } = parseListLevel(lines, i, indentOf(line));
-      blocks.push(list);
-      i = next;
-      continue;
+      if (list.items.length) {
+        blocks.push(list);
+        i = next;
+        continue;
+      }
     }
 
     if (!line.trim()) { i++; continue; }
@@ -180,6 +196,11 @@ const BLOCK_TAG_RE = /^(h[1-6]|p|ul|ol|pre|hr|table|div|blockquote|section|artic
 export function htmlToMarkdown(root) {
   const blocks = [];
 
+  const wrapInline = (inner, mark) => {
+    const m = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return m[2] ? `${m[1]}${mark}${m[2]}${[...mark].reverse().join('')}${m[3]}` : m[1] + m[3];
+  };
+
   const inlineOf = (node) => {
     let s = '';
     for (const n of node.childNodes) {
@@ -189,13 +210,18 @@ export function htmlToMarkdown(root) {
       const style = (n.getAttribute && n.getAttribute('style')) || '';
       const fontWeight = /font-weight\s*:\s*(bold|[6-9]00)/i.test(style);
       const fontItalic = /font-style\s*:\s*italic/i.test(style);
-      if (tag === 'strong' || tag === 'b') s += `**${inlineOf(n).trim()}**`;
-      else if (tag === 'em' || tag === 'i') s += `*${inlineOf(n).trim()}*`;
-      else if (tag === 'code') s += '`' + n.textContent.replace(/ /g, ' ') + '`';
-      else if (tag === 'a') { const href = n.getAttribute('href') || ''; const txt = inlineOf(n).trim(); s += href && href !== '#' ? `[${txt}](${href})` : txt; }
+      if (tag === 'strong' || tag === 'b') s += wrapInline(inlineOf(n), '**');
+      else if (tag === 'em' || tag === 'i') s += wrapInline(inlineOf(n), '*');
+      else if (tag === 'code') { const code = n.textContent.replace(/ /g, ' '); s += code ? '`' + code + '`' : ''; }
+      else if (tag === 'a') {
+        const href = n.getAttribute('href') || '';
+        const inner = inlineOf(n);
+        const m = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
+        s += href && href !== '#' && m[2] ? `${m[1]}[${m[2]}](${href})${m[3]}` : inner;
+      }
       else if (tag === 'img') { const src = n.getAttribute('src') || ''; const alt = n.getAttribute('alt') || ''; s += src ? `![${alt}](${src})` : ''; }
       else if (tag === 'br') s += '\n';
-      else if (fontWeight || fontItalic) { const inner = inlineOf(n).trim(); s += inner ? `${fontWeight ? '**' : ''}${fontItalic ? '*' : ''}${inner}${fontItalic ? '*' : ''}${fontWeight ? '**' : ''}` : ''; }
+      else if (fontWeight || fontItalic) s += wrapInline(inlineOf(n), `${fontWeight ? '**' : ''}${fontItalic ? '*' : ''}`);
       else s += inlineOf(n);
     }
     return s;
@@ -204,24 +230,37 @@ export function htmlToMarkdown(root) {
   const tableToMarkdown = (table) => {
     const rows = [...table.querySelectorAll('tr')];
     if (!rows.length) return '';
-    const rowCells = (tr) => [...tr.children].map(c => inlineOf(c).trim().replace(/\|/g, '\\|'));
+    const rowCells = (tr) => [...tr.children].map(c => inlineOf(c).replace(/\s*\n\s*/g, ' ').trim().replace(/\|/g, '\\|'));
     const header = rowCells(rows[0]);
     const bodyRows = rows.slice(1).map(rowCells);
     const sep = header.map(() => '---');
     return [header, sep, ...bodyRows].map(r => `| ${r.join(' | ')} |`).join('\n');
   };
 
+  const listItemText = (li) => {
+    const segments = [];
+    let run = [];
+    const flush = () => { segments.push(inlineOf({ childNodes: run }).trim()); run = []; };
+    for (const c of li.childNodes) {
+      const tag = c.nodeType === 1 ? c.tagName.toLowerCase() : '';
+      if (tag === 'ul' || tag === 'ol') continue;
+      if (tag && BLOCK_TAG_RE.test(tag)) { flush(); segments.push(inlineOf(c).trim()); }
+      else run.push(c);
+    }
+    flush();
+    return segments.filter(Boolean).join('\n');
+  };
+
   const listToMarkdown = (listEl, depth) => {
     const ordered = listEl.tagName.toLowerCase() === 'ol';
     const lines = [];
-    let idx = 1;
+    let idx = ordered ? (Number(listEl.getAttribute('start')) || 1) : 1;
     const indent = '  '.repeat(depth);
     for (const li of listEl.children) {
       if (li.tagName.toLowerCase() !== 'li') continue;
       const nested = [...li.children].filter(c => /^(ul|ol)$/i.test(c.tagName));
-      const own = { childNodes: [...li.childNodes].filter(c => !(c.nodeType === 1 && /^(ul|ol)$/i.test(c.tagName))) };
       const marker = ordered ? `${idx++}. ` : '- ';
-      lines.push(indent + marker + inlineOf(own).trim());
+      lines.push(indent + marker + listItemText(li).replace(/\n/g, '\n' + indent + '  '));
       for (const sub of nested) lines.push(listToMarkdown(sub, depth + 1));
     }
     return lines.join('\n');
@@ -281,7 +320,7 @@ const DEFAULT_REWRITE_FIELDS = ['title', 'summary', 'description', 'resolution']
 
 export function parseRewriteSections(text, fields = DEFAULT_REWRITE_FIELDS) {
   const source = `^##\\s+(${fields.map(f => f.toUpperCase()).join('|')})\\s*$`;
-  const lines = String(text || '').split('\n');
+  const lines = splitLines(text);
   const strict = new RegExp(source);
   const marker = lines.some(l => strict.test(l)) ? strict : new RegExp(source, 'i');
   const out = {};
@@ -310,7 +349,7 @@ export function serializeRewriteSections(sections, fields = DEFAULT_REWRITE_FIEL
 function renderListBlockToHtml(b) {
   const tag = b.ordered ? 'ol' : 'ul';
   const startAttr = b.ordered && b.start !== 1 ? ` start="${b.start}"` : '';
-  return `<${tag}${startAttr}>${b.items.map(it => `<li>${it.text.split('\n').map(inlineToHtml).join('<br>')}${it.children ? renderListBlockToHtml(it.children) : ''}</li>`).join('')}</${tag}>`;
+  return `<${tag}${startAttr}>${b.items.map(it => `<li>${it.text.split('\n').map(inlineToHtml).join('<br>')}${it.children.map(renderListBlockToHtml).join('')}</li>`).join('')}</${tag}>`;
 }
 
 export function markdownToHtml(md, { headingBase = 2 } = {}) {

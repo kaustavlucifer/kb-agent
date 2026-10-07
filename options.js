@@ -58,9 +58,8 @@ function fieldShell(item, control) {
   return field;
 }
 
-function buildModelField(item, value) {
-  const select = document.createElement('select');
-  select.id = `opt-${item.key}`;
+function fillModelSelect(select, item, value) {
+  select.textContent = '';
   for (const m of modelOptionsFor(item, value)) {
     const opt = document.createElement('option');
     opt.value = m.value;
@@ -69,6 +68,12 @@ function buildModelField(item, value) {
     select.appendChild(opt);
   }
   select.value = value;
+}
+
+function buildModelField(item, value) {
+  const select = document.createElement('select');
+  select.id = `opt-${item.key}`;
+  fillModelSelect(select, item, value);
   controls[item.key] = { kind: 'model', read: () => select.value };
   return fieldShell(item, select);
 }
@@ -76,17 +81,7 @@ function buildModelField(item, value) {
 function refreshModelDropdowns() {
   for (const item of modelItems) {
     const select = document.getElementById(`opt-${item.key}`);
-    if (!select) continue;
-    const currentValue = select.value;
-    select.textContent = '';
-    for (const m of modelOptionsFor(item, currentValue)) {
-      const opt = document.createElement('option');
-      opt.value = m.value;
-      opt.textContent = m.label;
-      opt.title = m.title;
-      select.appendChild(opt);
-    }
-    select.value = currentValue;
+    if (select) fillModelSelect(select, item, select.value);
   }
 }
 

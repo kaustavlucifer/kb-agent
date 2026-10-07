@@ -99,7 +99,8 @@ function toKiItem(ki, lightningHost, relevanceScore, relevanceReason) {
 }
 
 async function rankKiRelevance(candidates, caseAbstract, caseSubject, lightningHost, signal) {
-  const kiList = candidates.slice(0, 10).map((r, i) => {
+  const shown = candidates.slice(0, 10);
+  const kiList = shown.map((r, i) => {
     return `[${i}] ${r.Name}: "${r.Subject__c || ''}"\nSummary: ${(r.Summary__c || '').slice(0, 200)}\nCloud: ${r.Cloud__c || ''}\nStatus: ${r.Status__c || ''}`;
   }).join('\n\n');
 
@@ -112,12 +113,12 @@ async function rankKiRelevance(candidates, caseAbstract, caseSubject, lightningH
       signal
     });
     const parsed = extractJson(extractText(resp));
-    if (parsed?.ranked?.length) {
+    if (Array.isArray(parsed?.ranked)) {
       return parsed.ranked
-        .filter(r => r.index >= 0 && r.index < candidates.length && r.score > 30)
+        .filter(r => Number.isInteger(r.index) && r.index >= 0 && r.index < shown.length && r.score > 30)
         .sort((a, b) => b.score - a.score)
         .slice(0, 5)
-        .map(r => toKiItem(candidates[r.index], lightningHost, r.score, r.reason || ''));
+        .map(r => toKiItem(shown[r.index], lightningHost, r.score, r.reason || ''));
     }
   } catch {}
 

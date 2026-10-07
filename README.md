@@ -128,7 +128,18 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.26.0 (current)
+### v2.26.1 (current)
+- Fixed header connection chips, ↻ and update button not appearing when reopening the popup with unchanged connection status (v2.26.0 regression)
+- Fixed a popup freeze on Windows (CRLF) line endings in markdown (e.g. case descriptions); one markdown renderer now (images render instead of "undefined"); mixed nested lists, list numbering, continuation lines, and inline spacing survive editing
+- Connection checks: transient errors are no longer cached as "expired"; rechecks resume when returning to the tab; OrgCS drives polling (GUS/KI optional); AI token check cached and not polled; timeouts on all connection checks
+- Rate limiter tracks each popup/options tab separately and survives service worker restarts, so multiple tabs no longer exceed the RPM limit
+- Case analysis: Stop late in a run no longer posts the case-scan marker; "Create New Anyway" keeps the worker alive while scoring; unexpected AI decisions fall back safely; KI suggestion starts earlier and BOTH runs rewrite + new draft in parallel; sidebar rewrites and refined drafts get AF scores; Stop cancels scoring calls; no unrelated Known Issues shown when none are relevant
+- KB scoring: a late rewrite score can no longer land in another article's modal; rewrite scores use the same inputs as the original so they are comparable; fewer chatter queries
+- Known Issues: Update KI refuses to overwrite newer edits made in the org (with an explicit overwrite option); KI work no longer lost across multiple tabs or on close; second save in the same modal works; failed approval lookups show "approval unknown"; Refresh correctly clears stale scores; Stop for KI generation; PII masking now also redacts IDs and customer hosts inside URLs while keeping KI-org image links
+- Dedup: old cached pairs without record ids are dropped; small product groups share body queries
+- Manifest: minimum Chrome 130; consolidated session/request/gateway helpers and removed dead code (caseUrl path, merge-save debounce, unused exports)
+
+### v2.26.0
 - Fixed a popup freeze when markdown had indented text or code under a list item (rewrite output with "expected outcome" lines could hang rendering and scoring)
 - Modals now stack: the draft-exists confirmation, Compare, and score detail open on top instead of closing the Rewrite/Merge modal; Escape closes the top modal; drag-selecting out of a modal no longer closes it
 - Case analysis keeps running when switching tabs; Stop works for "Create New Anyway"; sidebar Update shows inline progress and can't overwrite a newer analysis; "Suggest Updates Anyway" now generates rewrites; Known Issue search errors are shown; HTML→Markdown conversion runs once so code samples survive

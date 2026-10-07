@@ -19,37 +19,13 @@ export function escapeSosl(str) {
   return String(str || '').replace(/[?&|!{}[\]()^~*:\\"'+\-]/g, '\\$&');
 }
 
-export async function sfGet(url, sid, signal) {
+async function sfRequest(method, url, sid, body, signal) {
+  const headers = { Authorization: `Bearer ${sid}`, Accept: 'application/json' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
   const resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${sid}`, Accept: 'application/json' },
-    signal
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`SF API ${resp.status}: ${text.slice(0, 200)}`);
-  }
-  return resp.json();
-}
-
-export async function sfPost(url, sid, body, signal) {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${sid}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-    signal
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`SF API ${resp.status}: ${text.slice(0, 200)}`);
-  }
-  return resp.json();
-}
-
-export async function sfPatch(url, sid, body, signal) {
-  const resp = await fetch(url, {
-    method: 'PATCH',
-    headers: { Authorization: `Bearer ${sid}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
     signal
   });
   if (!resp.ok) {
@@ -58,6 +34,18 @@ export async function sfPatch(url, sid, body, signal) {
   }
   if (resp.status === 204) return {};
   return resp.json();
+}
+
+export function sfGet(url, sid, signal) {
+  return sfRequest('GET', url, sid, undefined, signal);
+}
+
+export function sfPost(url, sid, body, signal) {
+  return sfRequest('POST', url, sid, body, signal);
+}
+
+export function sfPatch(url, sid, body, signal) {
+  return sfRequest('PATCH', url, sid, body, signal);
 }
 
 export async function sfQuery(apiBase, sid, soql, signal, onProgress) {
@@ -183,7 +171,7 @@ function isSessionOrgHost(src, session) {
     const host = hostname.toLowerCase();
     if (host === apiHost || host === (session.lightningHost || '').toLowerCase()) return true;
     const orgKey = apiHost.split('.')[0];
-    return host.startsWith(`${orgKey}--`) && /\.(salesforce|force|documentforce|visualforce)\.com$/.test(host);
+    return host.startsWith(`${orgKey}--`) && /\.(salesforce|force)\.com$/.test(host);
   } catch {
     return false;
   }

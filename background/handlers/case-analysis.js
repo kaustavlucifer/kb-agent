@@ -1,35 +1,35 @@
 import { detectSession, isCaseAnalysisAllowed, verifyGuardRailFields } from '../../shared/auth.js';
-import { sfGet, sfQuery, sfSearch, soqlIdList, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml, stripHtmlKeepLinks, buildPromptContent } from '../../shared/api.js';
+import { sfGet, sfQuery, sfSearch, sanitizeId, escapeSoql, escapeSosl, mapWithConcurrency, stripHtml, stripHtmlKeepLinks, buildPromptContent } from '../../shared/api.js';
 import { redactPii, redactCaseRecord, redactComments } from '../../shared/pii.js';
 import { logSignature } from '../../shared/signature.js';
 import { callClaudeFast, streamClaude, extractText, extractJson } from '../../shared/gateway.js';
-import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, BODY_FETCH_BATCH_SIZE, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
-import { scoreArticle as sharedScoreArticle, draftToScorable, fetchArticleChatterBatch } from '../../shared/scoring.js';
+import { TOP_K, FINAL_MAX_TOKENS, SOSL_PER_QUERY, MAX_SOSL_QUERIES, SF_API_VERSION, MAX_BODY_CHARS, STORAGE_KEYS, articleUrl, SCORE_GOOD_ENOUGH_THRESHOLD, RELEVANCE_COVERAGE_THRESHOLD, SCORE_CONCURRENCY } from '../../shared/config.js';
+import { scoreArticle as sharedScoreArticle, draftToScorable, fetchArticleBodies, fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { resolveTargetPts } from '../../data/pt_routing.js';
 import { PRODUCT_DOCS_CONFIG } from '../../data/product_docs_config.js';
-import { extractWorkItemNames, fetchGusWorkItems, GUS_WORK_NAME_RE } from './gus-enrichment.js';
+import { extractWorkItemNames, fetchGusWorkItems, GUS_WORK_NAME_RE, GUS_WORK_ITEM_RE } from './gus-enrichment.js';
 import { fetchRelatedKnownIssues } from './ki-enrichment.js';
-import { generateKiDraftContent, kiUrl } from './ki-publish.js';
+import { generateKiDraftContent } from './ki-publish.js';
 import { GUIDE_GENERATION, GUIDE_DECISION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../../data/writing_guide_prompts.js';
 
-function getGuardRailExtraFields(guardRailFields) {
-  const extra = [];
-  if (guardRailFields?.supportLevelName) extra.push(guardRailFields.supportLevelName);
-  if (guardRailFields?.hyperforceName) extra.push(guardRailFields.hyperforceName);
-  return extra.length ? ',' + extra.join(',') : '';
+function caseFieldList(baseFields, guardRailFields) {
+  const fields = new Map();
+  for (const f of [...baseFields.split(','), guardRailFields?.supportLevelName, guardRailFields?.hyperforceName]) {
+    if (f && !fields.has(f.toLowerCase())) fields.set(f.toLowerCase(), f);
+  }
+  return [...fields.values()].join(',');
 }
 
-const _portStopHandlers = new WeakMap();
+export function startPortKeepalive(port) {
+  const timer = setInterval(() => {
+    try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(timer); }
+  }, 25_000);
+  return () => clearInterval(timer);
+}
 
-function bindStopHandler(port, onStop) {
-  let handlers = _portStopHandlers.get(port);
-  if (!handlers) {
-    handlers = { current: null };
-    _portStopHandlers.set(port, handlers);
-    port.onMessage.addListener((m) => { if (m.action === 'STOP') handlers.current?.(); });
-    port.onDisconnect.addListener(() => handlers.current?.());
-  }
-  handlers.current = onStop;
+function onPortStop(port, onStop) {
+  port.onMessage.addListener((m) => { if (m.action === 'STOP') onStop(); });
+  port.onDisconnect.addListener(onStop);
 }
 
 async function fetchCaseComments(apiBase, sid, caseId, signal) {
@@ -51,7 +51,7 @@ async function fetchGuardedCase(session, caseId, baseFields, signal) {
     chrome.storage.local.get([STORAGE_KEYS.BYPASS_GUARD_RAILS])
   ]);
   const bypassEnabled = settings[STORAGE_KEYS.BYPASS_GUARD_RAILS] === true;
-  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${baseFields}${getGuardRailExtraFields(guardRailFields)}`, session.sid, signal);
+  const caseRecord = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Case/${caseId}?fields=${caseFieldList(baseFields, guardRailFields)}`, session.sid, signal);
   if (!caseRecord || !caseRecord.Id) return { error: 'Case not found.' };
   if (bypassEnabled) return { caseRecord };
   if (guardRailFields.describeFailed) {
@@ -71,14 +71,12 @@ export async function handleAnalyze(port, msg) {
   const signal = abortController.signal;
   let stopped = false;
 
-  const keepalive = setInterval(() => {
-    try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
-  }, 25_000);
+  const stopKeepalive = startPortKeepalive(port);
 
-  bindStopHandler(port, () => {
+  onPortStop(port, () => {
     stopped = true;
     abortController.abort();
-    clearInterval(keepalive);
+    stopKeepalive();
   });
 
   const send = (data) => { try { port.postMessage(data); } catch {} };
@@ -145,11 +143,14 @@ export async function handleAnalyze(port, msg) {
   }
 
   const kiPromise = fetchRelatedKnownIssues(caseAbstract, ptPatterns, aiCaseRecord.Subject, signal).catch(e => ({ items: [], error: e.message }));
+  const kiSuggestionPromise = kiPromise
+    .then(kiData => computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, gusData.items, signal))
+    .catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
 
   const caseContextForDocs = `Subject: ${aiCaseRecord.Subject}\nProduct & Topic: ${casePt}\nDescription: ${(aiCaseRecord.Description || '').slice(0, 800)}`;
   const [soslResults, productDocs, kiData] = await Promise.all([
     soslPrimarySearch(session.apiBase, session.sid, allQueries, ptPatterns, signal),
-    searchProductDocs(session.apiBase, session.sid, allQueries, casePt, caseContextForDocs, signal),
+    searchProductDocs(session.apiBase, session.sid, allQueries, ptPatterns, caseContextForDocs, signal),
     kiPromise
   ]);
 
@@ -166,7 +167,10 @@ export async function handleAnalyze(port, msg) {
   send({ type: 'progress', step: 4, label: `Loading ${soslResults.length} article bodies` });
   const candidates = soslResults.slice(0, 15);
 
-  const candidateBodies = await fetchCandidateBodies(session.apiBase, session.sid, candidates, signal);
+  const [candidateBodies, candidateChatter] = await Promise.all([
+    fetchCandidateBodies(session, candidates, signal),
+    fetchArticleChatterBatch(candidates.map(c => c.Id), session, 'Knowledge__Feed', signal).catch(() => new Map())
+  ]);
 
   const articleDetailsForAI = candidates.map((a, i) => {
     const body = candidateBodies.get(a.Id) || {};
@@ -254,7 +258,7 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   send({ type: 'progress', step: 5, label: 'Scoring existing article quality…' });
   const kbScoredArticles = [...scoredArticles];
-  const articleChatter = await scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session);
+  await scoreExistingArticlesQuality(scoredArticles, candidateBodies, candidateChatter, kbScoredArticles, signal);
   send({ type: 'meta', topArticles: [...kbScoredArticles] });
 
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
@@ -294,7 +298,12 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
   if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   const action = decision.action;
-  const kiSuggestionPromise = computeKiSuggestion(aiCaseRecord, aiComments, caseAbstract, kiData, casePt, gusData.items, signal).catch(() => ({ action: 'NONE', reason: 'Known Issue evaluation failed.' }));
+  const wantsRewrites = action === 'UPDATE_EXISTING' || action === 'BOTH';
+  const wantsDraft = action === 'CREATE_NEW' || action === 'BOTH';
+  const [suggestions, draft] = await Promise.all([
+    wantsRewrites ? generateFullRewrites(topArticles, candidateBodies, candidateChatter, aiCaseRecord, aiComments, caseAbstract, send, signal, session) : null,
+    wantsDraft ? generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, candidateBodies, send, signal, session) : null
+  ]);
   let structured;
 
   if (action === 'NO_ACTION') {
@@ -309,29 +318,22 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       coveringArticles: decision.noCoverage ? coveringArticles : (coveringArticles.length ? coveringArticles : scoredArticles.slice(0, 3)),
       noCoverage: !!decision.noCoverage
     };
-  } else if (action === 'UPDATE_EXISTING' || action === 'BOTH') {
-    const suggestions = await generateFullRewrites(topArticles, candidateBodies, articleChatter, aiCaseRecord, aiComments, caseAbstract, send, signal, session);
+  } else if (wantsRewrites) {
     structured = {
       action,
       confidence: decision.confidence,
       summary: `${decision.reason} ${action === 'BOTH' ? 'Showing existing article suggestions and a new article draft.' : 'Updating existing articles.'}`,
       suggestions,
-      topologyAssessment: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber }))
+      topologyAssessment: topArticles.map(a => ({ id: a.Id, title: a.Title, articleNumber: a.ArticleNumber })),
+      ...(draft ? { newArticleDraft: draft } : {})
     };
-  }
-
-  if (action === 'CREATE_NEW' || action === 'BOTH') {
-    const draft = await generateNewArticleStreaming(aiCaseRecord, aiComments, caseAbstract, intentsResult, candidateBodies, send, signal, session);
-    if (structured && action === 'BOTH') {
-      structured.newArticleDraft = draft;
-    } else {
-      structured = {
-        action: 'CREATE_NEW',
-        confidence: decision.confidence,
-        summary: `${decision.reason} Drafting a new article.`,
-        newArticleDraft: draft
-      };
-    }
+  } else {
+    structured = {
+      action: 'CREATE_NEW',
+      confidence: decision.confidence,
+      summary: `${decision.reason} Drafting a new article.`,
+      newArticleDraft: draft
+    };
   }
 
   const kiSuggestion = await kiSuggestionPromise;
@@ -339,6 +341,8 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
 
   await caseSummaryPromise;
   const prodDocGap = await prodDocGapPromise;
+
+  if (stopped) { send({ type: 'stopped', partial: true }); return; }
 
   logSignature('case-scan', session.apiBase, session.sid, caseId);
   send({ type: 'result', success: true, caseId, caseNumber: caseRecord.CaseNumber, subject: caseRecord.Subject, caseAbstract, structured, prodDocGap });
@@ -353,15 +357,19 @@ Set "notRelevant": true for articles scoring below 30. Include ALL articles.`,
       send({ type: 'error', error: e?.message || 'Analysis failed.' });
     }
   } finally {
-    clearInterval(keepalive);
+    stopKeepalive();
   }
 }
 
 export async function handleGenerateNew(port, msg) {
   const abortController = new AbortController();
   const signal = abortController.signal;
+  const stopKeepalive = startPortKeepalive(port);
 
-  bindStopHandler(port, () => abortController.abort());
+  onPortStop(port, () => {
+    abortController.abort();
+    stopKeepalive();
+  });
 
   const send = (data) => { try { port.postMessage(data); } catch {} };
 
@@ -406,6 +414,8 @@ export async function handleGenerateNew(port, msg) {
     } else {
       send({ type: 'error', error: e?.message || 'Article generation failed.' });
     }
+  } finally {
+    stopKeepalive();
   }
 }
 
@@ -533,35 +543,25 @@ async function soslPrimarySearch(apiBase, sid, queries, ptPatterns, signal) {
   return results;
 }
 
-async function fetchCandidateBodies(apiBase, sid, candidates, signal) {
+async function fetchCandidateBodies(session, candidates, signal) {
+  const bodies = await fetchArticleBodies(candidates.map(c => c.Id), session, signal);
   const bodyMap = new Map();
-  if (!candidates.length) return bodyMap;
-  const ids = candidates.map(c => c.Id);
-  const batches = [];
-  for (let i = 0; i < ids.length; i += BODY_FETCH_BATCH_SIZE) batches.push(ids.slice(i, i + BODY_FETCH_BATCH_SIZE));
-
-  await mapWithConcurrency(batches, 3, async (batch) => {
-    const soql = `SELECT Id, Title, Summary, Description__c, Resolution__c, Steps__c, additional_resources__c, ArticleNumber, Product_And_Topic__r.Name FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-    const result = await sfGet(`${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, sid, signal);
-    for (const r of (result.records || [])) {
-      bodyMap.set(r.Id, {
-        id: r.Id,
-        title: r.Title || '',
-        summary: r.Summary || '',
-        articleNumber: r.ArticleNumber || '',
-        topicName: r.Product_And_Topic__r?.Name || '',
-        description: r.Description__c || '',
-        resolution: r.Resolution__c || '',
-        steps: r.Steps__c || '',
-        additionalResources: r.additional_resources__c || ''
-      });
-    }
-  });
+  for (const c of candidates) {
+    const body = bodies.get(c.Id);
+    if (!body) continue;
+    bodyMap.set(c.Id, {
+      id: c.Id,
+      title: c.Title || '',
+      summary: c.Summary || '',
+      articleNumber: c.ArticleNumber || '',
+      topicName: c.topicName || '',
+      ...body
+    });
+  }
   return bodyMap;
 }
 
 async function assessProductDocGap(caseRecord, caseAbstract, productDocs, signal) {
-  if (!productDocs.length) return null;
   const topDocs = productDocs.slice(0, 5);
   const docsText = topDocs.map((d, i) => `${i}. "${d.title}"${d._relevanceScore ? ` (relevance: ${d._relevanceScore})` : ''} — ${(d.summary || '').slice(0, 300)}`).join('\n');
   try {
@@ -615,18 +615,17 @@ const _docConfigKeyMap = Object.fromEntries(
   Object.keys(PRODUCT_DOCS_CONFIG).map(k => [k.toLowerCase(), k])
 );
 
-function getProductDocsConfig(casePt) {
-  const allPts = resolveTargetPts(casePt);
+function productDocUrlPatterns(ptPatterns) {
   const urlPatterns = new Set();
 
-  for (const pt of allPts) {
+  for (const pt of ptPatterns) {
     const configKey = _docConfigKeyMap[pt.toLowerCase()] || pt;
     const config = PRODUCT_DOCS_CONFIG[configKey];
     if (config) {
       config.urlPatterns.forEach(p => urlPatterns.add(p));
     }
   }
-  return { urlPatterns: [...urlPatterns] };
+  return [...urlPatterns];
 }
 
 async function getCachedProductDocs(cacheKey) {
@@ -657,8 +656,8 @@ async function setCachedProductDocs(cacheKey, articles) {
   } catch {}
 }
 
-async function searchProductDocs(apiBase, sid, queries, casePt, caseContext, signal) {
-  const { urlPatterns } = getProductDocsConfig(casePt);
+async function searchProductDocs(apiBase, sid, queries, ptPatterns, caseContext, signal) {
+  const urlPatterns = productDocUrlPatterns(ptPatterns);
 
   const [soslDocs, patternDocs] = await Promise.all([
     searchProductDocsSosl(apiBase, sid, queries, signal),
@@ -675,8 +674,7 @@ async function searchProductDocs(apiBase, sid, queries, casePt, caseContext, sig
 
   if (!merged.length) return [];
 
-  const scored = await scoreProductDocsRelevance(merged, caseContext, signal);
-  return scored;
+  return scoreProductDocsRelevance(merged, caseContext, signal);
 }
 
 async function searchProductDocsSosl(apiBase, sid, queries, signal) {
@@ -706,6 +704,7 @@ async function searchProductDocsSosl(apiBase, sid, queries, signal) {
 }
 
 const URL_PATTERN_BATCH_SIZE = 10;
+const PATTERN_DOCS_PER_BATCH = 50;
 
 async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
   const cacheKey = PROD_DOCS_CACHE_PREFIX + hashKey([...urlPatterns].sort().join('|'));
@@ -715,45 +714,37 @@ async function searchProductDocsByPattern(apiBase, sid, urlPatterns, signal) {
   const patternBatches = [];
   for (let i = 0; i < urlPatterns.length; i += URL_PATTERN_BATCH_SIZE) patternBatches.push(urlPatterns.slice(i, i + URL_PATTERN_BATCH_SIZE));
 
-  try {
-    const results = await mapWithConcurrency(patternBatches, 3, async (patternBatch) => {
-      const clauses = patternBatch.map(p => `Help_Portal_URL__c LIKE '%id=${p}%'`).join(' OR ');
-      const soql = `SELECT Id, Title, Help_Portal_URL__c, ArticleNumber, Summary `
-        + `FROM Knowledge__kav `
-        + `WHERE RecordType.DeveloperName = 'Product_Documentation' `
-        + `AND PublishStatus = 'Online' AND IsLatestVersion = true AND Language = 'en_US' `
-        + `AND (${clauses}) `
-        + `LIMIT 2000`;
-      const url = `${apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, sid, signal);
-      return result.records || [];
-    });
+  const results = await mapWithConcurrency(patternBatches, 3, (patternBatch) => {
+    const clauses = patternBatch.map(p => `Help_Portal_URL__c LIKE '%id=${p}%'`).join(' OR ');
+    const soql = `SELECT Id, Title, Help_Portal_URL__c, ArticleNumber, Summary `
+      + `FROM Knowledge__kav `
+      + `WHERE RecordType.DeveloperName = 'Product_Documentation' `
+      + `AND PublishStatus = 'Online' AND IsLatestVersion = true AND Language = 'en_US' `
+      + `AND (${clauses}) `
+      + `ORDER BY LastModifiedDate DESC LIMIT ${PATTERN_DOCS_PER_BATCH}`;
+    return sfQuery(apiBase, sid, soql, signal);
+  }, signal);
 
-    const seen = new Set();
-    const articles = [];
-    const complete = results.every(batch => !batch?.__error);
-    for (const batch of results) {
-      if (batch?.__error) continue;
-      for (const r of batch) {
-        if (seen.has(r.Id)) continue;
-        seen.add(r.Id);
-        articles.push({
-          id: r.Id, title: r.Title, articleNumber: r.ArticleNumber,
-          summary: r.Summary || '', url: articleUrl(r.Id),
-          helpUrl: r.Help_Portal_URL__c || '', source: 'pattern'
-        });
-      }
+  const seen = new Set();
+  const articles = [];
+  const complete = results.every(batch => Array.isArray(batch));
+  for (const batch of results) {
+    if (!Array.isArray(batch)) continue;
+    for (const r of batch) {
+      if (seen.has(r.Id)) continue;
+      seen.add(r.Id);
+      articles.push({
+        id: r.Id, title: r.Title, articleNumber: r.ArticleNumber,
+        summary: r.Summary || '', url: articleUrl(r.Id),
+        helpUrl: r.Help_Portal_URL__c || '', source: 'pattern'
+      });
     }
-    if (complete) await setCachedProductDocs(cacheKey, articles);
-    return articles;
-  } catch {
-    return [];
   }
+  if (complete) await setCachedProductDocs(cacheKey, articles);
+  return articles;
 }
 
 async function scoreProductDocsRelevance(articles, caseContext, signal) {
-  if (!caseContext || !articles.length) return articles.slice(0, 15);
-
   const candidates = articles.slice(0, 50);
   const docsList = candidates
     .map((a, i) => `[${i}] "${a.title}"${a.summary ? ' — ' + a.summary.slice(0, 100) : ''}`)
@@ -857,6 +848,7 @@ JSON: {"title":"...","summary":"...","sections":[{"heading":"Description","body"
         send({ type: 'suggestion-ready', articleId: article.Id, articleNumber: article.ArticleNumber, articleTitle: article.Title, suggestions: [rewrite] });
       }
     } catch (e) {
+      if (signal?.aborted) throw e;
       send({ type: 'suggestion-error', articleId: article.Id, articleNumber: article.ArticleNumber, error: e?.message || 'Failed' });
     }
   });
@@ -883,6 +875,8 @@ Return JSON: {"problem_statement":"...","root_cause":"...or null","resolution_st
     return null;
   }
 }
+
+const KB_ACTIONS = new Set(['NO_ACTION', 'UPDATE_EXISTING', 'CREATE_NEW', 'BOTH']);
 
 async function evaluateKBGaps(structuredResolution, topArticles, candidateBodies, caseRecord, abstract, gusItems, signal) {
   if (!topArticles.length) return { action: 'CREATE_NEW', confidence: 'HIGH', reason: 'No existing articles found.', gaps: [] };
@@ -933,7 +927,7 @@ Return JSON: {"action":"NO_ACTION"|"UPDATE_EXISTING"|"CREATE_NEW"|"BOTH","noActi
     });
     const parsed = extractJson(extractText(resp));
     if (parsed?.action === 'NO_ACTION' && parsed.noActionBasis !== 'COVERED') parsed.noCoverage = true;
-    return parsed || { action: 'NO_ACTION', confidence: 'LOW', reason: 'Coverage evaluation returned an unreadable response — review the articles manually or override below.', gaps: [], noCoverage: true };
+    return KB_ACTIONS.has(parsed?.action) ? parsed : { action: 'NO_ACTION', confidence: 'LOW', reason: 'Coverage evaluation returned an unreadable response — review the articles manually or override below.', gaps: [], noCoverage: true };
   } catch (e) {
     if (signal?.aborted) throw e;
     return { action: 'NO_ACTION', confidence: 'LOW', reason: `Coverage evaluation failed (${e.message}) — review the articles manually or override below.`, gaps: [], noCoverage: true };
@@ -1001,7 +995,7 @@ function computeCompleteness(caseRecord, comments) {
   const hasConfig = /\b(org id|instance|version|release|sandbox|production|config)\b/i.test(desc + commentTexts.join(' '));
   if (hasConfig) { score += 10; details.push('environment-context'); }
 
-  if (commentTexts.some(c => /W-\d{4,}/.test(c))) { score += 10; details.push('gus-refs'); }
+  if (commentTexts.some(c => new RegExp(GUS_WORK_ITEM_RE.source).test(c))) { score += 10; details.push('gus-refs'); }
 
   const hasResolution = commentTexts.some(c => /\b(workaround|fix|resolved|solution|root cause)\b/i.test(c));
   if (hasResolution) { score += 20; details.push('resolution-context'); }
@@ -1023,12 +1017,12 @@ function workItemDefectState(item) {
   return NOT_A_DEFECT_STATUS_RE.test(status) ? 'not-defect' : 'defect';
 }
 
-async function computeKiSuggestion(caseRecord, comments, abstract, kiData, casePt, gusItems, signal) {
+async function computeKiSuggestion(caseRecord, comments, abstract, kiData, gusItems, signal) {
   const bestExisting = (kiData.items || [])[0];
   if (bestExisting && bestExisting.relevanceScore != null && bestExisting.relevanceScore >= 60) {
     return {
       action: 'EXISTING_COVERS',
-      existingKi: { id: bestExisting.id, name: bestExisting.name, subject: bestExisting.subject, url: kiUrl(kiData.lightningHost, bestExisting.id) }
+      existingKi: { id: bestExisting.id, name: bestExisting.name, subject: bestExisting.subject, url: bestExisting.url }
     };
   }
   if (!gusItems?.length) {
@@ -1057,9 +1051,7 @@ async function computeKiSuggestion(caseRecord, comments, abstract, kiData, caseP
   return { action: 'DRAFT_NEW', draft, workId: linkedBug?.name || primary.name };
 }
 
-async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbScoredArticles, signal, session) {
-  if (!scoredArticles.length) return new Map();
-  const chatterMap = await fetchArticleChatterBatch(scoredArticles.map(a => a.id), session, 'Knowledge__Feed', signal).catch(() => new Map());
+async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, chatterMap, kbScoredArticles, signal) {
   await mapWithConcurrency(scoredArticles, SCORE_CONCURRENCY, async (sa, idx) => {
     if (signal?.aborted) return;
     const body = candidateBodies.get(sa.id) || {};
@@ -1077,15 +1069,14 @@ async function scoreExistingArticlesQuality(scoredArticles, candidateBodies, kbS
       chatterNotes: chatterMap.get(sa.id) || ''
     };
     try {
-      const result = await sharedScoreArticle(enriched);
+      const result = await sharedScoreArticle(enriched, undefined, signal);
       kbScoredArticles[idx] = result.overall != null
         ? { ...scoredArticles[idx], kbScore: result.overall, kbCriteria: result.criteria }
         : { ...scoredArticles[idx], kbScoreError: true };
     } catch {
       if (!signal?.aborted) kbScoredArticles[idx] = { ...scoredArticles[idx], kbScoreError: true };
     }
-  });
-  return chatterMap;
+  }, signal);
 }
 
 async function autoScoreGeneratedArticles(structured, send, signal) {
@@ -1112,7 +1103,7 @@ async function autoScoreGeneratedArticles(structured, send, signal) {
     if (signal?.aborted) return;
     try {
       const scorable = draftToScorable(d.article);
-      const result = await sharedScoreArticle(scorable);
+      const result = await sharedScoreArticle(scorable, undefined, signal);
       if (result.overall != null) {
         send({ type: 'meta', draftScore: { key: d.key, score: { overall: result.overall, criteria: result.criteria || [] } } });
       }

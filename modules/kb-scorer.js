@@ -542,6 +542,7 @@ async function runCrossSearch(query) {
 }
 
 async function loadArticles(forceLive = false) {
+  if (forceLive) _rewriteSource = {};
   setState('kb.loading', true);
   try {
     const { articles, error, fromCache } = await loadAllArticles({
@@ -944,6 +945,7 @@ let _rewriteCache = {};
 let _rewriteAbort = null;
 let _rewriteRefineApplied = {};
 let _rewriteSource = {};
+let _rewriteScoreAbort = null;
 
 async function loadRewriteSource(article, session, signal) {
   if (_rewriteSource[article.id]) return _rewriteSource[article.id];
@@ -1022,7 +1024,11 @@ async function rewriteArticle(article) {
   let closed = false;
   modal('Rewrite Article', content, {
     wide: true,
-    onClose: () => { closed = true; if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; } }
+    onClose: () => {
+      closed = true;
+      if (_rewriteAbort) { _rewriteAbort.abort(); _rewriteAbort = null; }
+      if (_rewriteScoreAbort) { _rewriteScoreAbort.abort(); _rewriteScoreAbort = null; }
+    }
   });
 
   renderAppliedRefine(article);
@@ -1098,40 +1104,45 @@ let _rewriteScoreCache = {};
 
 async function scoreRewrite(article, fullText) {
   const scoreEl = document.getElementById('rewrite-score');
-  if (scoreEl) {
-    scoreEl.textContent = '';
-    scoreEl.appendChild(spinner('sm'));
-    scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Scoring…'));
-  }
+  if (!scoreEl) return;
+  if (_rewriteScoreAbort) _rewriteScoreAbort.abort();
+  const abort = new AbortController();
+  _rewriteScoreAbort = abort;
+  scoreEl.textContent = '';
+  scoreEl.appendChild(spinner('sm'));
+  scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Scoring…'));
+  const source = _rewriteSource[article.id] || article;
   const parsed = parseRewriteSections(fullText);
   const enriched = {
-    ...article,
+    ...source,
     ...draftToScorable({
       title: parsed.title || article.title,
       summary: parsed.summary,
       description: parsed.description,
       resolution: parsed.resolution,
+      steps: source.steps,
+      containsVideo: source.containsVideo,
       topicName: article.topicName,
       validationStatus: article.validationStatus
     })
   };
+  const isCurrent = () => !abort.signal.aborted && scoreEl.isConnected && _rewriteCache[article.id] === fullText;
   try {
-    const result = await scoreArticle(enriched);
-    if (_rewriteCache[article.id] !== fullText) return;
+    const result = await scoreArticle(enriched, undefined, abort.signal);
+    if (!isCurrent()) return;
     result.title = enriched.title;
     _rewriteScoreCache[article.id] = result;
-    renderRewriteScore(article, result);
-  } catch (e) {
-    if (_rewriteCache[article.id] !== fullText) return;
-    if (scoreEl) {
-      scoreEl.textContent = '';
-      scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, 'Score failed'));
-    }
+    renderRewriteScore(article, result, scoreEl);
+  } catch {
+    if (!isCurrent()) return;
+    scoreEl.textContent = '';
+    scoreEl.appendChild(h('span', { style: { fontSize: '11px', color: 'var(--error)' } }, 'Score failed'));
+  } finally {
+    if (_rewriteScoreAbort === abort) _rewriteScoreAbort = null;
   }
 }
 
-function renderRewriteScore(article, result) {
-  const scoreEl = document.getElementById('rewrite-score');
+function renderRewriteScore(article, result, scoreEl = document.getElementById('rewrite-score')) {
   if (!scoreEl || result?.overall == null) return;
   scoreEl.textContent = '';
   const overall = result.overall;
@@ -1169,6 +1180,7 @@ async function generateRewrite(article, session) {
   const el = document.getElementById('rewrite-stream');
   if (el) { el.textContent = ''; el.appendChild(spinner('md')); }
   delete _rewriteScoreCache[article.id];
+  if (_rewriteScoreAbort) { _rewriteScoreAbort.abort(); _rewriteScoreAbort = null; }
   const scoreEl = document.getElementById('rewrite-score');
   if (scoreEl) scoreEl.textContent = '';
 

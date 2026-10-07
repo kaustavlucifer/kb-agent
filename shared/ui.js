@@ -1,4 +1,4 @@
-import { parseInline, parseBlocks, markdownToHtml, htmlToMarkdown, parseRewriteSections, serializeRewriteSections } from './markdown.js';
+import { SAFE_URL_RE, markdownToHtml, htmlToMarkdown, parseRewriteSections, serializeRewriteSections } from './markdown.js';
 import { SCORE_HIGH_THRESHOLD, SCORE_MID_THRESHOLD } from './config.js';
 
 export function h(tag, attrs, ...children) {
@@ -36,9 +36,8 @@ export function statusPill(status, opts = {}) {
   return h('span', { class: `pill pill--${variant}`, style }, status);
 }
 
-const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'width', 'height', 'scope', 'headers', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
+const SAFE_HTML_ATTRS = new Set(['href', 'src', 'alt', 'title', 'class', 'style', 'target', 'rel', 'colspan', 'rowspan', 'start', 'width', 'height', 'scope', 'headers', 'name', 'type', 'value', 'align', 'valign', 'border', 'cellpadding', 'cellspacing']);
 
-const SAFE_URL_RE = /^(https?:|mailto:)/i;
 
 function sanitizeHtml(html) {
   const div = document.createElement('div');
@@ -294,86 +293,10 @@ export function createSorter(defaultCol, defaultDir = 'asc') {
   };
 }
 
-function renderInlineFormatting(text) {
-  const tokens = parseInline(text);
-  if (tokens.length === 1 && tokens[0].type === 'text') return document.createTextNode(tokens[0].text);
-  const span = h('span', null);
-  for (const t of tokens) {
-    switch (t.type) {
-      case 'bold': span.appendChild(h('strong', { style: { fontWeight: '600' } }, t.text)); break;
-      case 'italic': span.appendChild(h('em', null, t.text)); break;
-      case 'code': span.appendChild(h('code', { style: { background: 'var(--surface-raised)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px', fontFamily: 'var(--font-mono)' } }, t.text)); break;
-      case 'link': {
-        const safeHref = /^(https?:|mailto:)/i.test(t.href) ? t.href : '#';
-        span.appendChild(h('a', { href: safeHref, target: '_blank', rel: 'noopener', style: { color: 'var(--primary)' } }, t.text));
-        break;
-      }
-      default: span.appendChild(document.createTextNode(t.text));
-    }
-  }
-  return span;
-}
-
-const CODE_PRE_STYLE = { background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', padding: '10px 12px', fontSize: '11px', fontFamily: 'var(--font-mono)', overflowX: 'auto', margin: '6px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' };
-
-function appendListItems(container, listBlock, depth) {
-  listBlock.items.forEach((it, idx) => {
-    const marker = listBlock.ordered ? `${(listBlock.start || 1) + idx}. ` : '• ';
-    const row = h('div', { style: { paddingLeft: `${12 + depth * 16}px` } }, marker);
-    it.text.split('\n').forEach((ln, lnIdx) => {
-      if (lnIdx > 0) row.appendChild(h('br'));
-      row.appendChild(renderInlineFormatting(ln));
-    });
-    container.appendChild(row);
-    if (it.children) appendListItems(container, it.children, depth + 1);
-  });
-}
-
 export function renderMarkdown(text) {
-  if (!text) return h('span', null, '');
-  const container = h('div', { style: { fontSize: '12px', lineHeight: '1.6' } });
-  for (const b of parseBlocks(text)) {
-    switch (b.type) {
-      case 'hr':
-        container.appendChild(h('hr', { style: { border: 'none', borderTop: '1px solid var(--border)', margin: '12px 0' } }));
-        break;
-      case 'heading': {
-        if (b.level >= 3) container.appendChild(h('h4', { style: { fontSize: '12px', fontWeight: '600', marginTop: '6px', marginBottom: '3px' } }, renderInlineFormatting(b.text)));
-        else if (b.level === 2) container.appendChild(h('h3', { style: { fontSize: '13px', fontWeight: '600', marginTop: '8px', marginBottom: '4px' } }, renderInlineFormatting(b.text)));
-        else container.appendChild(h('h2', { style: { fontSize: '14px', fontWeight: '700', marginTop: '10px', marginBottom: '4px' } }, renderInlineFormatting(b.text)));
-        break;
-      }
-      case 'list':
-        appendListItems(container, b, 0);
-        break;
-      case 'code': {
-        const pre = h('pre', { style: CODE_PRE_STYLE });
-        if (b.lang) pre.appendChild(h('div', { style: { fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '4px', fontWeight: '600' } }, b.lang));
-        pre.appendChild(h('code', null, b.code));
-        container.appendChild(pre);
-        break;
-      }
-      case 'table': {
-        const table = h('table', { class: 'data-table', style: { marginTop: '8px', marginBottom: '12px', width: '100%' } });
-        table.appendChild(h('thead', null, h('tr', null, ...b.header.map(c => h('th', { style: { fontSize: '11px', padding: '6px 8px' } }, renderInlineFormatting(c))))));
-        const tbody = h('tbody', null);
-        for (const row of b.rows) tbody.appendChild(h('tr', null, ...row.map(c => h('td', { style: { fontSize: '11px', padding: '5px 8px' } }, renderInlineFormatting(c)))));
-        table.appendChild(tbody);
-        container.appendChild(table);
-        break;
-      }
-      case 'paragraph': {
-        const lines = b.text.split('\n');
-        const p = h('p', { style: { margin: '4px 0' } });
-        lines.forEach((ln, idx) => {
-          if (idx > 0) p.appendChild(h('br'));
-          p.appendChild(renderInlineFormatting(ln));
-        });
-        container.appendChild(p);
-        break;
-      }
-    }
-  }
+  const container = h('div', { class: 'md-render' });
+  if (!text) return container;
+  container.innerHTML = sanitizeHtml(markdownToHtml(text, { headingBase: 2 }));
   return container;
 }
 
@@ -563,6 +486,7 @@ export function multiSelect(id, label, options, selected, onChange) {
     removeDismiss();
     dropdown.style.display = 'none';
     if (_openMultiSelect === closeDropdown) _openMultiSelect = null;
+    if (!wrap.isConnected) return;
     const changed = pending.length !== selected.length || pending.some(v => !selected.includes(v));
     if (changed) onChange(pending);
   }
@@ -570,6 +494,7 @@ export function multiSelect(id, label, options, selected, onChange) {
   function toggleDropdown() {
     if (dropdown.style.display === 'flex') { closeDropdown(); return; }
     if (_openMultiSelect) _openMultiSelect();
+    if (!wrap.isConnected) return;
     pending = [...selected];
     updateCheckboxes();
     searchInput.value = '';
@@ -578,8 +503,7 @@ export function multiSelect(id, label, options, selected, onChange) {
     _openMultiSelect = closeDropdown;
     setTimeout(() => searchInput.focus(), 0);
     _dismiss = ev => {
-      if (!wrap.isConnected) { removeDismiss(); if (_openMultiSelect === closeDropdown) _openMultiSelect = null; return; }
-      if (!wrap.contains(ev.target)) closeDropdown();
+      if (!wrap.isConnected || !wrap.contains(ev.target)) closeDropdown();
     };
     setTimeout(() => document.addEventListener('click', _dismiss), 0);
   }

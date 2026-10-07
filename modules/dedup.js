@@ -4,7 +4,7 @@ import { detectSession } from '../shared/auth.js';
 import { mapWithConcurrency, stripHtmlKeepLinks, buildPromptContent } from '../shared/api.js';
 import { streamClaude } from '../shared/gateway.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { DEDUP_CONCURRENCY, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl, MAX_REWRITE_IMAGES_PER_ARTICLE } from '../shared/config.js';
+import { DEDUP_CONCURRENCY, BODY_FETCH_BATCH_SIZE, MAX_BODY_CHARS, STREAM_RENDER_THROTTLE_MS, STORAGE_KEYS, CLOUDS, getCloudFromPt, articleUrl, MAX_REWRITE_IMAGES_PER_ARTICLE } from '../shared/config.js';
 import { runDedupBatch, buildDedupWorkQueue, dedupePairs, normalizeArticleNumber, DEDUP_SYSTEM_CHARS } from '../shared/dedup.js';
 import { fetchArticleBodies, loadAllArticles } from '../shared/scoring.js';
 import { estimateDedup, fmtUsd } from '../shared/cost.js';
@@ -27,11 +27,8 @@ let _lastBodyMap = null;
 let _workQueueMemo = null;
 let _filterOptionsMemo = null;
 let _wasRunning = false;
-let _pendingMergeWrites = {};
-let _mergeSaveTimer = null;
 let _mergeSaveChain = Promise.resolve();
 
-const MERGE_SAVE_DEBOUNCE_MS = 400;
 const MAX_DISPLAY_PAIRS = 30;
 
 const mergeSectionsEditor = sectionsEditor({
@@ -90,15 +87,13 @@ export function unmount() {
   _unsubs = [];
   if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; }
   if (_mergeModalRef) { _mergeModalRef.close(); _mergeModalRef = null; }
-  flushMergeWrites();
   _container = null;
 }
 
 async function loadCachedResults() {
-  const data = await localGet([STORAGE_KEYS.DEDUP_RESULTS, STORAGE_KEYS.DEDUP_AT]);
-  if (data[STORAGE_KEYS.DEDUP_RESULTS]?.length) {
-    setState('dedup.pairs', data[STORAGE_KEYS.DEDUP_RESULTS]);
-  }
+  const data = await localGet([STORAGE_KEYS.DEDUP_RESULTS]);
+  const pairs = (data[STORAGE_KEYS.DEDUP_RESULTS] || []).filter(p => p.idA && p.idB);
+  if (pairs.length) setState('dedup.pairs', pairs);
 }
 
 async function ensureArticlesLoaded() {
@@ -154,8 +149,8 @@ function memoizedScope(articles) {
   const signature = `${_filterCloud.join('|')}:${_filterPt.join('|')}:${_filterValidation.join('|')}:${_filterPublish.join('|')}`;
   if (_workQueueMemo && _workQueueMemo.articles === articles && _workQueueMemo.signature === signature) return _workQueueMemo;
   const scopedArticles = scopeArticles(articles);
-  const { workQueue } = buildDedupWorkQueue(scopedArticles);
-  _workQueueMemo = { articles, signature, scopedArticles, workQueue };
+  const { workQueue, truncatedPts } = buildDedupWorkQueue(scopedArticles);
+  _workQueueMemo = { articles, signature, scopedArticles, workQueue, truncatedPts };
   return _workQueueMemo;
 }
 
@@ -306,8 +301,7 @@ function render() {
           h('div', { style: { display: 'flex', gap: '4px' } },
             h('button', {
               class: 'btn btn--ghost btn--sm',
-              disabled: !pair.idA || !pair.idB,
-              title: (!pair.idA || !pair.idB) ? 'Re-run Detect Duplicates to enable compare for this pair' : 'Compare both articles side by side',
+              title: 'Compare both articles side by side',
               onClick: () => showArticleCompare({ id: pair.idA, articleNumber: pair.articleA, title: pair.titleA }, { id: pair.idB, articleNumber: pair.articleB, title: pair.titleB })
             }, 'Compare'),
             h('button', { class: 'btn btn--ghost btn--sm', onClick: () => showMerge(pair) }, 'Merge')
@@ -321,37 +315,37 @@ function render() {
 
 async function clearResults() {
   setState('dedup.pairs', []);
-  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: [], [STORAGE_KEYS.DEDUP_AT]: null });
+  await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: [] });
 }
 
 async function detectDuplicates() {
   try {
-    const articles = scopeArticles(getState('kb.articles') || []);
+    const { scopedArticles: articles, workQueue, truncatedPts } = memoizedScope(getState('kb.articles') || []);
     if (articles.length < 2) { toast('Need at least 2 articles in selected filters.', 'error'); return; }
 
     const session = await detectSession();
     if (!session.sid) { toast('No SF session.', 'error'); return; }
 
-    const { workQueue, truncatedPts } = buildDedupWorkQueue(articles);
     if (!workQueue.length) { toast('Not enough articles per P&T to compare.', 'info'); return; }
 
     setState('dedup.running', { done: 0, total: workQueue.length, activePts: [] });
 
     const bodyMap = new Map();
-    const pendingBodies = new Map();
     const failedBodyIds = new Set();
-    const loadBodies = async (ids) => {
-      const missing = ids.filter(id => !bodyMap.has(id) && !pendingBodies.has(id) && !failedBodyIds.has(id));
-      if (missing.length) {
-        const request = fetchArticleBodies(missing, session).then(fetched => {
+    const orderedIds = [...new Set(workQueue.flatMap(item => item.batch.map(a => a.id)))];
+    const chunkOf = new Map(orderedIds.map((id, i) => [id, Math.floor(i / BODY_FETCH_BATCH_SIZE)]));
+    const chunkRequests = new Map();
+    const loadChunk = (index) => {
+      if (!chunkRequests.has(index)) {
+        const ids = orderedIds.slice(index * BODY_FETCH_BATCH_SIZE, (index + 1) * BODY_FETCH_BATCH_SIZE);
+        chunkRequests.set(index, fetchArticleBodies(ids, session).then(fetched => {
           for (const [id, body] of fetched) bodyMap.set(id, body);
           for (const id of fetched.failedIds || []) failedBodyIds.add(id);
-        });
-        missing.forEach(id => pendingBodies.set(id, request));
-        try { await request; } finally { missing.forEach(id => pendingBodies.delete(id)); }
+        }));
       }
-      await Promise.all(ids.map(id => pendingBodies.get(id)).filter(Boolean));
+      return chunkRequests.get(index);
     };
+    const loadBodies = (ids) => Promise.all([...new Set(ids.map(id => chunkOf.get(id)))].map(loadChunk));
 
     const allPairs = [];
     let done = 0;
@@ -376,13 +370,8 @@ async function detectDuplicates() {
       setState('dedup.running', { done, total: workQueue.length, activePts: [...activePts] });
     });
 
-    const articleMap = new Map();
-    articles.forEach(a => {
-      articleMap.set(a.articleNumber, a);
-      articleMap.set(String(a.articleNumber), a);
-      articleMap.set(normalizeArticleNumber(a.articleNumber), a);
-    });
-    const resolveArticle = (num) => articleMap.get(String(num)) || articleMap.get(normalizeArticleNumber(num));
+    const articleMap = new Map(articles.map(a => [normalizeArticleNumber(a.articleNumber), a]));
+    const resolveArticle = (num) => articleMap.get(normalizeArticleNumber(num));
 
     const resolvedPairs = allPairs
       .filter(p => p.confidence >= 0.85)
@@ -419,7 +408,7 @@ async function detectDuplicates() {
 
     setState('dedup.pairs', enrichedPairs);
     setState('dedup.running', null);
-    await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs, [STORAGE_KEYS.DEDUP_AT]: Date.now() });
+    await localSet({ [STORAGE_KEYS.DEDUP_RESULTS]: enrichedPairs });
     const foundLabel = uniquePairs.length > enrichedPairs.length
       ? `Found ${uniquePairs.length} duplicate pairs — showing the top ${enrichedPairs.length} by confidence`
       : `Found ${enrichedPairs.length} duplicate pairs`;
@@ -449,24 +438,12 @@ async function loadMergeCache() {
 }
 
 function saveMergeText(mergeKey, text) {
-  _pendingMergeWrites[mergeKey] = text;
-  clearTimeout(_mergeSaveTimer);
-  _mergeSaveTimer = setTimeout(flushMergeWrites, MERGE_SAVE_DEBOUNCE_MS);
-}
-
-function flushMergeWrites() {
-  clearTimeout(_mergeSaveTimer);
-  _mergeSaveTimer = null;
-  const writes = _pendingMergeWrites;
-  _pendingMergeWrites = {};
-  if (!Object.keys(writes).length) return _mergeSaveChain;
   _mergeSaveChain = _mergeSaveChain
     .then(async () => {
       const cache = await loadMergeCache();
-      await localSet({ [STORAGE_KEYS.MERGE_CACHE]: { ...cache, ...writes } });
+      await localSet({ [STORAGE_KEYS.MERGE_CACHE]: { ...cache, [mergeKey]: text } });
     })
     .catch(() => {});
-  return _mergeSaveChain;
 }
 
 function renderEditableMerge(mergeKey) {
@@ -559,7 +536,6 @@ Keep best content from both. Prefer most complete and recent steps.`;
     if (isStale()) return;
     _mergeTextCache[mergeKey] = fullText;
     saveMergeText(mergeKey, fullText);
-    flushMergeWrites();
     renderEditableMerge(mergeKey);
   } catch (e) {
     if (isStale() || e.name === 'AbortError') return;
@@ -642,7 +618,7 @@ async function showMerge(pair) {
 
   _mergeModalRef = modal('Merge Suggestion', content, {
     wide: true,
-    onClose: () => { if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; } _mergeModalRef = null; flushMergeWrites(); }
+    onClose: () => { if (_mergeAbort) { _mergeAbort.abort(); _mergeAbort = null; } _mergeModalRef = null; }
   });
 
   if (hasCached) {

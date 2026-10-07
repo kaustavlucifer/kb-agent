@@ -2,7 +2,7 @@ import { detectGusSession, pingGusSession } from '../../shared/auth.js';
 import { sfQuery, soqlIdList, escapeSoql, escapeSoqlLike, mapWithConcurrency } from '../../shared/api.js';
 
 export const GUS_WORK_NAME_RE = /^W-\d{4,9}$/;
-const GUS_WORK_ITEM_RE = new RegExp(`\\b${GUS_WORK_NAME_RE.source.slice(1, -1)}\\b`, 'g');
+export const GUS_WORK_ITEM_RE = new RegExp(`\\b${GUS_WORK_NAME_RE.source.slice(1, -1)}\\b`, 'g');
 const WORK_OBJECT = 'ADM_Work__c';
 
 const GUS_FIELDS = [

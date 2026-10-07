@@ -69,7 +69,7 @@ curl -s "$GW/v1/models" -H "Authorization: Bearer $SF_LLM_KEY" -H "anthropic-ver
 
 Claude ids confirmed callable on 2026-10-05 (**verified**): `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-opus-5-5-vertex`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`.
 
-**How KB Agent uses this:** `listGatewayModels()` in `shared/gateway.js` fetches `/v1/models`, keeps `claude-*` ids, and fills the Settings model dropdowns. It refreshes at most every 24h (or on "Refresh models"), with a static fallback list in `shared/config.js`.
+**How KB Agent uses this:** `refreshModelCatalog()` in `shared/gateway.js` fetches `/v1/models` (plus `/key/info` limits and `/model_group/info` pricing, each with a 12s timeout), keeps `claude-*` ids, and fills the Settings model dropdowns. It refreshes at most every 24h (or on "Refresh models"), with a static fallback list in `shared/config.js`.
 
 ## 5. Temperature and other unsupported parameters
 
@@ -158,11 +158,11 @@ Other throttling to expect — **reported**:
 A burst of 25 concurrent tiny calls on a 100-RPM key all succeeded — **verified**.
 
 **Recommended client behaviour (what KB Agent does):**
-1. **Throttle client-side** to about 90% of `rpm_limit` (read from `/key/info`), shared across every caller using the same key. KB Agent's `shared/rate-limiter.js` shares one budget between the popup and the service worker and falls back to 48/min if the limit can't be read.
+1. **Throttle client-side** to about 90% of `rpm_limit` (read from `/key/info`), shared across every caller using the same key. KB Agent's `shared/rate-limiter.js` shares one budget across the service worker and every open extension page (each context writes its own `chrome.storage.session` key and counts all of them), and falls back to 48/min if the limit can't be read.
 2. **Retry transient errors** (408, 429, 500, 502, 503, 504, 529) up to 3 times. Wait for `Retry-After` if present, else the body's "Limit resets at" time, else exponential backoff (~1s, 2s, 4s + jitter), capped at 30s per wait. Each retry re-acquires a rate-limit slot, and abort signals cancel the wait (`postMessages()` in `shared/gateway.js`).
 3. **Never retry 4xx validation errors** (400, 401, 403, 404) — fix the request instead.
 4. **Bound every request.** Each attempt has a 90s limit until response headers arrive (non-streaming bodies get another 90s to download), and streams abort after 30s without data. A timeout throws a `TimeoutError`, distinct from a user abort. Mid-stream SSE `error` events (e.g. `overloaded_error`) fail the call instead of returning partial text.
-5. **Validate a key for free** with `GET /key/info` rather than a `/v1/messages` ping.
+5. **Validate a key for free** with `GET /key/info` rather than a `/v1/messages` ping. KB Agent also treats `spend >= max_budget` as not ready and caches a successful check for 5 minutes.
 
 ## 9. Quick checklist for a new integration
 

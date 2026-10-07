@@ -2,7 +2,8 @@ import { h, spinner, streamingDots, emptyState, toast, progressBar, modal, rende
 import { openKiDraftModal } from './ki-manager.js';
 import { setState, getState, subscribe } from '../shared/state.js';
 import { localGet, localSet } from '../shared/storage.js';
-import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl, KI_BASE } from '../shared/config.js';
+import { STORAGE_KEYS, STREAM_RENDER_THROTTLE_MS, articleUrl } from '../shared/config.js';
+import { draftToScorable, scoreArticle } from '../shared/scoring.js';
 import { previewButton, renderArticleColumn } from '../shared/article-preview.js';
 import { markdownToHtml, htmlBodyToMarkdown } from '../shared/markdown.js';
 import { confirmDraftOverwriteIfExists, publishDraftUpdate, publishNewArticleDraft } from '../shared/draft-publish.js';
@@ -13,6 +14,36 @@ let _unsubs = [];
 let _collapsedSections = {};
 let _editingSections = new Set();
 let _updatingArticles = new Map();
+let _draftScoreAbort = new AbortController();
+const _draftScoreFailed = new Set();
+
+function resetDraftScoring() {
+  _draftScoreAbort.abort();
+  _draftScoreAbort = new AbortController();
+  _draftScoreFailed.clear();
+}
+
+async function scoreDraftInPopup(key, draft) {
+  const gen = _analysisGen;
+  const { signal } = _draftScoreAbort;
+  _draftScoreFailed.delete(key);
+  setState('case.scoringInProgress', [...new Set([...(getState('case.scoringInProgress') || []), key])]);
+  deferredRenderByView();
+  try {
+    const result = await scoreArticle(draftToScorable(draft), undefined, signal);
+    if (gen !== _analysisGen) return;
+    if (result.overall == null) _draftScoreFailed.add(key);
+    else setState('case.draftScores', { ...(getState('case.draftScores') || {}), [key]: { overall: result.overall, criteria: result.criteria || [] } });
+  } catch {
+    if (gen === _analysisGen && !signal.aborted) _draftScoreFailed.add(key);
+  } finally {
+    if (gen === _analysisGen) {
+      const left = (getState('case.scoringInProgress') || []).filter(k => k !== key);
+      setState('case.scoringInProgress', left.length ? left : null);
+      deferredRenderByView();
+    }
+  }
+}
 let _pendingBackgroundRender = false;
 let _sidebarOnly = false;
 let _renderRaf = null;
@@ -143,13 +174,6 @@ export function mount(container) {
     else if (view === 'result' || view === 'progressive') deferredRenderByView();
   }));
   _unsubs.push(subscribe('case.suggestionDeltas', throttledStreamRender));
-
-  const pending = getState('case.pendingUrl');
-  if (pending) {
-    setState('case.pendingUrl', null);
-    const id = extractCaseId(pending);
-    if (id) startAnalysis(id);
-  }
 }
 
 export function unmount() {
@@ -400,6 +424,7 @@ function afScorePill(key) {
   const scoring = (getState('case.scoringInProgress') || []).includes(key);
   if (ds) return h('span', { class: `pill pill--${scoreColor(ds.overall)}`, style: { fontSize: '10px' } }, `AF: ${ds.overall}`);
   if (scoring) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '4px' } }, streamingDots(), 'AF: scoring');
+  if (_draftScoreFailed.has(key)) return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' }, title: 'Scoring failed' }, 'AF: err');
   return h('span', { class: 'pill pill--neutral', style: { fontSize: '10px' } }, 'AF: …');
 }
 
@@ -1020,11 +1045,10 @@ function renderSidebarKnownIssues(kiItems, kiError) {
     const body = h('div', null);
     if (kiError) body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--error)', padding: '4px 0' } }, `Known Issue search failed: ${kiError}`));
     kiItems.forEach(ki => {
-      const kiUrl = ki.url || `${KI_BASE}/lightning/r/Known_Issue__c/${ki.id}/view`;
       const statusColor = ki.status === 'Fixed' ? 'success' : ki.status === 'Solution in Progress' ? 'warning' : 'info';
       body.appendChild(h('div', { style: { padding: '6px 0', borderBottom: '1px solid var(--border)' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
-          h('a', { href: kiUrl, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', textDecoration: 'none', lineHeight: '1.3', flex: '1' } }, ki.subject || ki.name),
+          h('a', { href: ki.url, target: '_blank', rel: 'noopener', style: { fontSize: '11px', fontWeight: '500', color: 'var(--text-primary)', textDecoration: 'none', lineHeight: '1.3', flex: '1' } }, ki.subject || ki.name),
           h('span', { class: `pill pill--${statusColor}`, style: { fontSize: '9px', flexShrink: '0' } }, ki.status || 'Open')
         ),
         h('div', { style: { display: 'flex', gap: '4px', marginTop: '3px' } },
@@ -1476,6 +1500,7 @@ function refineRewrite(rewrite) {
         }
         renderByView();
         toast('Article refined.', 'success');
+        scoreDraftInPopup(refKey, rewrite);
       } else {
         toast(resp?.error || 'Refine failed.', 'error');
       }
@@ -1592,6 +1617,7 @@ async function triggerUpdateForArticle(article) {
       _updatingArticles.delete(article.id);
       setState('case.result', { ...latest, structured: { ...(latest.structured || {}), suggestions: [...(latest.structured?.suggestions || []), newSuggestion] } });
       toast('Rewrite generated.', 'success');
+      scoreDraftInPopup(`rewrite-${article.id}`, newSuggestion);
     } else {
       toast(resp?.error || 'Generation failed.', 'error');
     }
@@ -1626,7 +1652,8 @@ function triggerNewArticleGeneration(caseId) {
 
   const gen = ++_analysisGen;
   _updatingArticles.clear();
-  const caseAbstract = getState('case.result')?.caseAbstract || getState('case.caseAbstract') || null;
+  resetDraftScoring();
+  const caseAbstract = getState('case.result')?.caseAbstract || null;
   setState('case.view', 'streaming');
   setState('case.streamText', '');
   setState('case.suggestions', []);
@@ -1710,6 +1737,7 @@ function startAnalysis(caseId, isRetry = false) {
   }
   const gen = ++_analysisGen;
   _updatingArticles.clear();
+  resetDraftScoring();
   setState('case.view', 'analyzing');
   setState('case.progress', { step: 0, label: isRetry ? 'Reconnecting…' : 'Connecting…' });
   setState('case.result', null);
@@ -1802,7 +1830,7 @@ function onPortMessage(msg) {
       if ('kiError' in msg) setState('case.kiError', msg.kiError || null);
       if (msg.kiSuggestion) setState('case.kiSuggestion', msg.kiSuggestion);
       if (msg.scoringInProgress) {
-        setState('case.scoringInProgress', msg.scoringInProgress);
+        setState('case.scoringInProgress', [...new Set([...(getState('case.scoringInProgress') || []), ...msg.scoringInProgress])]);
         if (getState('case.view') === 'result') deferredRenderByView();
       }
       if (msg.draftScore) {
@@ -1854,15 +1882,10 @@ function onPortMessage(msg) {
       setState('case.streamText', (getState('case.streamText') || '') + (msg.chunk || ''));
       break;
     case 'result':
-      if (msg.success === false) {
-        toast(msg.error || 'Analysis failed.', 'error');
-        setState('case.view', 'idle');
-      } else {
-        normalizeStructured(msg.structured || msg);
-        setState('case.result', msg);
-        setState('case.view', 'result');
-        saveRecentCase(msg);
-      }
+      normalizeStructured(msg.structured || msg);
+      setState('case.result', msg);
+      setState('case.view', 'result');
+      saveRecentCase(msg);
       break;
     case 'error':
       toast(msg.error || 'Analysis failed.', 'error');

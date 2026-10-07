@@ -1,5 +1,5 @@
 import { detectSession, detectKiSession, pingKiSession, pingOrgcsSession, clearAuthCache } from '../shared/auth.js';
-import { pingGateway, callClaude, extractText, extractJson } from '../shared/gateway.js';
+import { pingGateway, refreshModelCatalog, callClaude, extractText, extractJson } from '../shared/gateway.js';
 import { flushCost, onCostStorageChange } from '../shared/cost.js';
 import { localGet, localSet } from '../shared/storage.js';
 import { sfQuery, escapeSoql, escapeSoqlLike, sanitizeId, stripHtml, absolutizeSfUrls } from '../shared/api.js';
@@ -7,7 +7,7 @@ import { STORAGE_KEYS, applySettings } from '../shared/config.js';
 import { redactPii } from '../shared/pii.js';
 import { GUIDE_GENERATION, GUIDE_STYLE, MARKDOWN_OUTPUT_RULE } from '../data/writing_guide_prompts.js';
 
-import { handleAnalyze, handleGenerateNew } from './handlers/case-analysis.js';
+import { handleAnalyze, handleGenerateNew, startPortKeepalive } from './handlers/case-analysis.js';
 import { publishNewArticle, publishUpdateDraft, checkDraftExists } from './handlers/article-publish.js';
 import { checkGusConnection, searchGusWorkItems } from './handlers/gus-enrichment.js';
 import { checkForUpdate, dismissUpdate } from './update-check.js';
@@ -56,12 +56,14 @@ async function handleMessage(msg) {
       const data = await localGet([STORAGE_KEYS.GATEWAY_TOKEN]);
       const token = data[STORAGE_KEYS.GATEWAY_TOKEN];
       if (!token) return { connected: false, hasToken: false };
-      return pingGateway(token);
+      return verifyAiToken(token);
     }
     case 'SAVE_TOKEN': {
       const token = msg.token;
       await localSet({ [STORAGE_KEYS.GATEWAY_TOKEN]: token });
-      const result = await pingGateway(token);
+      _aiVerifyCache = null;
+      const result = await verifyAiToken(token);
+      if (result.connected) refreshModelCatalog({ force: true }).catch(() => {});
       return { success: true, ...result };
     }
     case 'RESOLVE_CASE_NUMBER': return resolveCase(msg.caseNumber);
@@ -75,7 +77,7 @@ async function handleMessage(msg) {
     case 'GENERATE_ARTICLE_UPDATE': return generateArticleUpdate(msg);
     case 'FETCH_ARTICLE_PREVIEW': return fetchArticlePreview(msg.articleId);
     case 'CHECK_KI_CONNECTION': return checkKiConnection();
-    case 'REFRESH_AUTH': { clearAuthCache(); return { cleared: true }; }
+    case 'REFRESH_AUTH': { clearAuthCache(); _aiVerifyCache = null; return { cleared: true }; }
     case 'CHECK_FOR_UPDATE': return checkForUpdate({ force: !!msg.force });
     case 'DISMISS_UPDATE': { await dismissUpdate(String(msg.version || '')); return { ok: true }; }
     case 'CREATE_KNOWN_ISSUE': return createKnownIssue(msg.payload);
@@ -87,6 +89,16 @@ async function handleMessage(msg) {
     case 'LOG_KI_SIGNATURE': return logKiSignature(msg.kind, msg.kiId);
     default: return { error: `Unknown action: ${msg.action}` };
   }
+}
+
+const AI_VERIFY_CACHE_TTL_MS = 5 * 60 * 1000;
+let _aiVerifyCache = null;
+
+async function verifyAiToken(token) {
+  if (_aiVerifyCache?.token === token && Date.now() - _aiVerifyCache.ts < AI_VERIFY_CACHE_TTL_MS) return _aiVerifyCache.result;
+  const result = await pingGateway(token);
+  _aiVerifyCache = result.connected ? { token, result, ts: Date.now() } : null;
+  return result;
 }
 
 async function generateArticleUpdate(msg) {
@@ -297,9 +309,7 @@ async function handleAudit(port, msg) {
   const signal = abortController.signal;
   port.onDisconnect.addListener(() => abortController.abort());
 
-  const keepalive = setInterval(() => {
-    try { port.postMessage({ type: 'keepalive' }); } catch { clearInterval(keepalive); }
-  }, 25_000);
+  const stopKeepalive = startPortKeepalive(port);
 
   const progressState = sources.map(() => ({ done: 0, total: 0 }));
   const reportProgress = () => {
@@ -329,6 +339,6 @@ async function handleAudit(port, msg) {
       try { port.postMessage({ type: 'error', error: e?.message || 'Audit failed.' }); } catch {}
     }
   } finally {
-    clearInterval(keepalive);
+    stopKeepalive();
   }
 }

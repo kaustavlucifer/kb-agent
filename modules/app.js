@@ -19,7 +19,6 @@ let _activeModule = null;
 let _mountedTab = null;
 let _tabContent = null;
 let _tabGen = 0;
-let _subscribed = false;
 
 async function init() {
   try {
@@ -29,9 +28,7 @@ async function init() {
 
   const hashTab = location.hash.replace('#', '');
   const validTab = TABS.find(t => t.id === hashTab);
-  const caseUrl = new URLSearchParams(window.location.search).get('caseUrl');
-  if (caseUrl) setState('case.pendingUrl', caseUrl);
-  setState('app.activeTab', caseUrl ? 'case-analysis' : (validTab ? hashTab : 'case-analysis'));
+  setState('app.activeTab', validTab ? hashTab : 'case-analysis');
   setState('app.connections', { sf: null, ai: null });
 
   const cached = await localGet([STORAGE_KEYS.AUTH_CACHE]);
@@ -47,7 +44,7 @@ async function init() {
   });
 
   render();
-  checkConnections();
+  checkConnections({ verifyAi: true });
   checkUpdate();
   refreshModelCatalog().catch(() => {});
 
@@ -56,6 +53,10 @@ async function init() {
       setState('app.activeTab', event.state.tab);
     }
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') recheckConnectionsNow();
+  });
+  window.addEventListener('focus', recheckConnectionsNow);
 }
 
 function render() {
@@ -66,13 +67,11 @@ function render() {
   app.appendChild(_tabContent);
   activateTab(getState('app.activeTab'));
 
-  if (!_subscribed) {
-    _subscribed = true;
-    subscribe('app.activeTab', (tabId) => activateTab(tabId));
-    subscribe('app.connections', () => updateConnectionChips());
-    subscribe('app.cost', () => updateCostChip());
-  }
+  subscribe('app.activeTab', (tabId) => activateTab(tabId));
+  subscribe('app.connections', () => updateConnectionChips());
+  subscribe('app.cost', () => updateCostChip());
   updateCostChip();
+  updateConnectionChips();
 }
 
 function updateCostChip() {
@@ -177,7 +176,9 @@ function activateTab(tabId) {
     btn.classList.toggle('tab--active', btn.dataset.tab === tabId);
   });
 
-  if (history.state?.tab !== tabId) {
+  if (!history.state?.tab) {
+    history.replaceState({ tab: tabId }, '', `#${tabId}`);
+  } else if (history.state.tab !== tabId) {
     history.pushState({ tab: tabId }, '', `#${tabId}`);
   }
 
@@ -202,19 +203,23 @@ function activateTab(tabId) {
     m.mount(_tabContent);
   }).catch(e => {
     if (gen !== _tabGen) return;
+    _mountedTab = null;
     _tabContent.textContent = `Module load failed: ${e.message}`;
   });
 }
 
-async function checkConnections() {
+async function checkConnections({ verifyAi = false } = {}) {
+  const previous = getState('app.connections');
   const [sfResp, aiResp, gusResp, kiResp] = await Promise.all([
     chrome.runtime.sendMessage({ action: 'CHECK_CONNECTION' }).catch(() => ({ connected: false })),
-    chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false })),
+    verifyAi || !previous?.ai
+      ? chrome.runtime.sendMessage({ action: 'VERIFY_AI_TOKEN' }).catch(() => ({ connected: false }))
+      : Promise.resolve(previous.ai),
     chrome.runtime.sendMessage({ action: 'CHECK_GUS_CONNECTION' }).catch(() => ({ connected: false })),
     chrome.runtime.sendMessage({ action: 'CHECK_KI_CONNECTION' }).catch(() => ({ connected: false }))
   ]);
   const connections = { sf: sfResp, ai: aiResp, gus: gusResp, ki: kiResp };
-  if (JSON.stringify(connections) !== JSON.stringify(getState('app.connections'))) {
+  if (JSON.stringify(connections) !== JSON.stringify(previous)) {
     setState('app.connections', connections);
     localSet({ [STORAGE_KEYS.AUTH_CACHE]: connections });
   }
@@ -232,14 +237,29 @@ async function checkConnections() {
   if (!kiOk) autoOpenAuthTab('ki', KI_BASE);
   else _authAutoOpened.ki = false;
 
-  scheduleAuthCheckIfNeeded(sfOk && gusOk && kiOk);
+  const unhealthy = [!sfOk && 'sf', !gusOk && 'gus', !kiOk && 'ki'].filter(Boolean).join(',');
+  if (unhealthy !== _lastUnhealthy) {
+    _lastUnhealthy = unhealthy;
+    resetAuthBackoff();
+  }
+  scheduleAuthCheckIfNeeded(sfOk && gusOk && kiOk, sfOk);
+}
+
+function resetAuthBackoff() {
+  _authCheckAttempt = 0;
+  if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
+}
+
+function recheckConnectionsNow() {
+  if (!_lastUnhealthy) return;
+  resetAuthBackoff();
+  checkConnections();
 }
 
 async function refreshConnections() {
-  _authCheckAttempt = 0;
-  if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
+  resetAuthBackoff();
   const resp = await chrome.runtime.sendMessage({ action: 'REFRESH_AUTH' }).catch(() => null);
-  await checkConnections();
+  await checkConnections({ verifyAi: true });
   if (resp) toast('Auth status refreshed.', 'info');
   else toast('Auth refresh failed.', 'error');
 }
@@ -247,6 +267,7 @@ async function refreshConnections() {
 let _pendingUpdate = null;
 let _authCheckTimer = null;
 let _authCheckAttempt = 0;
+let _lastUnhealthy = null;
 let _closeTokenPopover = null;
 const _authAutoOpened = { sf: false, gus: false, ki: false };
 
@@ -268,15 +289,16 @@ async function autoOpenAuthTab(kind, url) {
   } catch {}
 }
 
-function scheduleAuthCheckIfNeeded(allHealthy) {
+function scheduleAuthCheckIfNeeded(allHealthy, sfOk) {
   if (allHealthy) {
-    if (_authCheckTimer) { clearTimeout(_authCheckTimer); _authCheckTimer = null; }
-    _authCheckAttempt = 0;
+    resetAuthBackoff();
     return;
   }
   if (_authCheckTimer) return;
-  const delay = Math.min(AUTH_CHECK_BASE_MS * 2 ** _authCheckAttempt, AUTH_CHECK_MAX_MS) * (1 + Math.random() * 0.5);
-  _authCheckAttempt++;
+  const delay = sfOk
+    ? Math.min(AUTH_CHECK_BASE_MS * 2 ** _authCheckAttempt, AUTH_CHECK_MAX_MS) * (1 + Math.random() * 0.5)
+    : AUTH_CHECK_BASE_MS * (1 + Math.random() * 0.5);
+  if (sfOk) _authCheckAttempt++;
   _authCheckTimer = setTimeout(() => {
     _authCheckTimer = null;
     checkConnections();
@@ -476,7 +498,7 @@ async function saveToken() {
       toast('Token saved but verification failed: ' + (resp?.error || ''), 'error');
     }
     _closeTokenPopover?.();
-    checkConnections();
+    checkConnections({ verifyAi: true });
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');
   }

@@ -54,50 +54,20 @@ function groupCookiesByOrg(sfCookies) {
   return groups;
 }
 
-export async function detectSession() {
-  const sfCookies = await loadFreshSfCookies();
-  if (!sfCookies.length) return { sid: null, apiBase: null, lightningHost: null, orgs: [] };
-
-  const groups = groupCookiesByOrg(sfCookies);
-  const orgs = [];
-  for (const [key, group] of groups.entries()) {
-    if (!group.bestCookie?.value) continue;
-    const hosts = Array.from(group.hosts);
-    const apiHost = hosts.find(h => h.endsWith('.my.salesforce.com')) || hosts[0];
-    const lightHost = hosts.find(h => h.endsWith('.lightning.force.com')) || null;
-    orgs.push({
-      key,
-      apiBase: `https://${apiHost}`,
-      lightningHost: lightHost || `${key}.lightning.force.com`,
-      sid: group.bestCookie.value,
-      isOrgcs: /^orgcs([\d_-]\w*)?$/i.test(key)
-    });
-  }
-
-  const orgcs = orgs.find(o => o.isOrgcs);
-  if (orgcs) return { ...orgcs, orgs };
-  return { sid: null, apiBase: null, lightningHost: null, orgs };
-}
-
 async function detectOrgSession(matchKey) {
   const sfCookies = await loadFreshSfCookies();
-  if (!sfCookies.length) return { sid: null, apiBase: null, lightningHost: null };
-
-  const groups = groupCookiesByOrg(sfCookies);
-  for (const [key, group] of groups.entries()) {
-    if (!group.bestCookie?.value) continue;
-    if (!matchKey(key)) continue;
+  for (const [key, group] of groupCookiesByOrg(sfCookies).entries()) {
+    if (!group.bestCookie?.value || !matchKey(key)) continue;
     const hosts = Array.from(group.hosts);
     const apiHost = hosts.find(h => h.endsWith('.my.salesforce.com')) || hosts[0];
     const lightHost = hosts.find(h => h.endsWith('.lightning.force.com')) || `${key}.lightning.force.com`;
-    return {
-      sid: group.bestCookie.value,
-      apiBase: `https://${apiHost}`,
-      lightningHost: lightHost,
-      key
-    };
+    return { key, apiBase: `https://${apiHost}`, lightningHost: lightHost, sid: group.bestCookie.value };
   }
   return { sid: null, apiBase: null, lightningHost: null };
+}
+
+export function detectSession() {
+  return detectOrgSession(key => /^orgcs([\d_-]\w*)?$/i.test(key));
 }
 
 export function detectGusSession() {
@@ -109,6 +79,7 @@ export function detectKiSession() {
 }
 
 const PING_CACHE_TTL_MS = 5 * 60 * 1000;
+const PING_TIMEOUT_MS = 12_000;
 
 async function pingSession(detectFn, cacheRef) {
   const session = await detectFn();
@@ -119,11 +90,15 @@ async function pingSession(detectFn, cacheRef) {
   }
   try {
     const r = await fetch(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id, Name FROM User WHERE IsActive = true LIMIT 1')}`, {
-      headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' }
+      headers: { Authorization: `Bearer ${session.sid}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(PING_TIMEOUT_MS)
     });
-    const status = r.ok ? 'active' : 'expired';
-    cacheRef.value = { sid: session.sid, status, ts: Date.now() };
-    return { status, ...info };
+    if (r.ok) {
+      cacheRef.value = { sid: session.sid, status: 'active', ts: Date.now() };
+      return { status: 'active', ...info };
+    }
+    cacheRef.value = null;
+    return { status: r.status === 401 ? 'expired' : 'error', ...info };
   } catch {
     cacheRef.value = null;
     return { status: 'error', ...info };

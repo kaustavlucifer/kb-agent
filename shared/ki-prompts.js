@@ -4,6 +4,33 @@ export const KI_PII_OPTS = { maskIds: true };
 
 export const KI_SECTION_KEYS = ['subject', 'summary', 'repro', 'workaround'];
 
+export function normalizeKiText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+export function kiSectionsDiffer(a, b) {
+  return KI_SECTION_KEYS.some(k => normalizeKiText(a?.[k]) !== normalizeKiText(b?.[k]));
+}
+
+export function kiVersionLabel(basedOnDraft, published) {
+  if (!basedOnDraft) return 'Published';
+  return published ? 'Draft (unpublished edits)' : 'Draft';
+}
+
+export function kiPublicationState({ published, approvalStatus, draftDiffers }) {
+  if (published) {
+    if (approvalStatus === 'Pending') return { label: 'Published · edits pending approval', tone: 'warning' };
+    if (draftDiffers) return { label: 'Published · unsubmitted edits', tone: 'warning' };
+    return { label: 'Published', tone: 'success' };
+  }
+  if (approvalStatus === 'Pending') return { label: 'Draft · pending approval', tone: 'info' };
+  if (approvalStatus === 'Rejected') return { label: 'Draft · rejected', tone: 'error' };
+  if (approvalStatus === 'Removed') return { label: 'Draft · approval recalled', tone: 'neutral' };
+  if (approvalStatus === 'Approved') return { label: 'Unpublished', tone: 'neutral' };
+  if (approvalStatus === 'Unknown') return { label: 'Draft · approval unknown', tone: 'neutral' };
+  return { label: 'Draft · not submitted', tone: 'neutral' };
+}
+
 export const KI_SYSTEM_PROMPT = `You are drafting a Salesforce Known Issue (KI) record. Known Issues are PUBLIC-FACING — they publish directly to help.salesforce.com/s/issues. Write as a formal technical writer:
 - Do NOT include customer names, employee names, backup IDs, org IDs, or any other customer-identifying detail
 - If a 15 or 18 character Salesforce record ID must be mentioned, keep only the first 3 characters and replace the rest with X

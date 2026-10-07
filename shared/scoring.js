@@ -45,11 +45,11 @@ export async function searchArticlesUnscoped(query, session) {
   if (!query || query.length < 2) return [];
   const escaped = escapeSoqlLike(query);
   const soql = `SELECT ${ARTICLE_META_FIELDS} FROM Knowledge__kav WHERE Language IN ('en_US','en_GB') AND (Title LIKE '%${escaped}%' OR ArticleNumber LIKE '%${escaped}%') ORDER BY LastModifiedDate DESC LIMIT 50`;
-  const result = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, session.sid);
-  return (result.records || []).map(mapArticleRecord);
+  const records = await sfQuery(session.apiBase, session.sid, soql);
+  return records.map(mapArticleRecord);
 }
 
-export function mapArticleRecord(r) {
+function mapArticleRecord(r) {
   return {
     id: r.Id,
     knowledgeArticleId: r.KnowledgeArticleId,
@@ -218,8 +218,10 @@ const MD_IMAGE_RE = /!\[[^\]]*\]\([^)\s]+[^)]*\)/;
 
 export function draftToScorable(draft) {
   const sections = draft.sections || [];
-  const descSec = sections.find(s => /description/i.test(s.heading)) || sections[0];
-  const resSec = sections.find(s => /resolution/i.test(s.heading)) || sections[1];
+  const descSec = sections.find(s => /description/i.test(s.heading))
+    || sections.find(s => !/resolution/i.test(s.heading));
+  const resSec = sections.find(s => s !== descSec && /resolution/i.test(s.heading))
+    || sections.find(s => s !== descSec && !/description/i.test(s.heading));
   const description = String((sections.length ? descSec?.body : draft.description) || '');
   const resolution = String((sections.length ? resSec?.body : draft.resolution) || '');
   return {
@@ -227,15 +229,15 @@ export function draftToScorable(draft) {
     summary: draft.summary || '',
     description: description ? markdownToHtml(description) : '',
     resolution: resolution ? markdownToHtml(resolution) : '',
-    steps: '',
+    steps: draft.steps || '',
     topicName: draft.topicName || '',
     containsImage: MD_IMAGE_RE.test(`${description}\n${resolution}`),
-    containsVideo: false,
+    containsVideo: !!draft.containsVideo,
     validationStatus: draft.validationStatus || ''
   };
 }
 
-export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS) {
+export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS, signal) {
   const { system, user, maxes } = buildScoringPrompt(article);
   const resp = await callClaudeFast({
     system,
@@ -243,7 +245,8 @@ export async function scoreArticle(article, maxTokens = SCORING_MAX_TOKENS) {
     maxTokens,
     temperature: 0.1,
     model: SCORING_MODEL,
-    cache: true
+    cache: true,
+    signal
   });
   const text = extractText(resp);
   return parseScoreResponse(text, maxes);
@@ -257,9 +260,7 @@ export async function fetchArticleBodies(articleIds, session, signal) {
   for (let i = 0; i < validIds.length; i += BODY_FETCH_BATCH_SIZE) batches.push(validIds.slice(i, i + BODY_FETCH_BATCH_SIZE));
   const runBatch = async (batch) => {
     const soql = `SELECT Id, Description__c, Resolution__c, Steps__c, additional_resources__c FROM Knowledge__kav WHERE PublishStatus IN ('Online','Draft','Archived') AND Id IN (${soqlIdList(batch)})`;
-    const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-    const result = await sfGet(url, session.sid, signal);
-    for (const r of (result.records || [])) {
+    for (const r of await sfQuery(session.apiBase, session.sid, soql, signal)) {
       bodyMap.set(r.Id, { description: r.Description__c || '', resolution: r.Resolution__c || '', steps: r.Steps__c || '', additionalResources: r.additional_resources__c || '' });
     }
   };
@@ -283,7 +284,7 @@ export async function enrichArticlesForScoring(articles, session, signal) {
   const ids = articles.map(a => a.id);
   const [bodyMap, chatterMap] = await Promise.all([
     fetchArticleBodies(ids, session, signal),
-    fetchArticleChatterBatch(ids, session, 'Knowledge__Feed', signal)
+    fetchArticleChatterBatch(ids, session, 'Knowledge__Feed', signal, new Map(articles.map(a => [a.id, a.knowledgeArticleId])))
   ]);
   const enriched = new Map();
   const failedIds = new Set();
@@ -295,20 +296,25 @@ export async function enrichArticlesForScoring(articles, session, signal) {
   return { enriched, failedIds };
 }
 
-async function resolveFeedParents(batch, session, feedObject, signal) {
+async function resolveFeedParents(batch, session, feedObject, signal, knownMasters) {
   if (feedObject !== 'Knowledge__Feed') return new Map(batch.map(id => [id, [id]]));
-  const soql = `SELECT Id, KnowledgeArticleId FROM Knowledge__kav WHERE Id IN (${soqlIdList(batch)})`;
-  const result = await sfGet(`${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`, session.sid, signal);
+  const pairs = batch.map(id => [id, knownMasters?.get(id)]);
+  const unknown = pairs.filter(([, master]) => !ID_RE.test(master || '')).map(([id]) => id);
+  if (unknown.length) {
+    const soql = `SELECT Id, KnowledgeArticleId FROM Knowledge__kav WHERE Id IN (${soqlIdList(unknown)})`;
+    const resolved = new Map((await sfQuery(session.apiBase, session.sid, soql, signal)).map(r => [r.Id, r.KnowledgeArticleId]));
+    for (const pair of pairs) if (unknown.includes(pair[0])) pair[1] = resolved.get(pair[0]);
+  }
   const parents = new Map();
-  for (const r of (result.records || [])) {
-    if (!ID_RE.test(r.KnowledgeArticleId || '')) continue;
-    if (!parents.has(r.KnowledgeArticleId)) parents.set(r.KnowledgeArticleId, []);
-    parents.get(r.KnowledgeArticleId).push(r.Id);
+  for (const [id, master] of pairs) {
+    if (!ID_RE.test(master || '')) continue;
+    if (!parents.has(master)) parents.set(master, []);
+    parents.get(master).push(id);
   }
   return parents;
 }
 
-export async function fetchArticleChatterBatch(articleIds, session, feedObject = 'Knowledge__Feed', signal) {
+export async function fetchArticleChatterBatch(articleIds, session, feedObject = 'Knowledge__Feed', signal, knownMasters) {
   const chatterMap = new Map();
   const validIds = articleIds.filter(id => ID_RE.test(id));
   if (!validIds.length) return chatterMap;
@@ -317,12 +323,10 @@ export async function fetchArticleChatterBatch(articleIds, session, feedObject =
   const grouped = new Map();
   await mapWithConcurrency(batches, BODY_FETCH_CONCURRENCY, async (batch) => {
     try {
-      const parents = await resolveFeedParents(batch, session, feedObject, signal);
+      const parents = await resolveFeedParents(batch, session, feedObject, signal, knownMasters);
       if (!parents.size) return;
       const soql = `SELECT Id, ParentId, Body, CreatedBy.Name FROM ${feedObject} WHERE ParentId IN (${soqlIdList([...parents.keys()])}) AND Type = 'TextPost' ORDER BY CreatedDate ASC`;
-      const url = `${session.apiBase}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
-      const result = await sfGet(url, session.sid, signal);
-      for (const r of (result.records || [])) {
+      for (const r of await sfQuery(session.apiBase, session.sid, soql, signal)) {
         if (!r.Body || classifySignature(r.Body)) continue;
         const line = `${r.CreatedBy?.Name || 'User'}: ${redactPii(stripHtml(r.Body))}`;
         for (const id of (parents.get(r.ParentId) || [])) {

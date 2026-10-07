@@ -1,3 +1,5 @@
+import { KI_BASE } from './config.js';
+
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/g;
 const CREDIT_CARD_RE = /\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}\b/g;
@@ -24,11 +26,29 @@ function maskSfIdsInText(text) {
   return text.replace(SF_ID_RE, (full, prefix, rest) => isSfIdLike(full) ? prefix + 'X'.repeat(rest.length) : full);
 }
 
+const KI_ORG_PREFIX = new URL(KI_BASE).hostname.split('.')[0].toLowerCase();
+const CUSTOMER_HOST_RE = /(?:^|\.)(?:my\.salesforce\.com|my\.site\.com|force\.com|visualforce\.com|documentforce\.com|salesforce-sites\.com)$/i;
+const URL_PARTS_RE = /^(https?:\/\/)([^/?#\s]*)([\s\S]*)$/i;
+
+function isKiOrgHost(host) {
+  const lower = host.toLowerCase();
+  return lower.startsWith(`${KI_ORG_PREFIX}.`) || lower.startsWith(`${KI_ORG_PREFIX}--`);
+}
+
+function maskUrl(url) {
+  const m = URL_PARTS_RE.exec(url);
+  if (!m) return maskSfIdsInText(url);
+  const [, scheme, host, rest] = m;
+  if (isKiOrgHost(host)) return url;
+  return scheme + (CUSTOMER_HOST_RE.test(host) ? '[REDACTED-HOST]' : host) + maskSfIdsInText(rest);
+}
+
 function maskSfIds(text) {
   let out = '';
   let last = 0;
   for (const m of text.matchAll(URL_SEGMENT_RE)) {
-    out += maskSfIdsInText(text.slice(last, m.index)) + m[0];
+    const segment = m[0].startsWith('](') ? `](${maskUrl(m[0].slice(2, -1))})` : maskUrl(m[0]);
+    out += maskSfIdsInText(text.slice(last, m.index)) + segment;
     last = m.index + m[0].length;
   }
   return out + maskSfIdsInText(text.slice(last));

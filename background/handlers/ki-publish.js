@@ -3,12 +3,13 @@ import { detectKiSession } from '../../shared/auth.js';
 import { SF_API_VERSION, CACHE_TTL_MS, STORAGE_KEYS, SCORING_MODEL, KI_BASE } from '../../shared/config.js';
 import { callClaude, extractText, extractJson } from '../../shared/gateway.js';
 import { redactPii } from '../../shared/pii.js';
-import { KI_PII_OPTS, KI_SYSTEM_PROMPT, KI_SECTION_KEYS } from '../../shared/ki-prompts.js';
+import { KI_PII_OPTS, KI_SYSTEM_PROMPT, KI_SECTION_KEYS, normalizeKiText, kiSectionsDiffer, kiVersionLabel, kiPublicationState } from '../../shared/ki-prompts.js';
 import { markdownToHtml } from '../../shared/markdown.js';
 import { fetchArticleChatterBatch } from '../../shared/scoring.js';
 import { logSignature } from '../../shared/signature.js';
 import { localGet, localSet } from '../../shared/storage.js';
 import { KI_CATEGORIES } from '../../data/ki_mapping.js';
+import { GUS_WORK_NAME_RE } from './gus-enrichment.js';
 
 function publicWorkSubject(subject) {
   return String(subject || '')
@@ -54,30 +55,8 @@ export function kiUrl(lightningHost, id) {
   return `${lightningHost ? `https://${lightningHost}` : KI_BASE}/lightning/r/Known_Issue__c/${id}/view`;
 }
 
-function normalizeKiText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
-function kiVersionsDiffer(published, draft) {
-  return KI_SECTION_KEYS.some(k => normalizeKiText(published[k]) !== normalizeKiText(draft[k]));
-}
-
 function hasKiContent(sections) {
   return KI_SECTION_KEYS.some(k => normalizeKiText(sections[k]));
-}
-
-function kiPublicationState({ published, approvalStatus, draftDiffers }) {
-  if (published) {
-    if (approvalStatus === 'Pending') return { label: 'Published · edits pending approval', tone: 'warning' };
-    if (draftDiffers) return { label: 'Published · unsubmitted edits', tone: 'warning' };
-    return { label: 'Published', tone: 'success' };
-  }
-  if (approvalStatus === 'Pending') return { label: 'Draft · pending approval', tone: 'info' };
-  if (approvalStatus === 'Rejected') return { label: 'Draft · rejected', tone: 'error' };
-  if (approvalStatus === 'Removed') return { label: 'Draft · approval recalled', tone: 'neutral' };
-  if (approvalStatus === 'Approved') return { label: 'Unpublished', tone: 'neutral' };
-  if (approvalStatus === 'Unknown') return { label: 'Draft · approval unknown', tone: 'neutral' };
-  return { label: 'Draft · not submitted', tone: 'neutral' };
 }
 
 function kiVersionSections(record, fields, apiBase) {
@@ -109,14 +88,14 @@ export async function fetchKnownIssueDetail(id, session) {
     const soql = `SELECT Id, Name, Published__c, Status__c, Cloud__c, LastModifiedDate, ${[...Object.values(KI_PUBLISHED_FIELDS), ...Object.values(KI_DRAFT_FIELDS)].join(', ')} FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`;
     const [records, approval] = await Promise.all([
       sfQuery(session.apiBase, session.sid, soql),
-      fetchLatestApproval(session, safeId).catch(() => null)
+      fetchLatestApproval(session, safeId).catch(() => ({ status: 'Unknown', unavailable: true }))
     ]);
     if (!records.length) return { success: false, error: 'Known Issue not found.' };
     const r = records[0];
     const publishedVersion = kiVersionSections(r, KI_PUBLISHED_FIELDS, session.apiBase);
     const draftVersion = kiVersionSections(r, KI_DRAFT_FIELDS, session.apiBase);
     const published = r.Published__c === true;
-    const draftDiffers = hasKiContent(draftVersion) && kiVersionsDiffer(publishedVersion, draftVersion);
+    const draftDiffers = hasKiContent(draftVersion) && kiSectionsDiffer(publishedVersion, draftVersion);
     return {
       success: true,
       ki: {
@@ -159,7 +138,7 @@ export async function prepareKiRewrite(kiId) {
     success: true,
     basis: { ...(useDraft ? ki.draftVersion : ki.publishedVersion) },
     basedOnDraft: useDraft,
-    version: useDraft ? (ki.published ? 'Draft (unpublished edits)' : 'Draft') : 'Published',
+    version: kiVersionLabel(useDraft, ki.published),
     published: ki.published,
     lastModifiedDate: ki.lastModifiedDate,
     publication: ki.publication,
@@ -213,7 +192,7 @@ export async function createKnownIssue(payload) {
     Status__c: 'In Review',
     Category__c: categoryId
   };
-  if (/^W-\d{4,9}$/.test(payload.workId || '')) record.Work_ID__c = payload.workId;
+  if (GUS_WORK_NAME_RE.test(payload.workId || '')) record.Work_ID__c = payload.workId;
 
   try {
     const result = await sfPost(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c`, session.sid, record);
@@ -234,6 +213,12 @@ export async function updateKnownIssue(payload) {
   const record = kiDraftRecord(payload);
 
   try {
+    if (payload.expectedLastModifiedDate && !payload.force) {
+      const [current] = await sfQuery(session.apiBase, session.sid, `SELECT LastModifiedDate FROM Known_Issue__c WHERE Id = '${safeId}' LIMIT 1`);
+      if (current && Date.parse(current.LastModifiedDate) > Date.parse(payload.expectedLastModifiedDate)) {
+        return { success: false, conflict: true, error: 'This Known Issue was changed in the Known Issues org after this rewrite was generated.' };
+      }
+    }
     await sfPatch(`${session.apiBase}/services/data/${SF_API_VERSION}/sobjects/Known_Issue__c/${safeId}`, session.sid, record);
     logSignature('ki-updated', session.apiBase, session.sid, safeId);
     await chrome.storage.local.remove([STORAGE_KEYS.ALL_KNOWN_ISSUES, STORAGE_KEYS.ALL_KNOWN_ISSUES_AT]);

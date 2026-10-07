@@ -93,6 +93,10 @@ async function resolveProductAndTopic(apiBase, sid, { taxonomyName, taxonomyId }
 
 const ARTICLE_SOURCE_FIELDS = 'Id,Title,KnowledgeArticleId,PublishStatus,Summary,Internal_Information__c';
 
+function isStalePtError(msg) {
+  return /FIELD_FILTER_VALIDATION_EXCEPTION/i.test(msg) && /Product_And_Topic__c/i.test(msg);
+}
+
 const STALE_PT_WARNING = "The article's Product & Topic was stale (failed the org lookup filter) and was cleared so the save could go through. Re-tag the article's Product & Topic in Salesforce.";
 
 export async function publishNewArticle(payload) {
@@ -138,7 +142,7 @@ export async function publishNewArticle(payload) {
     };
   } catch (e) {
     const msg = e?.message || '';
-    const isStalePtFilter = ptFieldName && /FIELD_FILTER_VALIDATION_EXCEPTION/i.test(msg) && /Product_And_Topic__c/i.test(msg);
+    const isStalePtFilter = ptFieldName && isStalePtError(msg);
     if (!isStalePtFilter) return { success: false, error: msg || 'Article creation failed.' };
 
     try {
@@ -193,6 +197,7 @@ export async function publishUpdateDraft(payload) {
 
   let newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
   let reusedExistingDraft = !!newDraftId;
+  let createError = null;
 
   if (!newDraftId) {
     try {
@@ -201,23 +206,16 @@ export async function publishUpdateDraft(payload) {
         sid,
         { articleId: masterArticleId }
       );
-      newDraftId = res?.id || res?.Id;
+      newDraftId = res?.id || res?.Id || null;
     } catch (e) {
-      newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
-      if (!newDraftId) {
-        return { success: false, error: `Could not create new draft version: ${e?.message}` };
-      }
-      reusedExistingDraft = true;
+      createError = e;
     }
-  }
-  if (!newDraftId) {
-    newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
-    if (newDraftId) reusedExistingDraft = true;
-  }
-  if (!newDraftId) {
-    await new Promise(r => setTimeout(r, 1200));
-    newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
-    if (newDraftId) reusedExistingDraft = true;
+    if (!newDraftId) {
+      await new Promise(r => setTimeout(r, 1200));
+      newDraftId = await findExistingDraftId(apiBase, sid, masterArticleId);
+      reusedExistingDraft = !!newDraftId && !!createError;
+    }
+    if (!newDraftId && createError) return { success: false, error: `Could not create new draft version: ${createError.message}` };
   }
   if (!newDraftId) return { success: false, error: 'No draft ID returned from new-version creation.' };
 
@@ -249,7 +247,7 @@ async function patchArticleSavingContent(apiBase, sid, recordId, updates) {
     return { ok: true, ptCleared: false };
   } catch (e) {
     const msg = e?.message || '';
-    const isStalePtFilter = /FIELD_FILTER_VALIDATION_EXCEPTION/i.test(msg) && /Product_And_Topic__c/i.test(msg);
+    const isStalePtFilter = isStalePtError(msg);
     if (!isStalePtFilter) return { ok: false, error: msg || 'Update failed.' };
 
     try {
