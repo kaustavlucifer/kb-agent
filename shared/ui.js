@@ -122,9 +122,6 @@ export function modal(title, contentEl, opts = {}) {
     )
   );
   backdrop.appendChild(box);
-  let pressedOnBackdrop = false;
-  backdrop.addEventListener('mousedown', e => { pressedOnBackdrop = e.target === backdrop; });
-  backdrop.addEventListener('click', e => { if (pressedOnBackdrop && e.target === backdrop) close(); pressedOnBackdrop = false; });
   document.body.appendChild(backdrop);
 
   const instance = { close, backdrop, box };

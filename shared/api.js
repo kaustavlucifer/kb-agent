@@ -1,4 +1,4 @@
-import { SF_API_VERSION, MAX_REWRITE_IMAGES_PER_ARTICLE, MAX_IMAGE_FETCH_BYTES, SUPPORTED_IMAGE_MEDIA_TYPES } from './config.js';
+import { SF_API_VERSION, MAX_REWRITE_IMAGES_PER_ARTICLE, MAX_IMAGE_FETCH_BYTES } from './config.js';
 
 export const ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
@@ -177,6 +177,14 @@ function isSessionOrgHost(src, session) {
   }
 }
 
+function sniffImageMediaType(b) {
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  return null;
+}
+
 async function fetchImageAsBase64(src, session, signal) {
   const trusted = isSessionOrgHost(src, session);
   let resp = null;
@@ -194,12 +202,12 @@ async function fetchImageAsBase64(src, session, signal) {
   }
   if (!resp.ok) return null;
   try {
-    const mediaType = (resp.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    if (!SUPPORTED_IMAGE_MEDIA_TYPES.includes(mediaType)) return null;
     const contentLength = Number(resp.headers.get('content-length') || 0);
     if (contentLength > MAX_IMAGE_FETCH_BYTES) return null;
     const buf = await resp.arrayBuffer();
     if (buf.byteLength > MAX_IMAGE_FETCH_BYTES) return null;
+    const mediaType = sniffImageMediaType(new Uint8Array(buf, 0, Math.min(buf.byteLength, 12)));
+    if (!mediaType) return null;
     return { mediaType, data: arrayBufferToBase64(buf) };
   } catch {
     return null;

@@ -128,7 +128,11 @@ When scoring or rewriting a KB article, the tool also reads that article's own C
 
 ## Changelog
 
-### v2.26.1 (current)
+### v2.26.2 (current)
+- Popups (Rewrite, Merge, Compare, KI view, confirmations) no longer close when clicking outside them; use the × or Close button (Escape still closes the top popup)
+- Fixed rewrites failing with "Gateway 400 … image was specified using the image/jpeg media type" when an article image is served with the wrong Content-Type; the image type is now detected from the file bytes, and unsupported files are skipped
+
+### v2.26.1
 - Fixed header connection chips, ↻ and update button not appearing when reopening the popup with unchanged connection status (v2.26.0 regression)
 - Fixed a popup freeze on Windows (CRLF) line endings in markdown (e.g. case descriptions); one markdown renderer now (images render instead of "undefined"); mixed nested lists, list numbering, continuation lines, and inline spacing survive editing
 - Connection checks: transient errors are no longer cached as "expired"; rechecks resume when returning to the tab; OrgCS drives polling (GUS/KI optional); AI token check cached and not polled; timeouts on all connection checks
